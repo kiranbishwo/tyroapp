@@ -1,0 +1,8 @@
+{
+  "name": "Tempo - AI Time & Attendance",
+  "description": "A compact desktop-style time tracker with face attendance, screen logging, and AI productivity insights.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
