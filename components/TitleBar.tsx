@@ -86,13 +86,13 @@ export const TitleBar: React.FC = () => {
 
   return (
     <div 
-      className="h-8 bg-gray-800 flex items-center justify-between px-2 select-none border-b border-gray-700 z-50 relative"
+      className="h-8 bg-gray-800 flex items-center justify-between px-2 select-none border-b border-gray-700 z-50 sticky top-0"
       style={isElectron ? ({ WebkitAppRegion: 'drag' } as React.CSSProperties) : {}}
     >
       {/* Brand Name */}
       <div className="flex items-center gap-2 px-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <img 
-          src="./logo.png" 
+          src="/logo.png" 
           alt="Tyrodesk Logo" 
           className="h-5 w-5 object-contain"
           onError={(e) => {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, nativeImage, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, nativeImage, globalShortcut, Tray, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -115,17 +115,37 @@ Write-Output $result`;
 };
 
 let mainWindow;
+let tray = null;
 let activityMonitoringInterval = null;
 let keystrokeCount = 0;
 let lastActiveWindow = null;
+let isQuitting = false;
 
 function createWindow() {
+  // Get the logo path for the app icon
+  // Try multiple possible paths for dev and production
+  const possiblePaths = [
+    path.join(__dirname, '../public/logo.png'), // Dev mode
+    path.join(__dirname, '../dist/logo.png'), // Production (Vite copies public to dist)
+    path.join(process.cwd(), 'public/logo.png'), // Alternative dev path
+    path.join(process.cwd(), 'dist/logo.png') // Alternative production path
+  ];
+  
+  let iconPath = undefined;
+  for (const logoPath of possiblePaths) {
+    if (fs.existsSync(logoPath)) {
+      iconPath = logoPath;
+      break;
+    }
+  }
+
   mainWindow = new BrowserWindow({
     width: 400,
     height: 800,
     frame: false, // Remove default title bar
     titleBarStyle: 'hidden',
     backgroundColor: '#000000',
+    icon: iconPath, // Set app icon
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -164,6 +184,38 @@ function createWindow() {
     }
   });
 
+  // Prevent window from closing - hide to tray instead
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+      
+      // Show notification on Windows/Linux
+      if (process.platform !== 'darwin' && tray) {
+        // Get icon path for notification
+        const possiblePaths = [
+          path.join(__dirname, '../public/logo.png'),
+          path.join(__dirname, '../dist/logo.png'),
+          path.join(process.cwd(), 'public/logo.png'),
+          path.join(process.cwd(), 'dist/logo.png')
+        ];
+        let notificationIcon = undefined;
+        for (const logoPath of possiblePaths) {
+          if (fs.existsSync(logoPath)) {
+            notificationIcon = logoPath;
+            break;
+          }
+        }
+        
+        tray.displayBalloon({
+          title: 'Tyrodesk',
+          content: 'App is still running in the system tray. Click the tray icon to show the window.',
+          icon: notificationIcon
+        });
+      }
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -185,7 +237,10 @@ ipcMain.handle('window-maximize', () => {
 });
 
 ipcMain.handle('window-close', () => {
-  if (mainWindow) mainWindow.close();
+  if (mainWindow) {
+    // Hide to tray instead of closing
+    mainWindow.hide();
+  }
 });
 
 ipcMain.handle('window-is-maximized', () => {
@@ -463,20 +518,143 @@ ipcMain.handle('stop-activity-monitoring', () => {
   return true;
 });
 
+// Create system tray
+function createTray() {
+  // Get the logo path for the tray icon
+  const possiblePaths = [
+    path.join(__dirname, '../public/logo.png'), // Dev mode
+    path.join(__dirname, '../dist/logo.png'), // Production
+    path.join(process.cwd(), 'public/logo.png'), // Alternative dev path
+    path.join(process.cwd(), 'dist/logo.png') // Alternative production path
+  ];
+  
+  let iconPath = undefined;
+  for (const logoPath of possiblePaths) {
+    if (fs.existsSync(logoPath)) {
+      iconPath = logoPath;
+      break;
+    }
+  }
+
+  if (!iconPath) {
+    console.warn('Logo not found for tray icon');
+    return;
+  }
+
+  // Create tray icon (resize to 16x16 for better tray display)
+  const trayIcon = nativeImage.createFromPath(iconPath);
+  const resizedIcon = trayIcon.resize({ width: 16, height: 16 });
+  
+  tray = new Tray(resizedIcon);
+  
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Show Tyrodesk',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        } else {
+          createWindow();
+        }
+      }
+    },
+    {
+      label: 'Hide',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.hide();
+        }
+      },
+      visible: false // Will be shown when window is visible
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+  
+  tray.setToolTip('Tyrodesk - Workforce Management');
+  tray.setContextMenu(contextMenu);
+  
+  // Double-click to show/hide window
+  tray.on('double-click', () => {
+    if (mainWindow) {
+      if (mainWindow.isVisible()) {
+        mainWindow.hide();
+      } else {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    } else {
+      createWindow();
+    }
+  });
+  
+  // Function to rebuild menu with correct visibility
+  const rebuildTrayMenu = () => {
+    const isWindowVisible = mainWindow && mainWindow.isVisible();
+    const newMenu = Menu.buildFromTemplate([
+      {
+        label: isWindowVisible ? 'Hide' : 'Show Tyrodesk',
+        click: () => {
+          if (mainWindow) {
+            if (isWindowVisible) {
+              mainWindow.hide();
+            } else {
+              mainWindow.show();
+              mainWindow.focus();
+            }
+          } else {
+            createWindow();
+          }
+        }
+      },
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        }
+      }
+    ]);
+    tray.setContextMenu(newMenu);
+  };
+  
+  // Update menu when window visibility changes (attach after window is created)
+  setTimeout(() => {
+    if (mainWindow) {
+      mainWindow.on('show', rebuildTrayMenu);
+      mainWindow.on('hide', rebuildTrayMenu);
+    }
+  }, 100);
+}
+
 // This method will be called when Electron has finished initialization
 app.whenReady().then(() => {
   createWindow();
+  createTray();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+    } else if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
     }
   });
 });
 
-// Quit when all windows are closed
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+// Prevent app from quitting when all windows are closed (keep running in tray)
+app.on('window-all-closed', (event) => {
+  // Don't quit - keep running in tray
+  // Only quit if explicitly requested via tray menu
+  if (isQuitting) {
     app.quit();
   }
 });
