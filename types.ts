@@ -45,6 +45,7 @@ export interface ActivityLog {
     mouseEvents: number;
     productivityScore: number; // 0-100
     activeWindow: string; // "VS Code", "Chrome", etc.
+    activeUrl?: string; // Current URL if browser window
     screenshotUrl?: string;
     webcamUrl?: string;
 }
@@ -54,4 +55,9 @@ export interface AppUsage {
     percentage: number;
     icon: string;
     color: string;
+    keystrokes?: number;
+    clicks?: number;
+    timeSpent?: number;
+    urls?: Array<{ url: string; timestamp: Date; count: number }>;
+    isActive?: boolean; // Is this app currently active?
 }

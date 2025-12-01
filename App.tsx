@@ -3,7 +3,28 @@ import { User, AppView, Project, TimeEntry } from './types';
 import { FaceAttendance } from './components/FaceAttendance';
 import { ScreenLogger } from './components/ScreenLogger';
 import { InsightsDashboard } from './components/InsightsDashboard';
+import { TitleBar } from './components/TitleBar';
 import { useSurveillance } from './hooks/useSurveillance';
+
+// Extend Window interface for Electron API
+declare global {
+    interface Window {
+        electronAPI?: {
+            windowMinimize: () => Promise<void>;
+            windowMaximize: () => Promise<void>;
+            windowClose: () => Promise<void>;
+            windowIsMaximized: () => Promise<boolean>;
+            captureScreenshot: () => Promise<string | null>;
+            getActiveWindow: () => Promise<{ title: string; owner: string; url: string | null; app: string }>;
+            startActivityMonitoring: () => Promise<boolean>;
+            stopActivityMonitoring: () => Promise<boolean>;
+            onActivityUpdate: (callback: (data: any) => void) => void;
+            removeActivityListener: () => void;
+            processActivity: (input: any) => Promise<any>;
+            getActivityInsights: (timeWindow?: any) => Promise<any>;
+        };
+    }
+}
 
 // Mock Data
 const MOCK_PROJECTS: Project[] = [
@@ -38,13 +59,10 @@ const App: React.FC = () => {
     // Surveillance Hook
     const { 
         cameraStream, 
-        screenStream, 
         activityLogs, 
         setActivityLogs,
         startCamera, 
-        stopCamera,
-        startScreenShare, 
-        stopScreenShare 
+        stopCamera
     } = useSurveillance({ 
         isTimerRunning, 
         currentProjectId: selectedProjectId 
@@ -55,7 +73,6 @@ const App: React.FC = () => {
     // Hidden Refs for Background Capture
     // Note: We use opacity: 0 instead of display: none to ensure the browser processes video frames
     const hiddenCamVideoRef = useRef<HTMLVideoElement>(null);
-    const hiddenScreenVideoRef = useRef<HTMLVideoElement>(null);
     const hiddenCanvasRef = useRef<HTMLCanvasElement>(null);
 
     // Initial Login Simulation
@@ -71,11 +88,6 @@ const App: React.FC = () => {
         }
     }, [cameraStream]);
 
-    useEffect(() => {
-        if (hiddenScreenVideoRef.current && screenStream) {
-            hiddenScreenVideoRef.current.srcObject = screenStream;
-        }
-    }, [screenStream]);
 
     // Timer Logic
     useEffect(() => {
@@ -98,64 +110,144 @@ const App: React.FC = () => {
     // Background Capture Logic (Sync with Activity Log creation)
     // We observe the activity logs array. When a new log is added (by useSurveillance),
     // we try to append screenshots to it using the hidden video refs.
+    // Camera is opened only when needed for capture, then closed immediately after.
     useEffect(() => {
-        if (activityLogs.length > 0) {
+        if (activityLogs.length > 0 && isTimerRunning) {
             const latestLog = activityLogs[0];
-            // Only update if it doesn't have images yet and happened just now (<1s)
-            const isFresh = (new Date().getTime() - latestLog.timestamp.getTime()) < 1500;
+            // Only update if it doesn't have images yet and happened recently (<10s to allow for async operations)
+            const isFresh = (new Date().getTime() - latestLog.timestamp.getTime()) < 10000;
             
-            if (isFresh && !latestLog.screenshotUrl && !latestLog.webcamUrl) {
-                const canvas = hiddenCanvasRef.current;
-                
-                let camUrl = undefined;
-                let screenUrl = undefined;
-
-                if (canvas) {
-                    // Capture Cam
-                    if (hiddenCamVideoRef.current && cameraStream && cameraStream.active) {
-                         const v = hiddenCamVideoRef.current;
-                         // Check if video is playing/ready
-                         if (v.readyState === 4) {
-                            canvas.width = 320; // Thumbnail size
-                            canvas.height = 240;
-                            const ctx = canvas.getContext('2d');
-                            if (ctx) {
-                                ctx.drawImage(v, 0, 0, 320, 240);
-                                camUrl = canvas.toDataURL('image/jpeg', 0.5);
-                            }
-                         }
+            // Always try to capture if missing screenshot OR webcam photo
+            if (isFresh && (!latestLog.screenshotUrl || !latestLog.webcamUrl)) {
+                // Open camera temporarily for capture
+                const captureWithCamera = async () => {
+                    const canvas = hiddenCanvasRef.current;
+                    if (!canvas) {
+                        console.error('Canvas not available for capture');
+                        return;
                     }
 
-                    // Capture Screen
-                    if (hiddenScreenVideoRef.current && screenStream && screenStream.active) {
-                        const v = hiddenScreenVideoRef.current;
-                        if (v.readyState === 4) {
-                            canvas.width = 480; // Thumbnail size
-                            canvas.height = 270;
-                            const ctx = canvas.getContext('2d');
-                            if (ctx) {
-                                ctx.drawImage(v, 0, 0, 480, 270);
-                                screenUrl = canvas.toDataURL('image/jpeg', 0.5);
+                    let camUrl = undefined;
+                    let screenUrl = undefined;
+
+                    // Capture Screen using Electron API (no screen share needed) - ALWAYS TRY
+                    if (window.electronAPI?.captureScreenshot) {
+                        try {
+                            console.log('Attempting to capture screenshot...');
+                            screenUrl = await window.electronAPI.captureScreenshot();
+                            if (screenUrl && screenUrl.length > 100) { // Ensure it's a valid image
+                                console.log('Screenshot captured successfully, length:', screenUrl.length);
+                            } else {
+                                console.warn('Screenshot capture returned invalid data, length:', screenUrl?.length || 0);
+                                // Retry once
+                                await new Promise(resolve => setTimeout(resolve, 500));
+                                screenUrl = await window.electronAPI.captureScreenshot();
+                                if (screenUrl && screenUrl.length > 100) {
+                                    console.log('Screenshot captured on retry');
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Screenshot capture failed:', error);
+                            // Try one more time
+                            try {
+                                await new Promise(resolve => setTimeout(resolve, 1000));
+                                screenUrl = await window.electronAPI.captureScreenshot();
+                            } catch (retryError) {
+                                console.error('Screenshot retry also failed:', retryError);
                             }
                         }
+                    } else {
+                        console.warn('Electron API not available for screenshot');
                     }
-                }
 
-                if (camUrl || screenUrl) {
-                    // Update the log entry with images
+                    // Open camera only when needed, capture, then close
+                    if (!cameraStream) {
+                        const tempStream = await startCamera();
+                        if (tempStream && hiddenCamVideoRef.current) {
+                            hiddenCamVideoRef.current.srcObject = tempStream;
+                            // Wait for video to be ready (longer wait for camera initialization)
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            
+                            const v = hiddenCamVideoRef.current;
+                            // Wait for video to have actual video dimensions
+                            let attempts = 0;
+                            while ((v.videoWidth === 0 || v.videoHeight === 0) && attempts < 10) {
+                                await new Promise(resolve => setTimeout(resolve, 100));
+                                attempts++;
+                            }
+                            
+                            if (v.videoWidth > 0 && v.videoHeight > 0) {
+                                canvas.width = v.videoWidth;
+                                canvas.height = v.videoHeight;
+                                const ctx = canvas.getContext('2d');
+                                if (ctx) {
+                                    ctx.drawImage(v, 0, 0, v.videoWidth, v.videoHeight);
+                                    camUrl = canvas.toDataURL('image/jpeg', 0.7);
+                                    console.log('Camera photo captured:', camUrl ? 'Success' : 'Failed');
+                                }
+                            } else {
+                                console.warn('Camera video not ready, dimensions:', v.videoWidth, v.videoHeight);
+                            }
+                            
+                            // Close camera immediately after capture
+                            stopCamera();
+                        } else {
+                            console.warn('Failed to start camera for capture');
+                        }
+                    } else {
+                        // Camera already open, just capture
+                        if (hiddenCamVideoRef.current) {
+                            const v = hiddenCamVideoRef.current;
+                            if (v.videoWidth > 0 && v.videoHeight > 0) {
+                                canvas.width = v.videoWidth;
+                                canvas.height = v.videoHeight;
+                                const ctx = canvas.getContext('2d');
+                                if (ctx) {
+                                    ctx.drawImage(v, 0, 0, v.videoWidth, v.videoHeight);
+                                    camUrl = canvas.toDataURL('image/jpeg', 0.7);
+                                    console.log('Camera photo captured (existing stream):', camUrl ? 'Success' : 'Failed');
+                                }
+                            }
+                            // Close camera after capture
+                            stopCamera();
+                        }
+                    }
+
+                    // Update the log entry with images (always update, even if only one is captured)
+                    console.log('Capture results:', { 
+                        hasScreenshot: !!screenUrl, 
+                        hasWebcam: !!camUrl,
+                        logId: latestLog.id,
+                        screenshotLength: screenUrl?.length || 0
+                    });
+                    
                     setActivityLogs(prev => {
                         const newLogs = [...prev];
-                        // Ensure we are updating the correct log (the first one)
-                        if (newLogs[0].id === latestLog.id) {
-                             newLogs[0] = { ...newLogs[0], webcamUrl: camUrl, screenshotUrl: screenUrl };
+                        const logIndex = newLogs.findIndex(log => log.id === latestLog.id);
+                        if (logIndex !== -1) {
+                            newLogs[logIndex] = { 
+                                ...newLogs[logIndex], 
+                                webcamUrl: camUrl || newLogs[logIndex].webcamUrl, 
+                                screenshotUrl: screenUrl || newLogs[logIndex].screenshotUrl 
+                            };
+                            console.log('Log updated with images:', {
+                                hasScreenshot: !!newLogs[logIndex].screenshotUrl,
+                                hasWebcam: !!newLogs[logIndex].webcamUrl
+                            });
                         }
                         return newLogs;
                     });
-                }
+                    
+                    if (!camUrl && !screenUrl) {
+                        console.warn('No images captured for log:', latestLog.id);
+                    }
+                };
+
+                captureWithCamera();
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activityLogs.length]); // Triggers when useSurveillance adds a new log
+    }, [activityLogs.length, isTimerRunning]); // Triggers when useSurveillance adds a new log
 
     const formatTime = (totalSeconds: number) => {
         const h = Math.floor(totalSeconds / 3600);
@@ -184,19 +276,8 @@ const App: React.FC = () => {
             setStartTime(null);
             setElapsedSeconds(0);
             setDescription('');
-            
-            // Stop screen share when timer stops to respect privacy
-            stopScreenShare();
         } else {
-            // Start Timer
-            // Ask for screen share permission for monitoring
-            if (!screenStream) {
-                const stream = await startScreenShare();
-                if (!stream) {
-                    alert("Screen monitoring is required to start the timer.");
-                    return;
-                }
-            }
+            // Start Timer (no screen share needed)
             setStartTime(Date.now());
             setIsTimerRunning(true);
         }
@@ -209,12 +290,12 @@ const App: React.FC = () => {
             // Check Out
             setUser({ ...user, isCheckedIn: false, checkInTime: undefined });
             stopCamera(); // Turn off camera
-            stopScreenShare();
             setView(AppView.LOGIN);
         } else {
             // Check In
             setUser({ ...user, isCheckedIn: true, checkInTime: new Date() });
-            // Keep camera running for background snaps
+            // Don't keep camera running - we'll open it only when needed for captures
+            stopCamera();
             setView(AppView.DASHBOARD);
         }
     };
@@ -226,21 +307,22 @@ const App: React.FC = () => {
     const hiddenElements = (
         <div style={{ position: 'fixed', top: 0, left: 0, opacity: 0, pointerEvents: 'none', zIndex: -1 }}>
             <video ref={hiddenCamVideoRef} autoPlay playsInline muted width="320" height="240" />
-            <video ref={hiddenScreenVideoRef} autoPlay playsInline muted width="480" height="270" />
             <canvas ref={hiddenCanvasRef} />
         </div>
     );
 
     if (view === AppView.LOGIN) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-gray-950 p-4 font-sans">
-                {hiddenElements}
-                <div className="w-full max-w-[400px] bg-gray-900 rounded-2xl shadow-2xl p-8 border border-gray-800">
+            <div className="min-h-screen flex flex-col bg-gray-950 font-sans">
+                <TitleBar />
+                <div className="flex-1 flex items-center justify-center p-4">
+                    {hiddenElements}
+                    <div className="w-full max-w-[400px] bg-gray-900 rounded-2xl shadow-2xl p-8 border border-gray-800">
                     <div className="text-center mb-8">
                         <div className="w-16 h-16 bg-blue-600 rounded-xl mx-auto flex items-center justify-center mb-4 shadow-lg shadow-blue-500/30">
                             <i className="fas fa-bolt text-2xl text-white"></i>
                         </div>
-                        <h1 className="text-2xl font-bold text-white tracking-tight">Tempo</h1>
+                        <h1 className="text-2xl font-bold text-white tracking-tight">Tyrodesk</h1>
                         <p className="text-gray-400 text-sm">Workforce Management</p>
                     </div>
                     <form onSubmit={(e) => { e.preventDefault(); handleLogin((e.target as any).email.value); }}>
@@ -265,6 +347,7 @@ const App: React.FC = () => {
                             Log In
                         </button>
                     </form>
+                    </div>
                 </div>
             </div>
         );
@@ -272,9 +355,11 @@ const App: React.FC = () => {
 
     if (view === AppView.CHECK_IN_OUT) {
         return (
-            <div className="min-h-screen bg-gray-950 flex justify-center font-sans">
-                {hiddenElements}
-                <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden relative border-x border-gray-800">
+            <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
+                <TitleBar />
+                <div className="flex-1 flex justify-center">
+                    {hiddenElements}
+                    <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden relative border-x border-gray-800">
                     <FaceAttendance 
                         mode={user?.isCheckedIn ? 'CHECK_OUT' : 'CHECK_IN'}
                         existingStream={cameraStream}
@@ -282,6 +367,7 @@ const App: React.FC = () => {
                         onStreamRequest={async () => { await startCamera(); }}
                         onCancel={() => user?.isCheckedIn ? setView(AppView.DASHBOARD) : setView(AppView.LOGIN)}
                     />
+                    </div>
                 </div>
             </div>
         );
@@ -289,14 +375,17 @@ const App: React.FC = () => {
 
     if (view === AppView.INSIGHTS) {
         return (
-            <div className="min-h-screen bg-gray-950 flex justify-center font-sans">
-                {hiddenElements}
-                <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden flex flex-col h-screen border-x border-gray-800">
+            <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
+                <TitleBar />
+                <div className="flex-1 flex justify-center">
+                    {hiddenElements}
+                    <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden flex flex-col border-x border-gray-800">
                     <InsightsDashboard 
                         logs={activityLogs}
                         projects={projects}
                         onClose={() => setView(AppView.DASHBOARD)}
                     />
+                    </div>
                 </div>
             </div>
         );
@@ -304,13 +393,16 @@ const App: React.FC = () => {
 
     if (view === AppView.SCREENCAST) {
         return (
-            <div className="min-h-screen bg-gray-950 flex justify-center font-sans">
-                {hiddenElements}
-                <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden flex flex-col h-screen border-x border-gray-800">
+            <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
+                <TitleBar />
+                <div className="flex-1 flex justify-center">
+                    {hiddenElements}
+                    <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden flex flex-col border-x border-gray-800">
                     <ScreenLogger 
                         onClose={() => setView(AppView.DASHBOARD)}
                         onCapture={(shot) => console.log(shot)}
                     />
+                    </div>
                 </div>
             </div>
         );
@@ -318,9 +410,11 @@ const App: React.FC = () => {
 
     // DASHBOARD VIEW
     return (
-        <div className="min-h-screen bg-gray-950 flex justify-center font-sans">
-            {hiddenElements}
-            <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl flex flex-col h-screen overflow-hidden border-x border-gray-800 relative">
+        <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
+            <TitleBar />
+            <div className="flex-1 flex justify-center">
+                {hiddenElements}
+                <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl flex flex-col overflow-hidden border-x border-gray-800 relative">
                 
                 {/* Header */}
                 <header className="bg-gray-800 p-4 flex justify-between items-center shadow-md z-10">
@@ -427,6 +521,7 @@ const App: React.FC = () => {
                     </div>
 
                 </main>
+                </div>
             </div>
         </div>
     );

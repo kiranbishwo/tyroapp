@@ -2,16 +2,16 @@
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
-# Tempo - AI Time & Attendance Tracker
+# Tempo - Time & Attendance Tracker
 
-A modern workforce management application with AI-powered productivity insights, face recognition attendance, and real-time activity monitoring.
+A modern desktop workforce management application with face recognition attendance and real-time activity monitoring.
 
 ## 🚀 Features
 
+- **Desktop App**: Native desktop application built with Electron (frameless window)
 - **Face Recognition Attendance**: Check in/out using facial recognition
 - **Time Tracking**: Track work time with project categorization
 - **Screen Monitoring**: Automatic activity logging with screenshots
-- **AI Productivity Insights**: Get AI-generated summaries of your workday using Google Gemini
 - **Real-time Activity Logs**: Monitor keyboard/mouse activity and active windows
 - **Modern UI**: Beautiful, responsive dark-themed interface
 
@@ -24,8 +24,6 @@ Before you begin, ensure you have the following installed:
   - Verify installation: `node --version`
 - **npm** (comes with Node.js)
   - Verify installation: `npm --version`
-- **Google Gemini API Key** (for AI features)
-  - Get your API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
 
 ## 🛠️ Setup Instructions
 
@@ -44,45 +42,43 @@ This will install all required packages:
 - @google/genai (Google Gemini AI SDK)
 - And other development dependencies
 
-### Step 2: Configure Environment Variables
-
-1. Create a `.env.local` file in the root directory of the project:
-
-```bash
-# Windows (PowerShell)
-New-Item .env.local
-
-# Windows (CMD)
-type nul > .env.local
-
-# Mac/Linux
-touch .env.local
-```
-
-2. Add your Gemini API key to the `.env.local` file:
-
-```
-GEMINI_API_KEY=your_api_key_here
-```
-
-**Important Notes:**
-- Replace `your_api_key_here` with your actual Gemini API key
-- The `.env.local` file is already in `.gitignore`, so it won't be committed to version control
-- Never share your API key publicly
-
-### Step 3: Verify Setup
+### Step 2: Verify Setup
 
 Check that your project structure looks correct:
 - `package.json` exists
 - `vite.config.ts` exists
-- `.env.local` exists with your API key
+- `electron/main.cjs` exists
 - `node_modules` folder exists (created after `npm install`)
 
 ## ▶️ Running the Application
 
-### Development Mode
+### Desktop App (Electron) - Recommended
 
-Start the development server:
+**Development Mode:**
+```bash
+npm run electron:dev
+```
+
+This will:
+- Start the Vite dev server
+- Launch the Electron desktop app with a frameless window
+- Open DevTools automatically for debugging
+
+**Build for Production:**
+```bash
+npm run electron:build
+```
+
+This creates a distributable desktop application in the `release` folder.
+
+**Package without installer:**
+```bash
+npm run electron:pack
+```
+
+### Web Development Mode
+
+Start the web development server:
 
 ```bash
 npm run dev
@@ -92,7 +88,7 @@ The application will start on:
 - **Local**: http://localhost:3000
 - **Network**: http://0.0.0.0:3000 (accessible from other devices on your network)
 
-### Build for Production
+### Build for Production (Web)
 
 To create a production build:
 
@@ -102,7 +98,7 @@ npm run build
 
 The built files will be in the `dist` folder.
 
-### Preview Production Build
+### Preview Production Build (Web)
 
 To preview the production build locally:
 
@@ -147,8 +143,9 @@ tyro-app/
 │   └── ScreenLogger.tsx
 ├── hooks/              # Custom React hooks
 │   └── useSurveillance.ts
-├── services/           # API services
-│   └── gemini.ts      # Google Gemini AI integration
+├── electron/          # Electron desktop app files
+│   ├── main.cjs      # Main Electron process
+│   └── preload.cjs   # Preload script for security
 ├── App.tsx            # Main application component
 ├── index.tsx          # Application entry point
 ├── index.html         # HTML template
@@ -169,11 +166,6 @@ server: {
 }
 ```
 
-### API Key Not Working
-- Verify your API key is correct in `.env.local`
-- Ensure the file is named exactly `.env.local` (not `.env` or `.env.local.txt`)
-- Restart the development server after adding/changing the API key
-- Check that your Gemini API key has proper permissions
 
 ### Camera/Screen Permissions
 - The app requires camera access for face recognition
@@ -198,16 +190,18 @@ npm run dev
 
 ## 📦 Available Scripts
 
-- `npm run dev` - Start development server
-- `npm run build` - Build for production
-- `npm run preview` - Preview production build
+- `npm run dev` - Start web development server
+- `npm run build` - Build for production (web)
+- `npm run preview` - Preview production build (web)
+- `npm run electron:dev` - Start Electron app in development mode
+- `npm run electron:build` - Build Electron app for distribution
+- `npm run electron:pack` - Package Electron app without installer
 
 ## 🔐 Security Notes
 
-- Never commit `.env.local` to version control
-- Keep your API keys secure
-- The app uses local storage and browser APIs - no data is sent to external servers except for Gemini API calls
+- The app uses local storage and browser APIs - no data is sent to external servers
 - Screen sharing and camera access are only active when explicitly enabled by the user
+- Electron app runs with context isolation enabled for security
 
 ## 🌐 Browser Compatibility
 
