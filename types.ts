@@ -23,16 +23,26 @@ export interface User {
     checkInTime?: Date;
 }
 
+export interface Task {
+    id: string;
+    name: string;
+    projectId: string;
+    completed: boolean;
+    description?: string;
+}
+
 export interface Project {
     id: string;
     name: string;
     color: string;
+    tasks?: Task[];
 }
 
 export interface TimeEntry {
     id: string;
     description: string;
     projectId: string;
+    taskId?: string;
     startTime: Date;
     endTime?: Date;
     duration: number; // in seconds

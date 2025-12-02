@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { User, AppView, Project, TimeEntry, Settings, ActivityLog } from './types';
+import { User, AppView, Project, TimeEntry, Settings, ActivityLog, Task } from './types';
 import { FaceAttendance } from './components/FaceAttendance';
 import { ScreenLogger } from './components/ScreenLogger';
 import { InsightsDashboard } from './components/InsightsDashboard';
@@ -13,12 +13,54 @@ import { applyBlurWithIntensity } from './utils/imageBlur';
 
 // Electron API types are defined in types/electron.d.ts
 
-// Mock Data
+// Mock Data with Projects and Tasks
+const MOCK_TASKS: Task[] = [
+    // Web Development tasks
+    { id: 't1', name: 'Fix login bug', projectId: '1', completed: false, description: 'Fix authentication issue on login page' },
+    { id: 't2', name: 'Implement dark mode', projectId: '1', completed: false, description: 'Add dark theme toggle' },
+    { id: 't3', name: 'Optimize database queries', projectId: '1', completed: false, description: 'Improve query performance' },
+    { id: 't4', name: 'Write unit tests', projectId: '1', completed: true, description: 'Add test coverage' },
+    
+    // Internal Audit tasks
+    { id: 't5', name: 'Review Q4 financials', projectId: '2', completed: false, description: 'Audit quarterly financial statements' },
+    { id: 't6', name: 'Compliance check', projectId: '2', completed: false, description: 'Verify regulatory compliance' },
+    { id: 't7', name: 'Risk assessment', projectId: '2', completed: false, description: 'Evaluate potential risks' },
+    
+    // UI/UX Design tasks
+    { id: 't8', name: 'Design dashboard mockup', projectId: '3', completed: false, description: 'Create new dashboard design' },
+    { id: 't9', name: 'User flow diagrams', projectId: '3', completed: false, description: 'Map user journey' },
+    { id: 't10', name: 'Prototype mobile app', projectId: '3', completed: true, description: 'Mobile app wireframes' },
+    
+    // Meeting tasks
+    { id: 't11', name: 'Team standup', projectId: '4', completed: false, description: 'Daily team sync' },
+    { id: 't12', name: 'Client presentation', projectId: '4', completed: false, description: 'Present project progress' },
+];
+
 const MOCK_PROJECTS: Project[] = [
-    { id: '1', name: 'Web Development', color: '#60A5FA' },
-    { id: '2', name: 'Internal Audit', color: '#F472B6' },
-    { id: '3', name: 'UI/UX Design', color: '#34D399' },
-    { id: '4', name: 'Meeting', color: '#FBBF24' },
+    { 
+        id: '1', 
+        name: 'Web Development', 
+        color: '#60A5FA',
+        tasks: MOCK_TASKS.filter(t => t.projectId === '1')
+    },
+    { 
+        id: '2', 
+        name: 'Internal Audit', 
+        color: '#F472B6',
+        tasks: MOCK_TASKS.filter(t => t.projectId === '2')
+    },
+    { 
+        id: '3', 
+        name: 'UI/UX Design', 
+        color: '#34D399',
+        tasks: MOCK_TASKS.filter(t => t.projectId === '3')
+    },
+    { 
+        id: '4', 
+        name: 'Meeting', 
+        color: '#FBBF24',
+        tasks: MOCK_TASKS.filter(t => t.projectId === '4')
+    },
 ];
 
 const INITIAL_USER: User = {
@@ -46,6 +88,10 @@ const App: React.FC = () => {
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
     const [description, setDescription] = useState('');
     const [selectedProjectId, setSelectedProjectId] = useState<string>('');
+    const [selectedTaskId, setSelectedTaskId] = useState<string>('');
+    const [showTaskSelection, setShowTaskSelection] = useState(false);
+    // Track accumulated time per task (taskId -> total seconds)
+    const [taskAccumulatedTime, setTaskAccumulatedTime] = useState<Record<string, number>>({});
     
     // Settings state for screenshot blur
     const [settings, setSettings] = useState<Settings | null>(null);
@@ -70,6 +116,31 @@ const App: React.FC = () => {
     // Note: We use opacity: 0 instead of display: none to ensure the browser processes video frames
     const hiddenCamVideoRef = useRef<HTMLVideoElement>(null);
     const hiddenCanvasRef = useRef<HTMLCanvasElement>(null);
+
+    // Initialize accumulated time from existing time entries
+    useEffect(() => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const todayEntries = timeEntries.filter(e => e.startTime >= today);
+        
+        const accumulated: Record<string, number> = {};
+        todayEntries.forEach(entry => {
+            if (entry.taskId) {
+                if (!accumulated[entry.taskId]) {
+                    accumulated[entry.taskId] = 0;
+                }
+                accumulated[entry.taskId] += entry.duration;
+            }
+        });
+        
+        setTaskAccumulatedTime(prev => {
+            // Merge with existing, but don't overwrite if timer is running (to preserve current session)
+            if (isTimerRunning && selectedTaskId) {
+                return prev; // Keep current state when timer is running
+            }
+            return { ...prev, ...accumulated };
+        });
+    }, [timeEntries.length]); // Only recalculate when entries count changes, not on every render
 
     // Check user consent on mount
     useEffect(() => {
@@ -216,12 +287,24 @@ const App: React.FC = () => {
     }, [cameraStream]);
 
 
-    // Timer Logic
+    // Update elapsedSeconds when task is selected (when not running)
     useEffect(() => {
-        if (isTimerRunning && startTime) {
+        if (!isTimerRunning && selectedTaskId) {
+            const accumulated = taskAccumulatedTime[selectedTaskId] || 0;
+            setElapsedSeconds(accumulated);
+        } else if (!isTimerRunning && !selectedTaskId) {
+            setElapsedSeconds(0);
+        }
+    }, [selectedTaskId, isTimerRunning, taskAccumulatedTime]);
+
+    // Timer Logic - includes accumulated time
+    useEffect(() => {
+        if (isTimerRunning && startTime && selectedTaskId) {
+            const accumulated = taskAccumulatedTime[selectedTaskId] || 0;
             timerIntervalRef.current = window.setInterval(() => {
                 const now = Date.now();
-                setElapsedSeconds(Math.floor((now - startTime) / 1000));
+                const currentSessionSeconds = Math.floor((now - startTime) / 1000);
+                setElapsedSeconds(accumulated + currentSessionSeconds);
             }, 1000);
         } else {
             if (timerIntervalRef.current) {
@@ -232,7 +315,7 @@ const App: React.FC = () => {
         return () => {
             if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
         };
-    }, [isTimerRunning, startTime]);
+    }, [isTimerRunning, startTime, selectedTaskId, taskAccumulatedTime]);
 
     // Check if we're in dev mode (check for localhost or development indicators)
     const isDevMode = window.location.hostname === 'localhost' || 
@@ -817,22 +900,52 @@ const App: React.FC = () => {
             const endTime = new Date();
             const start = startTime ? new Date(startTime) : new Date();
             
+            const selectedTask = MOCK_TASKS.find(t => t.id === selectedTaskId);
+            const taskName = selectedTask?.name || description || '(No description)';
+            
+            // Calculate current session duration
+            const currentSessionDuration = startTime ? Math.floor((Date.now() - startTime) / 1000) : 0;
+            
+            // Update accumulated time for this task
+            if (selectedTaskId) {
+                const currentAccumulated = taskAccumulatedTime[selectedTaskId] || 0;
+                const newAccumulated = currentAccumulated + currentSessionDuration;
+                setTaskAccumulatedTime(prev => ({
+                    ...prev,
+                    [selectedTaskId]: newAccumulated
+                }));
+            }
+            
             const newEntry: TimeEntry = {
                 id: Date.now().toString(),
-                description: description || '(No description)',
-                projectId: selectedProjectId || '4', 
+                description: taskName,
+                projectId: selectedProjectId || '4',
+                taskId: selectedTaskId || undefined,
                 startTime: start,
                 endTime: endTime,
-                duration: elapsedSeconds
+                duration: currentSessionDuration
             };
 
             setTimeEntries([newEntry, ...timeEntries]);
             setIsTimerRunning(false);
             setStartTime(null);
-            setElapsedSeconds(0);
-            setDescription('');
+            // Keep elapsedSeconds showing the accumulated total (don't reset to 0)
+            // It will be recalculated when timer restarts
         } else {
-            // Start Timer
+            // Validate task is selected before starting
+            if (!selectedTaskId && !selectedProjectId) {
+                alert('Please select a project and task first.');
+                return;
+            }
+            
+            // Start Timer - load accumulated time for this task
+            if (selectedTaskId) {
+                const accumulated = taskAccumulatedTime[selectedTaskId] || 0;
+                setElapsedSeconds(accumulated); // Set to accumulated time
+            } else {
+                setElapsedSeconds(0);
+            }
+            
             setStartTime(Date.now());
             setIsTimerRunning(true);
             // Camera will be started only when needed for capture, not always
@@ -1084,38 +1197,326 @@ const App: React.FC = () => {
                         {/* Glow effect when running */}
                         {isTimerRunning && <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-blue-500 animate-gradient"></div>}
                         
-                        <input 
-                            type="text" 
-                            placeholder="What are you working on?" 
-                            value={description}
-                            onChange={(e) => setDescription(e.target.value)}
-                            className="w-full bg-transparent text-white placeholder-gray-500 text-sm mb-4 focus:outline-none"
-                        />
-                        <div className="flex justify-between items-center mb-4">
-                            <select 
-                                value={selectedProjectId}
-                                onChange={(e) => setSelectedProjectId(e.target.value)}
-                                className="bg-gray-900 text-blue-400 text-xs py-1 px-2 rounded border border-gray-700 focus:outline-none max-w-[120px]"
-                            >
-                                <option value="" disabled>Project</option>
-                                {projects.map(p => (
-                                    <option key={p.id} value={p.id}>{p.name}</option>
-                                ))}
-                            </select>
-                            <div className="text-3xl font-mono text-white tracking-widest font-light">
-                                {formatTime(elapsedSeconds)}
+                        {!isTimerRunning && !selectedProjectId && (
+                            /* Step 1: Project Selection with Resume Option */
+                            <div>
+                                {/* Resume Last Task Section */}
+                                {(() => {
+                                    // Get the most recent time entry with a task
+                                    const lastEntry = timeEntries.find(e => e.taskId);
+                                    const lastTask = lastEntry?.taskId ? MOCK_TASKS.find(t => t.id === lastEntry.taskId) : null;
+                                    const lastProject = lastEntry ? projects.find(p => p.id === lastEntry.projectId) : null;
+                                    
+                                    // Get unique recent tasks from today's entries
+                                    const today = new Date();
+                                    today.setHours(0, 0, 0, 0);
+                                    const recentEntries = timeEntries
+                                        .filter(e => e.startTime >= today && e.taskId)
+                                        .slice(0, 3); // Last 3 unique tasks
+                                    
+                                    const recentTasks = recentEntries
+                                        .map(e => {
+                                            const task = MOCK_TASKS.find(t => t.id === e.taskId);
+                                            const project = projects.find(p => p.id === e.projectId);
+                                            return task && project ? { task, project, entry: e } : null;
+                                        })
+                                        .filter((item): item is { task: Task; project: Project; entry: TimeEntry } => item !== null)
+                                        .reduce((acc, item) => {
+                                            // Remove duplicates, keep most recent
+                                            if (!acc.find(i => i.task.id === item.task.id)) {
+                                                acc.push(item);
+                                            }
+                                            return acc;
+                                        }, [] as { task: Task; project: Project; entry: TimeEntry }[]);
+                                    
+                                    return (
+                                        <>
+                                            {lastTask && lastProject && (
+                                                <div className="mb-4 pb-4 border-b border-gray-700">
+                                                    <h3 className="text-gray-400 text-xs font-semibold mb-2 uppercase tracking-wider">Resume</h3>
+                                                    <button
+                                                        onClick={() => {
+                                                            setSelectedProjectId(lastEntry!.projectId);
+                                                            setSelectedTaskId(lastEntry!.taskId!);
+                                                            setDescription(lastTask.name);
+                                                            setShowTaskSelection(false);
+                                                        }}
+                                                        className="w-full p-3 rounded-lg border-2 border-gray-700 hover:border-gray-600 bg-gray-900/50 hover:bg-gray-900 transition-all text-left group"
+                                                        style={{
+                                                            borderColor: lastProject.color,
+                                                            backgroundColor: `${lastProject.color}10`
+                                                        }}
+                                                    >
+                                                        <div className="flex items-center gap-2 mb-1">
+                                                            <span 
+                                                                className="w-2 h-2 rounded-full" 
+                                                                style={{ background: lastProject.color }}
+                                                            ></span>
+                                                            <span className="text-white text-xs font-medium">{lastProject.name}</span>
+                                                            <span className="text-gray-500 text-xs">•</span>
+                                                            <span className="text-gray-400 text-xs">Last worked</span>
+                                                        </div>
+                                                        <p className="text-white text-sm font-medium">{lastTask.name}</p>
+                                                        {lastTask.description && (
+                                                            <p className="text-gray-500 text-xs mt-1 line-clamp-1">{lastTask.description}</p>
+                                                        )}
+                                                        <div className="flex items-center gap-1 mt-2 text-blue-400 text-xs">
+                                                            <i className="fas fa-redo"></i>
+                                                            <span>Resume</span>
+                                                        </div>
+                                                    </button>
+                                                </div>
+                                            )}
+                                            
+                                            {recentTasks.length > 0 && (
+                                                <div className="mb-4 pb-4 border-b border-gray-700">
+                                                    <h3 className="text-gray-400 text-xs font-semibold mb-2 uppercase tracking-wider">Recent Tasks</h3>
+                                                    <div className="space-y-2">
+                                                        {recentTasks.map(({ task, project, entry }) => (
+                                                            <button
+                                                                key={task.id}
+                                                                onClick={() => {
+                                                                    setSelectedProjectId(project.id);
+                                                                    setSelectedTaskId(task.id);
+                                                                    setDescription(task.name);
+                                                                    setShowTaskSelection(false);
+                                                                }}
+                                                                className="w-full p-2.5 rounded-lg border border-gray-700 hover:border-gray-600 bg-gray-900/30 hover:bg-gray-900/50 transition-all text-left group"
+                                                                style={{
+                                                                    borderColor: selectedTaskId === task.id ? project.color : undefined,
+                                                                    backgroundColor: selectedTaskId === task.id ? `${project.color}10` : undefined
+                                                                }}
+                                                            >
+                                                                <div className="flex items-center justify-between gap-2">
+                                                                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                                                                        <span 
+                                                                            className="w-1.5 h-1.5 rounded-full flex-shrink-0" 
+                                                                            style={{ background: project.color }}
+                                                                        ></span>
+                                                                        <span className="text-gray-400 text-xs truncate">{project.name}</span>
+                                                                        <span className="text-gray-600 text-xs">•</span>
+                                                                        <span className="text-white text-xs font-medium truncate">{task.name}</span>
+                                                                    </div>
+                                                                    <i className="fas fa-chevron-right text-gray-600 text-xs group-hover:text-gray-400 flex-shrink-0"></i>
+                                                                </div>
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </>
+                                    );
+                                })()}
+                                
+                                <div className="mb-4">
+                                    <h3 className="text-white text-sm font-semibold mb-3">Select Project</h3>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        {projects.map(project => (
+                                            <button
+                                                key={project.id}
+                                                onClick={() => {
+                                                    setSelectedProjectId(project.id);
+                                                    setShowTaskSelection(true);
+                                                }}
+                                                className="p-3 rounded-lg border-2 border-gray-700 hover:border-gray-600 transition-all text-left group hover:scale-[1.02] active:scale-[0.98]"
+                                                style={{ 
+                                                    borderColor: selectedProjectId === project.id ? project.color : undefined,
+                                                    backgroundColor: selectedProjectId === project.id ? `${project.color}15` : undefined
+                                                }}
+                                            >
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <span 
+                                                        className="w-2 h-2 rounded-full" 
+                                                        style={{ background: project.color }}
+                                                    ></span>
+                                                    <span className="text-white text-xs font-medium truncate">{project.name}</span>
+                                                </div>
+                                                <span className="text-gray-500 text-[10px]">
+                                                    {project.tasks?.filter(t => !t.completed).length || 0} tasks
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
                             </div>
-                        </div>
-                        <button 
-                            onClick={toggleTimer}
-                            className={`w-full py-3 rounded-lg font-bold text-white shadow-lg transition-all active:scale-95 flex justify-center items-center gap-2 ${
-                                isTimerRunning 
-                                ? 'bg-red-500 hover:bg-red-600 shadow-red-500/20' 
-                                : 'bg-blue-600 hover:bg-blue-500 shadow-blue-500/20'
-                            }`}
-                        >
-                            {isTimerRunning ? <><i className="fas fa-stop"></i> STOP</> : <><i className="fas fa-play"></i> START</>}
-                        </button>
+                        )}
+
+                        {!isTimerRunning && selectedProjectId && showTaskSelection && (
+                            /* Step 2: Task Selection */
+                            <div>
+                                <div className="mb-4">
+                                    <div className="flex items-center justify-between mb-3">
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => {
+                                                    setSelectedProjectId('');
+                                                    setShowTaskSelection(false);
+                                                    setSelectedTaskId('');
+                                                }}
+                                                className="w-6 h-6 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center text-gray-400 hover:text-white transition-colors"
+                                            >
+                                                <i className="fas fa-arrow-left text-xs"></i>
+                                            </button>
+                                            <h3 className="text-white text-sm font-semibold">
+                                                {projects.find(p => p.id === selectedProjectId)?.name}
+                                            </h3>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-2 max-h-[200px] overflow-y-auto custom-scrollbar">
+                                        {(() => {
+                                            const selectedProject = projects.find(p => p.id === selectedProjectId);
+                                            const uncompletedTasks = selectedProject?.tasks?.filter(t => !t.completed) || [];
+                                            
+                                            if (uncompletedTasks.length === 0) {
+                                                return (
+                                                    <div className="text-center py-6 text-gray-500 text-xs">
+                                                        <i className="far fa-check-circle text-2xl mb-2 block opacity-50"></i>
+                                                        <span>All tasks completed!</span>
+                                                    </div>
+                                                );
+                                            }
+                                            
+                                            return uncompletedTasks.map(task => (
+                                                <button
+                                                    key={task.id}
+                                                    onClick={() => {
+                                                        setSelectedTaskId(task.id);
+                                                        setDescription(task.name);
+                                                        setShowTaskSelection(false);
+                                                    }}
+                                                    className="w-full p-3 rounded-lg border border-gray-700 hover:border-gray-600 bg-gray-900/50 hover:bg-gray-900 transition-all text-left group"
+                                                    style={{
+                                                        borderColor: selectedTaskId === task.id ? projects.find(p => p.id === selectedProjectId)?.color : undefined,
+                                                        backgroundColor: selectedTaskId === task.id ? `${projects.find(p => p.id === selectedProjectId)?.color}15` : undefined
+                                                    }}
+                                                >
+                                                    <div className="flex items-start justify-between gap-2">
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="text-white text-sm font-medium truncate">{task.name}</p>
+                                                            {task.description && (
+                                                                <p className="text-gray-500 text-xs mt-1 line-clamp-2">{task.description}</p>
+                                                            )}
+                                                        </div>
+                                                        <i className="fas fa-chevron-right text-gray-500 text-xs mt-1 group-hover:text-gray-400"></i>
+                                                    </div>
+                                                </button>
+                                            ));
+                                        })()}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Timer Display (when task is selected or timer is running) */}
+                        {(isTimerRunning || (selectedTaskId && !showTaskSelection)) && (
+                            <div>
+                                <div className="mb-4">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span 
+                                            className="w-2 h-2 rounded-full" 
+                                            style={{ background: projects.find(p => p.id === selectedProjectId)?.color || '#60A5FA' }}
+                                        ></span>
+                                        <span className="text-gray-400 text-xs">
+                                            {projects.find(p => p.id === selectedProjectId)?.name}
+                                        </span>
+                                    </div>
+                                    <p className="text-white text-base font-medium mb-1">
+                                        {(() => {
+                                            const task = MOCK_TASKS.find(t => t.id === selectedTaskId);
+                                            return task?.name || description || 'No task selected';
+                                        })()}
+                                    </p>
+                                    {(() => {
+                                        const task = MOCK_TASKS.find(t => t.id === selectedTaskId);
+                                        // Calculate total time spent on this task today
+                                        const today = new Date();
+                                        today.setHours(0, 0, 0, 0);
+                                        const taskTotalTime = timeEntries
+                                            .filter(e => e.taskId === selectedTaskId && e.startTime >= today)
+                                            .reduce((sum, e) => sum + e.duration, 0);
+                                        
+                                        return (
+                                            <>
+                                                {task?.description && (
+                                                    <p className="text-gray-500 text-xs">{task.description}</p>
+                                                )}
+                                                {taskTotalTime > 0 && !isTimerRunning && (
+                                                    <p className="text-gray-500 text-xs mt-1 flex items-center gap-1">
+                                                        <i className="fas fa-history text-[10px]"></i>
+                                                        <span>Total today: {formatTime(taskTotalTime)}</span>
+                                                    </p>
+                                                )}
+                                            </>
+                                        );
+                                    })()}
+                                </div>
+                                
+                                <div className="flex justify-between items-center mb-4">
+                                    <button
+                                        onClick={() => {
+                                            if (!isTimerRunning) {
+                                                setSelectedProjectId('');
+                                                setSelectedTaskId('');
+                                                setDescription('');
+                                                setShowTaskSelection(false);
+                                            }
+                                        }}
+                                        className="text-gray-400 hover:text-white text-xs transition-colors"
+                                        disabled={isTimerRunning}
+                                    >
+                                        {!isTimerRunning && <><i className="fas fa-arrow-left mr-1"></i> Change</>}
+                                    </button>
+                                    <div className="text-3xl font-mono text-white tracking-widest font-light">
+                                        {(() => {
+                                            if (isTimerRunning) {
+                                                // When running, show live timer (accumulated + current session)
+                                                return formatTime(elapsedSeconds);
+                                            } else if (selectedTaskId) {
+                                                // When stopped, show accumulated time for this task
+                                                const accumulated = taskAccumulatedTime[selectedTaskId] || 0;
+                                                return formatTime(accumulated);
+                                            } else {
+                                                // No task selected
+                                                return formatTime(0);
+                                            }
+                                        })()}
+                                    </div>
+                                </div>
+                                
+                                {!isTimerRunning && selectedTaskId && (() => {
+                                    const accumulated = taskAccumulatedTime[selectedTaskId] || 0;
+                                    return accumulated > 0;
+                                })() && (
+                                    <div className="mb-3 p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                                <i className="fas fa-clock text-blue-400 text-xs"></i>
+                                                <span className="text-blue-400 text-xs">Ready to resume</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                <button 
+                                    onClick={toggleTimer}
+                                    className={`w-full py-3 rounded-lg font-bold text-white shadow-lg transition-all active:scale-95 flex justify-center items-center gap-2 ${
+                                        isTimerRunning 
+                                        ? 'bg-red-500 hover:bg-red-600 shadow-red-500/20' 
+                                        : 'bg-blue-600 hover:bg-blue-500 shadow-blue-500/20'
+                                    }`}
+                                >
+                                    {isTimerRunning ? (
+                                        <><i className="fas fa-stop"></i> STOP</>
+                                    ) : (
+                                        <><i className="fas fa-play"></i> {(() => {
+                                            if (!selectedTaskId) return 'START';
+                                            const accumulated = taskAccumulatedTime[selectedTaskId] || 0;
+                                            return accumulated > 0 ? 'RESUME' : 'START';
+                                        })()}</>
+                                    )}
+                                </button>
+                            </div>
+                        )}
                     </div>
 
                     {/* Time Entries List */}
@@ -1128,24 +1529,148 @@ const App: React.FC = () => {
                                     <span className="text-xs">No entries yet. Start tracking!</span>
                                 </div>
                             )}
-                            {timeEntries.map(entry => {
-                                const project = projects.find(p => p.id === entry.projectId);
-                                return (
-                                    <div key={entry.id} className="bg-gray-800 rounded-lg p-3 border-l-4 border-gray-700 flex justify-between items-center group hover:bg-gray-750 transition-colors cursor-pointer" style={{ borderLeftColor: project?.color }}>
-                                        <div className="overflow-hidden mr-2">
-                                            <p className="text-white text-sm font-medium truncate">{entry.description}</p>
-                                            <p className="text-gray-500 text-xs flex items-center gap-1">
-                                                <span className="w-1.5 h-1.5 rounded-full" style={{ background: project?.color }}></span>
-                                                {project?.name}
-                                            </p>
-                                        </div>
-                                        <div className="text-right whitespace-nowrap">
-                                            <div className="text-white font-mono text-sm">{formatTime(entry.duration)}</div>
-                                            <div className="text-gray-600 text-[10px]">{entry.startTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} - {entry.endTime?.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
-                                        </div>
-                                    </div>
+                            {(() => {
+                                // Group entries by taskId to avoid duplicates
+                                const today = new Date();
+                                today.setHours(0, 0, 0, 0);
+                                const todayEntries = timeEntries.filter(e => e.startTime >= today);
+                                
+                                // Group by taskId (or description if no taskId)
+                                type GroupedTask = {
+                                    taskId?: string;
+                                    description: string;
+                                    projectId: string;
+                                    entries: TimeEntry[];
+                                    totalDuration: number;
+                                    lastStartTime: Date;
+                                    lastEndTime?: Date;
+                                };
+                                
+                                const groupedEntries: Record<string, GroupedTask> = todayEntries.reduce((acc, entry) => {
+                                    const key = entry.taskId || entry.description;
+                                    if (!acc[key]) {
+                                        acc[key] = {
+                                            taskId: entry.taskId,
+                                            description: entry.description,
+                                            projectId: entry.projectId,
+                                            entries: [],
+                                            totalDuration: 0,
+                                            lastStartTime: entry.startTime,
+                                            lastEndTime: entry.endTime
+                                        };
+                                    }
+                                    acc[key].entries.push(entry);
+                                    acc[key].totalDuration += entry.duration;
+                                    // Keep the most recent entry for time display
+                                    if (entry.startTime > acc[key].lastStartTime) {
+                                        acc[key].lastStartTime = entry.startTime;
+                                        acc[key].lastEndTime = entry.endTime;
+                                    }
+                                    return acc;
+                                }, {} as Record<string, GroupedTask>);
+                                
+                                const uniqueTasks: GroupedTask[] = Object.values(groupedEntries).sort((a, b) => 
+                                    b.lastStartTime.getTime() - a.lastStartTime.getTime()
                                 );
-                            })}
+                                
+                                return uniqueTasks.map((group, index) => {
+                                    const project = projects.find(p => p.id === group.projectId);
+                                    const task = group.taskId ? MOCK_TASKS.find(t => t.id === group.taskId) : null;
+                                    const isCurrentlySelected = selectedTaskId === group.taskId && !isTimerRunning;
+                                    const isCurrentlyRunning = selectedTaskId === group.taskId && isTimerRunning;
+                                    
+                                    // Calculate total time: accumulated from entries + current session if running
+                                    let displayTime = group.totalDuration;
+                                    if (isCurrentlyRunning && group.taskId) {
+                                        // Show live timer: accumulated time + current session
+                                        displayTime = elapsedSeconds;
+                                    } else if (group.taskId) {
+                                        // Show accumulated time from state (includes all sessions)
+                                        const accumulated = taskAccumulatedTime[group.taskId] || 0;
+                                        displayTime = accumulated > 0 ? accumulated : group.totalDuration;
+                                    }
+                                    
+                                    return (
+                                        <div 
+                                            key={group.taskId || group.description || index} 
+                                            className={`bg-gray-800 rounded-lg p-3 border-l-4 border-gray-700 group hover:bg-gray-750 transition-colors ${
+                                                isCurrentlyRunning ? 'ring-2 ring-blue-500/50' : ''
+                                            }`}
+                                            style={{ borderLeftColor: project?.color }}
+                                        >
+                                            <div className="flex justify-between items-start gap-3">
+                                                <div className="flex-1 overflow-hidden min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <p className="text-white text-sm font-medium truncate">
+                                                            {task?.name || group.description}
+                                                        </p>
+                                                        {isCurrentlyRunning && (
+                                                            <span className="flex-shrink-0 w-2 h-2 bg-green-500 rounded-full animate-pulse" title="Running"></span>
+                                                        )}
+                                                    </div>
+                                                    <p className="text-gray-500 text-xs flex items-center gap-1 mt-1">
+                                                        <span className="w-1.5 h-1.5 rounded-full" style={{ background: project?.color }}></span>
+                                                        {project?.name}
+                                                        {task && task.name !== group.description && (
+                                                            <span className="text-gray-600">• {task.name}</span>
+                                                        )}
+                                                        {group.entries.length > 1 && (
+                                                            <span className="text-gray-600">• {group.entries.length} sessions</span>
+                                                        )}
+                                                    </p>
+                                                </div>
+                                                <div className="flex flex-col items-end gap-2">
+                                                    <div className="text-right whitespace-nowrap">
+                                                        <div className={`font-mono text-sm ${isCurrentlyRunning ? 'text-green-400' : 'text-white'}`}>
+                                                            {formatTime(displayTime)}
+                                                        </div>
+                                                        {group.lastEndTime && !isCurrentlyRunning && (
+                                                            <div className="text-gray-600 text-[10px]">
+                                                                {group.lastStartTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} - {group.lastEndTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                                            </div>
+                                                        )}
+                                                        {isCurrentlyRunning && (
+                                                            <div className="text-green-400 text-[10px] flex items-center gap-1">
+                                                                <i className="fas fa-circle text-[6px]"></i>
+                                                                <span>Live</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    {group.taskId && (
+                                                        <button
+                                                            onClick={() => {
+                                                                if (!isTimerRunning) {
+                                                                    setSelectedProjectId(group.projectId);
+                                                                    setSelectedTaskId(group.taskId!);
+                                                                    setDescription(task?.name || group.description);
+                                                                    setShowTaskSelection(false);
+                                                                    // Auto-start timer
+                                                                    if (userConsent === true) {
+                                                                        // Load accumulated time
+                                                                        const accumulated = taskAccumulatedTime[group.taskId] || 0;
+                                                                        setElapsedSeconds(accumulated);
+                                                                        setStartTime(Date.now());
+                                                                        setIsTimerRunning(true);
+                                                                    }
+                                                                }
+                                                            }}
+                                                            disabled={isTimerRunning}
+                                                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
+                                                                isCurrentlySelected
+                                                                    ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                                                                    : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                                                            } ${isTimerRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                                        >
+                                                            <i className={`fas ${displayTime > 0 ? 'fa-redo' : 'fa-play'} text-[10px]`}></i>
+                                                            <span>{displayTime > 0 ? 'Resume' : 'Start'}</span>
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                });
+                            })()}
                         </div>
                     </div>
 
