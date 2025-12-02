@@ -1,10 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { User, AppView, Project, TimeEntry } from './types';
+import { User, AppView, Project, TimeEntry, Settings, ActivityLog } from './types';
 import { FaceAttendance } from './components/FaceAttendance';
 import { ScreenLogger } from './components/ScreenLogger';
 import { InsightsDashboard } from './components/InsightsDashboard';
 import { TitleBar } from './components/TitleBar';
+import { ConsentDialog } from './components/ConsentDialog';
+import { Settings as SettingsComponent } from './components/Settings';
+import { IdleDialog } from './components/IdleDialog';
 import { useSurveillance } from './hooks/useSurveillance';
+import { applyBlurWithIntensity } from './utils/imageBlur';
 
 // Extend Window interface for Electron API
 declare global {
@@ -20,8 +24,18 @@ declare global {
             stopActivityMonitoring: () => Promise<boolean>;
             onActivityUpdate: (callback: (data: any) => void) => void;
             removeActivityListener: () => void;
+            onAllWindowsUpdate: (callback: (data: any) => void) => void;
+            removeAllWindowsListener: () => void;
             processActivity: (input: any) => Promise<any>;
             getActivityInsights: (timeWindow?: any) => Promise<any>;
+            getUserConsent: () => Promise<{ consent: boolean | null; remembered: boolean }>;
+            setUserConsent: (consent: boolean, remember: boolean) => Promise<boolean>;
+            revokeConsent: () => Promise<boolean>;
+            getSettings: () => Promise<any>;
+            setSettings: (settings: any) => Promise<boolean>;
+            exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
+            deleteAllData: () => Promise<boolean>;
+            getLastActivityTimestamp: () => Promise<number | null>;
         };
     }
 }
@@ -48,6 +62,11 @@ const App: React.FC = () => {
     const [projects] = useState<Project[]>(MOCK_PROJECTS);
     const [timeEntries, setTimeEntries] = useState<TimeEntry[]>([]);
     
+    // Consent State
+    const [showConsentDialog, setShowConsentDialog] = useState(false);
+    const [userConsent, setUserConsent] = useState<boolean | null>(null);
+    const [consentChecked, setConsentChecked] = useState(false);
+    
     // Timer State
     const [isTimerRunning, setIsTimerRunning] = useState(false);
     const [startTime, setStartTime] = useState<number | null>(null);
@@ -55,16 +74,20 @@ const App: React.FC = () => {
     const [description, setDescription] = useState('');
     const [selectedProjectId, setSelectedProjectId] = useState<string>('');
     
+    // Settings state for screenshot blur
+    const [settings, setSettings] = useState<Settings | null>(null);
 
-    // Surveillance Hook
+    // Surveillance Hook - Only active if user has consented
     const { 
         cameraStream, 
         activityLogs, 
         setActivityLogs,
         startCamera, 
-        stopCamera
+        stopCamera,
+        idleInfo,
+        onIdleDecision
     } = useSurveillance({ 
-        isTimerRunning, 
+        isTimerRunning: isTimerRunning && userConsent === true, // Block tracking without consent
         currentProjectId: selectedProjectId 
     });
 
@@ -75,8 +98,87 @@ const App: React.FC = () => {
     const hiddenCamVideoRef = useRef<HTMLVideoElement>(null);
     const hiddenCanvasRef = useRef<HTMLCanvasElement>(null);
 
+    // Check user consent on mount
+    useEffect(() => {
+        const checkConsent = async () => {
+            if (window.electronAPI) {
+                try {
+                    const consentData = await window.electronAPI.getUserConsent();
+                    if (consentData.consent === null) {
+                        // No consent given yet - show dialog
+                        setShowConsentDialog(true);
+                    } else {
+                        // Consent already given or declined
+                        setUserConsent(consentData.consent);
+                        if (!consentData.consent) {
+                            console.warn('User has not consented to tracking');
+                        }
+                    }
+                    setConsentChecked(true);
+                } catch (error) {
+                    console.error('Error checking consent:', error);
+                    // If error, show dialog to be safe
+                    setShowConsentDialog(true);
+                    setConsentChecked(true);
+                }
+            } else {
+                // Electron API not available (web mode?)
+                setConsentChecked(true);
+            }
+        };
+        checkConsent();
+    }, []);
+
+    // Load settings on mount
+    useEffect(() => {
+        const loadSettings = async () => {
+            if (window.electronAPI?.getSettings) {
+                try {
+                    const savedSettings = await window.electronAPI.getSettings();
+                    setSettings(savedSettings);
+                } catch (error) {
+                    console.error('Error loading settings:', error);
+                }
+            }
+        };
+        loadSettings();
+    }, []);
+
+    // Handle consent dialog response
+    const handleConsent = async (consent: boolean, remember: boolean) => {
+        if (window.electronAPI) {
+            try {
+                await window.electronAPI.setUserConsent(consent, remember);
+                setUserConsent(consent);
+                setShowConsentDialog(false);
+                
+                if (!consent) {
+                    // If user declined, stop any active tracking
+                    setIsTimerRunning(false);
+                    if (window.electronAPI.stopActivityMonitoring) {
+                        await window.electronAPI.stopActivityMonitoring();
+                    }
+                }
+            } catch (error) {
+                console.error('Error saving consent:', error);
+            }
+        } else {
+            setUserConsent(consent);
+            setShowConsentDialog(false);
+        }
+    };
+
     // Initial Login Simulation
     const handleLogin = (email: string) => {
+        // Only allow login if consent is checked
+        if (!consentChecked) return;
+        
+        // If user hasn't consented, don't allow login
+        if (userConsent === false) {
+            alert('You must consent to tracking to use this application.');
+            return;
+        }
+        
         setUser({ ...INITIAL_USER, name: email.split('@')[0] });
         setView(AppView.CHECK_IN_OUT); 
     };
@@ -84,7 +186,21 @@ const App: React.FC = () => {
     // Attach streams to hidden video elements for capture
     useEffect(() => {
         if (hiddenCamVideoRef.current && cameraStream) {
-            hiddenCamVideoRef.current.srcObject = cameraStream;
+            const video = hiddenCamVideoRef.current;
+            // Only set srcObject if it's different to avoid interrupting play()
+            if (video.srcObject !== cameraStream) {
+                video.srcObject = cameraStream;
+                // Ensure video plays to capture frames
+                video.play().catch(err => {
+                    // Ignore AbortError as it's usually just an interruption
+                    if (err.name !== 'AbortError') {
+                        console.warn('Failed to play hidden video:', err);
+                    }
+                });
+            }
+        } else if (hiddenCamVideoRef.current && !cameraStream) {
+            // Clear srcObject when stream is removed
+            hiddenCamVideoRef.current.srcObject = null;
         }
     }, [cameraStream]);
 
@@ -107,147 +223,569 @@ const App: React.FC = () => {
         };
     }, [isTimerRunning, startTime]);
 
+    // Check if we're in dev mode (check for localhost or development indicators)
+    const isDevMode = window.location.hostname === 'localhost' || 
+                      window.location.hostname === '127.0.0.1' ||
+                      window.location.port === '3000' ||
+                      (window as any).__DEV__ === true;
+    
     // Background Capture Logic (Sync with Activity Log creation)
     // We observe the activity logs array. When a new log is added (by useSurveillance),
-    // we try to append screenshots to it using the hidden video refs.
-    // Camera is opened only when needed for capture, then closed immediately after.
+    // we capture 1-3 screenshots and webcam photo per 10-minute interval (or 20 seconds in dev mode).
+    const lastProcessedLogIdRef = useRef<string | null>(null);
+    const devCaptureIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    
+    const immediateCaptureRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    
+    // Dev mode: Periodic capture every 1 minute (60 seconds)
+    useEffect(() => {
+        if (isDevMode && isTimerRunning) {
+            console.log('Dev mode: Starting periodic capture every 1 minute');
+            
+            // Create initial log if none exists (for immediate capture)
+            if (activityLogs.length === 0) {
+                const initialLog: ActivityLog = {
+                    id: Date.now().toString(),
+                    timestamp: new Date(),
+                    projectId: selectedProjectId || '1',
+                    keyboardEvents: 0,
+                    mouseEvents: 0,
+                    productivityScore: 50,
+                    activeWindow: 'Dev Mode Test'
+                };
+                setActivityLogs([initialLog]);
+                lastProcessedLogIdRef.current = null; // Reset to allow immediate capture
+                console.log('Dev mode: Created initial log for testing');
+            }
+            
+            // Immediate first capture after 2 seconds
+            immediateCaptureRef.current = setTimeout(() => {
+                setActivityLogs(prev => {
+                    if (prev.length > 0) {
+                        const newLogs = [...prev];
+                        newLogs[0] = {
+                            ...newLogs[0],
+                            screenshotUrl: undefined,
+                            screenshotUrls: undefined, // Clear array too
+                            webcamUrl: undefined
+                        };
+                        lastProcessedLogIdRef.current = null;
+                        console.log('Dev mode: Triggering immediate capture');
+                        return newLogs;
+                    }
+                    return prev;
+                });
+            }, 2000);
+            
+            devCaptureIntervalRef.current = setInterval(() => {
+                // Ensure we have a log to work with
+                setActivityLogs(prev => {
+                    if (prev.length === 0) {
+                        // Create a new log if none exists
+                        const newLog: ActivityLog = {
+                            id: Date.now().toString(),
+                            timestamp: new Date(),
+                            projectId: selectedProjectId || '1',
+                            keyboardEvents: 0,
+                            mouseEvents: 0,
+                            productivityScore: 50,
+                            activeWindow: 'Dev Mode Test'
+                        };
+                        console.log('Dev mode: Created new log for capture');
+                        lastProcessedLogIdRef.current = null;
+                        return [newLog];
+                    } else {
+                        // Clear media URLs to force re-capture
+                        const newLogs = [...prev];
+                        if (newLogs.length > 0) {
+                            newLogs[0] = {
+                                ...newLogs[0],
+                                screenshotUrl: undefined,
+                                screenshotUrls: undefined, // Clear array too
+                                webcamUrl: undefined
+                            };
+                            lastProcessedLogIdRef.current = null;
+                            console.log('Dev mode: Cleared media URLs, forcing capture');
+                        }
+                        return newLogs;
+                    }
+                });
+            }, 60000); // 60 seconds (1 minute) - gives camera time to close and reopen
+            
+            return () => {
+                if (immediateCaptureRef.current) {
+                    clearTimeout(immediateCaptureRef.current);
+                    immediateCaptureRef.current = null;
+                }
+                if (devCaptureIntervalRef.current) {
+                    clearInterval(devCaptureIntervalRef.current);
+                    devCaptureIntervalRef.current = null;
+                }
+            };
+        } else {
+            if (immediateCaptureRef.current) {
+                clearTimeout(immediateCaptureRef.current);
+                immediateCaptureRef.current = null;
+            }
+            if (devCaptureIntervalRef.current) {
+                clearInterval(devCaptureIntervalRef.current);
+                devCaptureIntervalRef.current = null;
+            }
+        }
+    }, [isDevMode, isTimerRunning, activityLogs.length, selectedProjectId]);
+    
+    // Track if capture is in progress to prevent duplicate captures
+    const captureInProgressRef = useRef<boolean>(false);
+    
     useEffect(() => {
         if (activityLogs.length > 0 && isTimerRunning) {
             const latestLog = activityLogs[0];
-            // Only update if it doesn't have images yet and happened recently (<10s to allow for async operations)
-            const isFresh = (new Date().getTime() - latestLog.timestamp.getTime()) < 10000;
             
-            // Always try to capture if missing screenshot OR webcam photo
-            if (isFresh && (!latestLog.screenshotUrl || !latestLog.webcamUrl)) {
-                // Open camera temporarily for capture
-                const captureWithCamera = async () => {
-                    const canvas = hiddenCanvasRef.current;
-                    if (!canvas) {
-                        console.error('Canvas not available for capture');
-                        return;
-                    }
-
-                    let camUrl = undefined;
-                    let screenUrl = undefined;
-
-                    // Capture Screen using Electron API (no screen share needed) - ALWAYS TRY
-                    if (window.electronAPI?.captureScreenshot) {
+            // Skip if we already processed this log
+            if (latestLog.id === lastProcessedLogIdRef.current) {
+                return;
+            }
+            
+            // Skip if capture is already in progress for this log
+            if (captureInProgressRef.current) {
+                console.log('Capture already in progress, skipping duplicate...');
+                return;
+            }
+            
+            // Increased time window to 5 minutes to allow for async operations and retries
+            const isFresh = (new Date().getTime() - latestLog.timestamp.getTime()) < 300000; // 5 minutes
+            
+            // Capture screenshots and webcam if enabled and log doesn't have them yet
+            const needsScreenshot = !latestLog.screenshotUrl && settings?.enableScreenshots !== false;
+            const needsWebcam = !latestLog.webcamUrl;
+            
+            console.log('Capture check:', {
+                logId: latestLog.id,
+                isFresh,
+                needsScreenshot,
+                needsWebcam,
+                hasScreenshot: !!latestLog.screenshotUrl,
+                hasWebcam: !!latestLog.webcamUrl,
+                hasCameraStream: !!cameraStream,
+                enableScreenshots: settings?.enableScreenshots,
+                isDevMode
+            });
+            
+            // In dev mode, always capture regardless of freshness
+            const shouldCapture = isDevMode ? (needsScreenshot || needsWebcam) : (isFresh && (needsScreenshot || needsWebcam));
+            
+            if (shouldCapture) {
+                // Mark capture as in progress
+                captureInProgressRef.current = true;
+                console.log('Starting media capture for log:', latestLog.id, isDevMode ? '(DEV MODE)' : '');
+                const captureMedia = async () => {
+                    const screenshots: string[] = [];
+                    let webcamPhoto: string | null = null;
+                    let tempCameraStream: MediaStream | null = null;
+                    
+                    try {
+                        // Start camera first if we need webcam capture (before capturing screenshots)
+                    // Check if cameraStream exists AND has active tracks, not just if it exists
+                    const hasActiveCamera = cameraStream && cameraStream.getTracks().some(track => track.readyState === 'live');
+                    if (needsWebcam && !hasActiveCamera) {
+                        console.log('Starting camera for webcam capture...');
                         try {
-                            console.log('Attempting to capture screenshot...');
-                            screenUrl = await window.electronAPI.captureScreenshot();
-                            if (screenUrl && screenUrl.length > 100) { // Ensure it's a valid image
-                                console.log('Screenshot captured successfully, length:', screenUrl.length);
-                            } else {
-                                console.warn('Screenshot capture returned invalid data, length:', screenUrl?.length || 0);
-                                // Retry once
+                            tempCameraStream = await startCamera();
+                            if (tempCameraStream && hiddenCamVideoRef.current) {
+                                const video = hiddenCamVideoRef.current;
+                                
+                                // Reset video element completely if it was previously used
+                                if (video.srcObject) {
+                                    console.log('Clearing previous video stream...');
+                                    video.pause();
+                                    video.srcObject = null;
+                                    video.load(); // Reset video element
+                                    await new Promise(resolve => setTimeout(resolve, 300)); // Give it time to reset
+                                }
+                                
+                                // Set new stream
+                                console.log('Setting new video stream...');
+                                video.srcObject = tempCameraStream;
+                                
+                                // Wait for stream to attach and video to initialize
                                 await new Promise(resolve => setTimeout(resolve, 500));
-                                screenUrl = await window.electronAPI.captureScreenshot();
-                                if (screenUrl && screenUrl.length > 100) {
-                                    console.log('Screenshot captured on retry');
+                                
+                                // Play video and wait for it to be ready
+                                try {
+                                    await video.play();
+                                    console.log('Video play() successful');
+                                } catch (playError: any) {
+                                    console.warn('Play error:', playError.name, playError.message);
+                                    // Continue anyway, video might still work
+                                }
+                                
+                                // Wait for video to have valid dimensions (readyState >= 2 means HAVE_CURRENT_DATA)
+                                // IMPORTANT: Wait for proper dimensions (not 2x2), at least 100x100
+                                let attempts = 0;
+                                const maxAttempts = 20; // Wait up to 4 seconds
+                                while (attempts < maxAttempts && (video.readyState < 2 || video.videoWidth < 100 || video.videoHeight < 100)) {
+                                    await new Promise(resolve => setTimeout(resolve, 200));
+                                    attempts++;
+                                    if (attempts % 5 === 0) {
+                                        console.log(`Waiting for video to be ready... (attempt ${attempts}/${maxAttempts}, readyState: ${video.readyState}, dimensions: ${video.videoWidth}x${video.videoHeight})`);
+                                    }
+                                }
+                                
+                                if (video.videoWidth >= 100 && video.videoHeight >= 100) {
+                                    console.log(`Video ready: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
+                                } else {
+                                    console.warn(`Video still not ready after waiting: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
+                                    // Try one more time to reset and reattach
+                                    console.log('Attempting to reset video element and reattach stream...');
+                                    video.pause();
+                                    video.srcObject = null;
+                                    video.load();
+                                    await new Promise(resolve => setTimeout(resolve, 300));
+                                    video.srcObject = tempCameraStream;
+                                    await video.play().catch(() => {});
+                                    await new Promise(resolve => setTimeout(resolve, 1000));
+                                    
+                                    if (video.videoWidth >= 100 && video.videoHeight >= 100) {
+                                        console.log(`Video ready after reset: ${video.videoWidth}x${video.videoHeight}`);
+                                    } else {
+                                        console.error(`Video failed to initialize: ${video.videoWidth}x${video.videoHeight}`);
+                                    }
                                 }
                             }
                         } catch (error) {
-                            console.error('Screenshot capture failed:', error);
-                            // Try one more time
-                            try {
-                                await new Promise(resolve => setTimeout(resolve, 1000));
-                                screenUrl = await window.electronAPI.captureScreenshot();
-                            } catch (retryError) {
-                                console.error('Screenshot retry also failed:', retryError);
-                            }
-                        }
-                    } else {
-                        console.warn('Electron API not available for screenshot');
-                    }
-
-                    // Open camera only when needed, capture, then close
-                    if (!cameraStream) {
-                        const tempStream = await startCamera();
-                        if (tempStream && hiddenCamVideoRef.current) {
-                            hiddenCamVideoRef.current.srcObject = tempStream;
-                            // Wait for video to be ready (longer wait for camera initialization)
-                            await new Promise(resolve => setTimeout(resolve, 1000));
-                            
-                            const v = hiddenCamVideoRef.current;
-                            // Wait for video to have actual video dimensions
-                            let attempts = 0;
-                            while ((v.videoWidth === 0 || v.videoHeight === 0) && attempts < 10) {
-                                await new Promise(resolve => setTimeout(resolve, 100));
-                                attempts++;
-                            }
-                            
-                            if (v.videoWidth > 0 && v.videoHeight > 0) {
-                                canvas.width = v.videoWidth;
-                                canvas.height = v.videoHeight;
-                                const ctx = canvas.getContext('2d');
-                                if (ctx) {
-                                    ctx.drawImage(v, 0, 0, v.videoWidth, v.videoHeight);
-                                    camUrl = canvas.toDataURL('image/jpeg', 0.7);
-                                    console.log('Camera photo captured:', camUrl ? 'Success' : 'Failed');
-                                }
-                            } else {
-                                console.warn('Camera video not ready, dimensions:', v.videoWidth, v.videoHeight);
-                            }
-                            
-                            // Close camera immediately after capture
-                            stopCamera();
-                        } else {
-                            console.warn('Failed to start camera for capture');
-                        }
-                    } else {
-                        // Camera already open, just capture
-                        if (hiddenCamVideoRef.current) {
-                            const v = hiddenCamVideoRef.current;
-                            if (v.videoWidth > 0 && v.videoHeight > 0) {
-                                canvas.width = v.videoWidth;
-                                canvas.height = v.videoHeight;
-                                const ctx = canvas.getContext('2d');
-                                if (ctx) {
-                                    ctx.drawImage(v, 0, 0, v.videoWidth, v.videoHeight);
-                                    camUrl = canvas.toDataURL('image/jpeg', 0.7);
-                                    console.log('Camera photo captured (existing stream):', camUrl ? 'Success' : 'Failed');
-                                }
-                            }
-                            // Close camera after capture
-                            stopCamera();
+                            console.error('Failed to start camera for capture:', error);
                         }
                     }
-
-                    // Update the log entry with images (always update, even if only one is captured)
-                    console.log('Capture results:', { 
-                        hasScreenshot: !!screenUrl, 
-                        hasWebcam: !!camUrl,
-                        logId: latestLog.id,
-                        screenshotLength: screenUrl?.length || 0
-                    });
                     
-                    setActivityLogs(prev => {
-                        const newLogs = [...prev];
-                        const logIndex = newLogs.findIndex(log => log.id === latestLog.id);
-                        if (logIndex !== -1) {
-                            newLogs[logIndex] = { 
-                                ...newLogs[logIndex], 
-                                webcamUrl: camUrl || newLogs[logIndex].webcamUrl, 
-                                screenshotUrl: screenUrl || newLogs[logIndex].screenshotUrl 
-                            };
-                            console.log('Log updated with images:', {
-                                hasScreenshot: !!newLogs[logIndex].screenshotUrl,
-                                hasWebcam: !!newLogs[logIndex].webcamUrl
+                    // IMPORTANT: Ensure camera is ready BEFORE starting any captures
+                    // Both screenshot and photo must be captured together - no screenshot without photo
+                    let activeCameraStream: MediaStream | null = null;
+                    
+                    // Determine which stream to use for webcam capture
+                    if (tempCameraStream) {
+                        // Use the stream we just started
+                        activeCameraStream = tempCameraStream;
+                        console.log('Using tempCameraStream for webcam capture');
+                    } else if (cameraStream) {
+                        // Use existing stream if available
+                        activeCameraStream = cameraStream;
+                        console.log('Using existing cameraStream for webcam capture');
+                    }
+                    
+                    // Verify camera is actually ready
+                    // EXPLANATION: To capture a webcam photo in browsers, we MUST use a video element:
+                    // 1. Camera stream (MediaStream) can only be displayed in a <video> element
+                    // 2. We draw a frame from that video to a <canvas>
+                    // 3. Then convert canvas to image (data URL)
+                    // The video element is hidden but required for the capture process
+                    let cameraReady = false;
+                    if (needsWebcam && activeCameraStream && hiddenCamVideoRef.current) {
+                        // First check: Are the stream tracks actually live?
+                        const videoTracks = activeCameraStream.getVideoTracks();
+                        const hasLiveTracks = videoTracks.length > 0 && videoTracks.some(track => track.readyState === 'live');
+                        
+                        if (!hasLiveTracks) {
+                            console.error('Camera stream tracks are not live:', {
+                                trackCount: videoTracks.length,
+                                trackStates: videoTracks.map(t => ({ label: t.label, readyState: t.readyState, enabled: t.enabled }))
                             });
+                        } else {
+                            // Second check: Is the video element receiving the stream and has valid dimensions?
+                            const video = hiddenCamVideoRef.current;
+                            
+                            // Wait for video to have valid dimensions (stream is flowing)
+                            let attempts = 0;
+                            const maxAttempts = 15; // Wait up to 3 seconds
+                            while (attempts < maxAttempts && (video.videoWidth < 100 || video.videoHeight < 100 || video.readyState < 2)) {
+                                await new Promise(resolve => setTimeout(resolve, 200));
+                                attempts++;
+                                if (attempts % 5 === 0) {
+                                    console.log(`Waiting for video element to receive stream... (attempt ${attempts}/${maxAttempts}, dimensions: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState})`);
+                                }
+                            }
+                            
+                            // Video element must have valid dimensions to capture from it
+                            if (video.videoWidth >= 100 && video.videoHeight >= 100 && video.readyState >= 2) {
+                                cameraReady = true;
+                                console.log(`Camera ready: stream tracks live, video element ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
+                            } else {
+                                console.error('Video element not ready after waiting (needed to capture photo):', {
+                                    videoWidth: video.videoWidth,
+                                    videoHeight: video.videoHeight,
+                                    readyState: video.readyState,
+                                    srcObject: !!video.srcObject,
+                                    hasLiveTracks: hasLiveTracks,
+                                    attempts: attempts
+                                });
+                            }
                         }
-                        return newLogs;
-                    });
+                    } else if (needsWebcam) {
+                        console.error('Camera stream or video element missing (both required for photo capture):', {
+                            hasActiveStream: !!activeCameraStream,
+                            hasVideoRef: !!hiddenCamVideoRef.current,
+                            needsWebcam
+                        });
+                    }
                     
-                    if (!camUrl && !screenUrl) {
-                        console.warn('No images captured for log:', latestLog.id);
+                    // CRITICAL: If webcam is needed but not ready, skip ALL captures (including screenshots)
+                    if (needsWebcam && !cameraReady) {
+                        console.error('Webcam is required but not ready - skipping ALL captures (screenshot and photo)');
+                        captureInProgressRef.current = false;
+                        return; // Exit early - don't capture anything
+                    }
+                    
+                    // Capture Screenshots and Webcam Photo SIMULTANEOUSLY
+                    const screenshotCount = isDevMode ? 1 : (1 + Math.floor(Math.random() * 3)); // 1 in dev, 1-3 in prod
+                    console.log(`Capturing ${screenshotCount} screenshot(s) and webcam photo simultaneously for log ${latestLog.id}...`);
+                    
+                    // Prepare all capture promises
+                    const capturePromises: Promise<void>[] = [];
+                    
+                    // Screenshot captures (only if webcam is also ready or not needed)
+                    if (needsScreenshot && window.electronAPI?.captureScreenshot && (!needsWebcam || cameraReady)) {
+                        for (let i = 0; i < screenshotCount; i++) {
+                            capturePromises.push(
+                                (async () => {
+                                    try {
+                                        console.log(`Attempting to capture screenshot ${i + 1}/${screenshotCount}...`);
+                                        let rawScreenshot = await window.electronAPI.captureScreenshot();
+                                        
+                                        if (rawScreenshot && rawScreenshot.length > 100) {
+                                            // Apply blur if enabled in settings
+                                            let screenUrl = rawScreenshot;
+                                            if (settings?.enableScreenshotBlur) {
+                                                try {
+                                                    screenUrl = await applyBlurWithIntensity(rawScreenshot, 'medium');
+                                                    console.log(`Screenshot ${i + 1} blurred successfully`);
+                                                } catch (blurError) {
+                                                    console.error('Blur failed, using original:', blurError);
+                                                    screenUrl = rawScreenshot; // Fallback to original
+                                                }
+                                            }
+                                            
+                                            if (screenUrl) {
+                                                screenshots.push(screenUrl);
+                                                console.log(`Screenshot ${i + 1} captured successfully, size: ${screenUrl.length} bytes`);
+                                            } else {
+                                                console.warn(`Screenshot ${i + 1} is empty`);
+                                            }
+                                        } else {
+                                            console.warn(`Screenshot ${i + 1} capture returned invalid data (length: ${rawScreenshot?.length || 0})`);
+                                        }
+                                    } catch (error) {
+                                        console.error(`Screenshot ${i + 1} capture failed:`, error);
+                                    }
+                                })()
+                            );
+                        }
+                    }
+                    
+                    // Webcam capture (simultaneous with screenshots) - ONLY if camera is ready
+                    if (needsWebcam && hiddenCamVideoRef.current && hiddenCanvasRef.current && activeCameraStream && cameraReady) {
+                        capturePromises.push(
+                            (async () => {
+                                try {
+                                    console.log('Capturing webcam photo...');
+                                    const video = hiddenCamVideoRef.current!;
+                                    const canvas = hiddenCanvasRef.current!;
+                                    
+                                    // Wait for video to be ready with retries
+                                    let attempts = 0;
+                                    const maxAttempts = 15;
+                                    while (attempts < maxAttempts && (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0)) {
+                                        await new Promise(resolve => setTimeout(resolve, 200));
+                                        attempts++;
+                                        if (attempts % 3 === 0) {
+                                            console.log(`Waiting for video to be ready... (attempt ${attempts}/${maxAttempts}, readyState: ${video.readyState}, dimensions: ${video.videoWidth}x${video.videoHeight})`);
+                                        }
+                                    }
+                                    
+                                    if (video.videoWidth > 0 && video.videoHeight > 0) {
+                                        const context = canvas.getContext('2d');
+                                        if (context) {
+                                            canvas.width = video.videoWidth;
+                                            canvas.height = video.videoHeight;
+                                            context.drawImage(video, 0, 0);
+                                            
+                                            webcamPhoto = canvas.toDataURL('image/jpeg', 0.8);
+                                            console.log(`Webcam photo captured successfully: ${video.videoWidth}x${video.videoHeight}, size: ${webcamPhoto.length} bytes`);
+                                        } else {
+                                            console.warn('Canvas context not available for webcam capture');
+                                        }
+                                    } else {
+                                        console.warn(`Video dimensions are invalid after ${maxAttempts} attempts: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
+                                        console.warn('Video element state:', {
+                                            srcObject: !!video.srcObject,
+                                            paused: video.paused,
+                                            currentTime: video.currentTime,
+                                            networkState: video.networkState,
+                                            readyState: video.readyState
+                                        });
+                                    }
+                                } catch (error) {
+                                    console.error('Webcam capture failed:', error);
+                                }
+                            })()
+                        );
+                    } else if (needsWebcam) {
+                        console.warn('Webcam capture skipped - missing refs:', {
+                            hasVideoRef: !!hiddenCamVideoRef.current,
+                            hasCanvasRef: !!hiddenCanvasRef.current,
+                            hasCameraStream: !!activeCameraStream
+                        });
+                    }
+                    
+                    // Execute all captures simultaneously
+                    await Promise.all(capturePromises);
+                    console.log(`All captures completed: ${screenshots.length} screenshot(s), ${webcamPhoto ? '1' : '0'} webcam photo(s)`);
+                    
+                    // Stop temporary camera stream after capture
+                    if (tempCameraStream) {
+                        console.log('Stopping temporary camera stream...');
+                        try {
+                            // Stop all tracks
+                            tempCameraStream.getTracks().forEach(track => {
+                                track.stop();
+                                console.log('Stopped track:', track.kind, track.label);
+                            });
+                            
+                            // Clean up video element
+                            if (hiddenCamVideoRef.current) {
+                                const video = hiddenCamVideoRef.current;
+                                // Pause video first
+                                video.pause();
+                                // Clear srcObject
+                                video.srcObject = null;
+                                // Reset video element
+                                video.load();
+                                console.log('Video element cleaned up');
+                            }
+                            
+                            // IMPORTANT: Clear cameraStream state so camera can be restarted next time
+                            // Since startCamera() sets the state, we need to clear it after stopping
+                            if (cameraStream === tempCameraStream) {
+                                console.log('Clearing cameraStream state to allow restart...');
+                                stopCamera(); // This will clear the state
+                            }
+                            
+                            // Small delay to allow browser to release camera
+                            await new Promise(resolve => setTimeout(resolve, 300));
+                            console.log('Camera stream fully stopped and released');
+                        } catch (error) {
+                            console.error('Error stopping camera stream:', error);
+                            // Still try to clear state even if stopping fails
+                            if (cameraStream === tempCameraStream) {
+                                stopCamera();
+                            }
+                        }
+                    }
+                    
+                    // Update the log with captured media (APPEND screenshots, don't replace)
+                    if (screenshots.length > 0 || webcamPhoto) {
+                        setActivityLogs(prev => {
+                            const newLogs = [...prev];
+                            const logIndex = newLogs.findIndex(log => log.id === latestLog.id);
+                            if (logIndex !== -1) {
+                                const existingLog = newLogs[logIndex];
+                                const updates: Partial<ActivityLog> = {};
+                                
+                                if (screenshots.length > 0) {
+                                    // APPEND new screenshots to existing ones (don't replace)
+                                    const existingScreenshots = existingLog.screenshotUrls || (existingLog.screenshotUrl ? [existingLog.screenshotUrl] : []);
+                                    
+                                    // IMPORTANT: Only append if this screenshot is not already in the array (prevent duplicates)
+                                    const newScreenshots = screenshots.filter(newScreenshot => {
+                                        // Check if this screenshot URL already exists
+                                        return !existingScreenshots.some(existing => existing === newScreenshot);
+                                    });
+                                    
+                                    if (newScreenshots.length > 0) {
+                                        const allScreenshots = [...existingScreenshots, ...newScreenshots];
+                                        
+                                        // Store all screenshots in array, and first one for backward compatibility
+                                        updates.screenshotUrls = allScreenshots; // Append to existing
+                                        updates.screenshotUrl = allScreenshots[0]; // Keep first for backward compatibility
+                                        console.log(`Appending ${newScreenshots.length} new screenshot(s) to existing ${existingScreenshots.length}. Total: ${allScreenshots.length} (${screenshots.length - newScreenshots.length} duplicates skipped)`);
+                                    } else {
+                                        console.log(`All ${screenshots.length} screenshot(s) already exist in log, skipping append`);
+                                    }
+                                }
+                                
+                                // Webcam photo replaces the old one (only one webcam photo per log)
+                                // IMPORTANT: Only update if it's actually different (prevent duplicates)
+                                if (webcamPhoto) {
+                                    if (existingLog.webcamUrl !== webcamPhoto) {
+                                        updates.webcamUrl = webcamPhoto;
+                                        console.log('Storing new webcam photo in log');
+                                    } else {
+                                        console.log('Webcam photo already exists in log, skipping update');
+                                    }
+                                }
+                                
+                                // Only update if there are actual changes
+                                if (Object.keys(updates).length > 0) {
+                                    // Update timestamp to reflect when new media was captured
+                                    updates.timestamp = new Date();
+                                    
+                                    newLogs[logIndex] = { 
+                                        ...existingLog, 
+                                        ...updates
+                                    };
+                                    console.log('Log updated with media:', {
+                                        logId: latestLog.id,
+                                        oldTimestamp: existingLog.timestamp.toLocaleTimeString(),
+                                        newTimestamp: newLogs[logIndex].timestamp.toLocaleTimeString(),
+                                        hasScreenshot: !!newLogs[logIndex].screenshotUrl,
+                                        screenshotCount: newLogs[logIndex].screenshotUrls?.length || 0,
+                                        totalScreenshots: newLogs[logIndex].screenshotUrls?.length || 0,
+                                        hasWebcam: !!newLogs[logIndex].webcamUrl
+                                    });
+                                } else {
+                                    console.log('No new media to add to log (all duplicates)');
+                                }
+                                
+                                // Mark this log as processed
+                                lastProcessedLogIdRef.current = latestLog.id;
+                            } else {
+                                console.warn('Log not found for update:', latestLog.id);
+                            }
+                            return newLogs;
+                        });
+                    } else {
+                        console.warn('No media captured for log:', latestLog.id, {
+                            screenshotAttempted: needsScreenshot,
+                            webcamAttempted: needsWebcam,
+                            hasCameraStream: !!cameraStream
+                        });
+                        // Still mark as processed to avoid retrying
+                        lastProcessedLogIdRef.current = latestLog.id;
+                    }
+                    } finally {
+                        // Always clear the in-progress flag
+                        captureInProgressRef.current = false;
                     }
                 };
 
-                captureWithCamera();
+                // Add small delay to ensure log is fully created and DOM is ready
+                setTimeout(() => {
+                    captureMedia();
+                }, 1000); // Increased delay to ensure everything is ready
+            } else {
+                console.log('Media capture skipped:', {
+                    isFresh,
+                    needsScreenshot,
+                    needsWebcam,
+                    hasScreenshot: !!latestLog.screenshotUrl,
+                    hasWebcam: !!latestLog.webcamUrl
+                });
+                // Mark as processed even if skipped to avoid retrying
+                if (!isFresh || (!needsScreenshot && !needsWebcam)) {
+                    lastProcessedLogIdRef.current = latestLog.id;
+                }
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activityLogs.length, isTimerRunning]); // Triggers when useSurveillance adds a new log
+    }, [activityLogs, isTimerRunning, settings?.enableScreenshotBlur, settings?.enableScreenshots, cameraStream]); // Use activityLogs directly to detect new logs
 
     const formatTime = (totalSeconds: number) => {
         const h = Math.floor(totalSeconds / 3600);
@@ -257,6 +795,12 @@ const App: React.FC = () => {
     };
 
     const toggleTimer = async () => {
+        // Block timer start if user hasn't consented
+        if (userConsent !== true) {
+            alert('You must consent to tracking to use the timer. Please check your settings.');
+            return;
+        }
+        
         if (isTimerRunning) {
             // Stop Timer
             const endTime = new Date();
@@ -277,9 +821,10 @@ const App: React.FC = () => {
             setElapsedSeconds(0);
             setDescription('');
         } else {
-            // Start Timer (no screen share needed)
+            // Start Timer
             setStartTime(Date.now());
             setIsTimerRunning(true);
+            // Camera will be started only when needed for capture, not always
         }
     };
 
@@ -310,6 +855,28 @@ const App: React.FC = () => {
             <canvas ref={hiddenCanvasRef} />
         </div>
     );
+
+    // Show consent dialog if needed
+    if (showConsentDialog) {
+        return (
+            <div className="min-h-screen flex flex-col bg-gray-950 font-sans">
+                <ConsentDialog onConsent={handleConsent} />
+            </div>
+        );
+    }
+
+    // Show idle dialog if needed
+    if (idleInfo && idleInfo.isIdle) {
+        return (
+            <div className="min-h-screen flex flex-col bg-gray-950 font-sans">
+                <IdleDialog 
+                    idleDuration={idleInfo.duration}
+                    onKeep={() => onIdleDecision(false)}
+                    onRemove={() => onIdleDecision(true)}
+                />
+            </div>
+        );
+    }
 
     if (view === AppView.LOGIN) {
         return (
@@ -408,6 +975,26 @@ const App: React.FC = () => {
         );
     }
 
+    if (view === AppView.SETTINGS) {
+        return (
+            <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
+                <TitleBar />
+                <div className="flex-1 flex justify-center">
+                    {hiddenElements}
+                    <SettingsComponent
+                        activityLogs={activityLogs}
+                        timeEntries={timeEntries}
+                        onClose={() => setView(AppView.DASHBOARD)}
+                        onDataDeleted={() => {
+                            setActivityLogs([]);
+                            setTimeEntries([]);
+                        }}
+                    />
+                </div>
+            </div>
+        );
+    }
+
     // DASHBOARD VIEW
     return (
         <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
@@ -429,6 +1016,13 @@ const App: React.FC = () => {
                         </div>
                     </div>
                     <div className="flex gap-2">
+                        <button 
+                            onClick={() => setView(AppView.SETTINGS)}
+                            className="w-8 h-8 rounded-full bg-gray-700 hover:bg-gray-600 text-gray-300 flex items-center justify-center transition-colors"
+                            title="Settings"
+                        >
+                            <i className="fas fa-cog text-xs"></i>
+                        </button>
                         <button 
                             onClick={() => setView(AppView.INSIGHTS)}
                             className="w-8 h-8 rounded-full bg-blue-900/30 hover:bg-blue-900/50 text-blue-400 flex items-center justify-center transition-colors relative"

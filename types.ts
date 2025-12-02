@@ -3,7 +3,15 @@ export enum AppView {
     CHECK_IN_OUT = 'CHECK_IN_OUT',
     DASHBOARD = 'DASHBOARD',
     SCREENCAST = 'SCREENCAST',
-    INSIGHTS = 'INSIGHTS'
+    INSIGHTS = 'INSIGHTS',
+    SETTINGS = 'SETTINGS'
+}
+
+export interface Settings {
+    enableScreenshots: boolean;
+    enableUrlTracking: boolean;
+    enableScreenshotBlur: boolean;
+    idleTimeThreshold: number; // minutes
 }
 
 export interface User {
@@ -46,8 +54,11 @@ export interface ActivityLog {
     productivityScore: number; // 0-100
     activeWindow: string; // "VS Code", "Chrome", etc.
     activeUrl?: string; // Current URL if browser window
-    screenshotUrl?: string;
+    screenshotUrl?: string; // Keep for backward compatibility
+    screenshotUrls?: string[]; // Array of all screenshots
     webcamUrl?: string;
+    isIdle?: boolean; // True if this interval was marked as idle
+    idleDuration?: number; // Duration of idle time in seconds
 }
 
 export interface AppUsage {

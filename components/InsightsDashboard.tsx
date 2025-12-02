@@ -21,8 +21,18 @@ declare global {
             stopActivityMonitoring: () => Promise<boolean>;
             onActivityUpdate: (callback: (data: any) => void) => void;
             removeActivityListener: () => void;
+            onAllWindowsUpdate: (callback: (data: any) => void) => void;
+            removeAllWindowsListener: () => void;
             processActivity: (input: any) => Promise<any>;
             getActivityInsights: (timeWindow?: any) => Promise<any>;
+            getUserConsent: () => Promise<{ consent: boolean | null; remembered: boolean }>;
+            setUserConsent: (consent: boolean, remember: boolean) => Promise<boolean>;
+            revokeConsent: () => Promise<boolean>;
+            getSettings: () => Promise<any>;
+            setSettings: (settings: any) => Promise<boolean>;
+            exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
+            deleteAllData: () => Promise<boolean>;
+            getLastActivityTimestamp: () => Promise<number | null>;
         };
     }
 }
@@ -38,6 +48,25 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         timestamp: number;
     } | null>(null);
     
+    // All windows state (all opened windows with their stats)
+    const [allWindows, setAllWindows] = useState<Array<{
+        app: string;
+        title: string;
+        url: string | null;
+        urlHistory?: Array<{ url: string | null; title: string; timestamp: number }>;
+        keystrokes: number;
+        mouseClicks: number;
+        startTime: number;
+        lastSeen: number;
+        isActive: boolean;
+    }>>([]);
+    
+    // Total stats across all windows
+    const [totalStats, setTotalStats] = useState<{
+        totalKeystrokes: number;
+        totalClicks: number;
+    }>({ totalKeystrokes: 0, totalClicks: 0 });
+    
     const sessionStartTimeRef = useRef<number | null>(null);
     const keystrokesRef = useRef(0);
     const clicksRef = useRef(0);
@@ -50,35 +79,55 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         const handleActivityUpdate = (data: any) => {
             const now = Date.now();
             
-            // If app changed, reset session
+            // If app changed, reset session counters
             if (data.app !== currentAppRef.current) {
                 currentAppRef.current = data.app;
                 sessionStartTimeRef.current = now;
-                keystrokesRef.current = 0;
-                clicksRef.current = 0;
+                // Reset to per-window counts from the new window
+                keystrokesRef.current = data.keystrokes || 0;
+                clicksRef.current = data.mouseClicks || 0;
+            } else {
+                // Same app - update with per-window counts
+                keystrokesRef.current = data.keystrokes || keystrokesRef.current;
+                clicksRef.current = data.mouseClicks || clicksRef.current;
             }
             
-            // Update current activity
+            // Update current activity with per-window statistics
             setCurrentActivity({
                 app: data.app || 'Unknown',
                 title: data.title || 'Unknown',
                 url: data.url || undefined,
-                keystrokes: data.keystrokes || keystrokesRef.current,
-                clicks: clicksRef.current,
+                keystrokes: data.keystrokes || keystrokesRef.current, // Per-window keystrokes
+                clicks: data.mouseClicks || clicksRef.current, // Per-window clicks
                 timestamp: now
             });
-            
-            // Track keystrokes and clicks
-            if (data.keystrokes) {
-                keystrokesRef.current = data.keystrokes;
-            }
         };
         
         window.electronAPI.onActivityUpdate(handleActivityUpdate);
         
+        // Listen for all windows updates
+        const handleAllWindowsUpdate = (data: any) => {
+            if (data.allWindows) {
+                setAllWindows(data.allWindows);
+            }
+            if (data.totalKeystrokes !== undefined && data.totalClicks !== undefined) {
+                setTotalStats({
+                    totalKeystrokes: data.totalKeystrokes,
+                    totalClicks: data.totalClicks
+                });
+            }
+        };
+        
+        if (window.electronAPI.onAllWindowsUpdate) {
+            window.electronAPI.onAllWindowsUpdate(handleAllWindowsUpdate);
+        }
+        
         return () => {
             if (window.electronAPI) {
                 window.electronAPI.removeActivityListener();
+                if (window.electronAPI.removeAllWindowsListener) {
+                    window.electronAPI.removeAllWindowsListener();
+                }
             }
         };
     }, []);
@@ -125,11 +174,16 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         return () => clearInterval(interval);
     }, [currentActivity]);
     
-    // Calculate aggregate stats (including real-time data)
+    // Calculate aggregate stats (including real-time data from all windows)
     const stats = useMemo(() => {
         const totalProd = logs.reduce((acc, log) => acc + log.productivityScore, 0);
-        const totalKeys = logs.reduce((acc, log) => acc + log.keyboardEvents, 0) + (currentActivity?.keystrokes || 0);
-        const totalClicks = logs.reduce((acc, log) => acc + log.mouseEvents, 0) + (currentActivity?.clicks || 0);
+        // Use totalStats from all windows if available, otherwise calculate from logs
+        const totalKeys = totalStats.totalKeystrokes > 0 
+            ? totalStats.totalKeystrokes 
+            : logs.reduce((acc, log) => acc + log.keyboardEvents, 0) + (currentActivity?.keystrokes || 0);
+        const totalClicks = totalStats.totalClicks > 0
+            ? totalStats.totalClicks
+            : logs.reduce((acc, log) => acc + log.mouseEvents, 0) + (currentActivity?.clicks || 0);
         const avgProd = logs.length > 0 ? Math.round(totalProd / logs.length) : 0;
         
         return {
@@ -137,20 +191,153 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             totalKeys,
             totalClicks
         };
-    }, [logs, currentActivity]);
+    }, [logs, currentActivity, totalStats]);
 
-    // Calculate App Usage with detailed stats (including real-time data)
+    // Calculate App Usage with detailed stats (including all windows data)
     const appUsage = useMemo(() => {
         const appStats: Record<string, {
             count: number;
             keystrokes: number;
             clicks: number;
             timeSpent: number; // in seconds (estimated from log count + real-time)
-            urls: Array<{ url: string; timestamp: Date; count: number }>; // Track URLs visited
+            urls: Array<{ url: string | null; title?: string; timestamp: Date; count: number }>; // Track URLs/titles visited
             isActive: boolean; // Is this the currently active app?
+            title: string; // Window title
         }> = {};
         
-        // Process historical logs
+        // First, add all windows from real-time tracking (this includes ALL opened windows)
+        allWindows.forEach(window => {
+            const appName = window.app;
+            if (!appStats[appName]) {
+                appStats[appName] = {
+                    count: 0,
+                    keystrokes: 0,
+                    clicks: 0,
+                    timeSpent: 0,
+                    urls: [],
+                    isActive: window.isActive,
+                    title: window.title
+                };
+            }
+            // Use per-window stats from real-time tracking
+            appStats[appName].keystrokes = window.keystrokes;
+            appStats[appName].clicks = window.mouseClicks;
+            appStats[appName].isActive = window.isActive;
+            appStats[appName].title = window.title;
+            
+            // Calculate time spent based on startTime and lastSeen
+            const timeSpent = Math.floor((window.lastSeen - window.startTime) / 1000);
+            appStats[appName].timeSpent = timeSpent;
+            
+            // Normalize URL helper function
+            const normalizeUrl = (url: string | null): string | null => {
+                if (!url) return null;
+                try {
+                    let normalized = url.trim();
+                    if (!normalized.match(/^https?:\/\//i)) {
+                        normalized = `https://${normalized}`;
+                    }
+                    const urlObj = new URL(normalized);
+                    let hostname = urlObj.hostname.toLowerCase();
+                    if (hostname.startsWith('www.')) {
+                        hostname = hostname.substring(4);
+                    }
+                    const pathname = urlObj.pathname;
+                    const search = urlObj.search || '';
+                    return `https://${hostname}${pathname}${search}`;
+                } catch {
+                    let normalized = url.trim().toLowerCase();
+                    if (normalized.startsWith('www.')) {
+                        normalized = normalized.substring(4);
+                    }
+                    if (!normalized.startsWith('http://') && !normalized.startsWith('https://')) {
+                        normalized = `https://${normalized}`;
+                    }
+                    return normalized;
+                }
+            };
+            
+            // Add URLs/titles from history if available (this includes all visited URLs and titles)
+            if (window.urlHistory && window.urlHistory.length > 0) {
+                // Use URL history to get all visited URLs and titles
+                window.urlHistory.forEach(urlEntry => {
+                    // If URL exists, use it (normalized)
+                    if (urlEntry.url) {
+                        const normalizedUrl = normalizeUrl(urlEntry.url);
+                        if (!normalizedUrl) return;
+                        
+                        // Find existing URL by normalized comparison
+                        const existingUrl = appStats[appName].urls.find(u => u.url && normalizeUrl(u.url) === normalizedUrl);
+                        if (existingUrl) {
+                            existingUrl.count += 1;
+                            // Update timestamp to most recent visit
+                            if (urlEntry.timestamp > existingUrl.timestamp.getTime()) {
+                                existingUrl.timestamp = new Date(urlEntry.timestamp);
+                            }
+                        } else {
+                            appStats[appName].urls.push({
+                                url: normalizedUrl, // Store normalized URL
+                                title: urlEntry.title, // Also store title for display
+                                timestamp: new Date(urlEntry.timestamp),
+                                count: 1
+                            });
+                        }
+                    } 
+                    // If URL is unknown, use title instead
+                    else if (urlEntry.title) {
+                        // Find existing entry by title (for unknown URLs)
+                        const existingTitle = appStats[appName].urls.find(u => !u.url && u.title === urlEntry.title);
+                        if (existingTitle) {
+                            existingTitle.count += 1;
+                            // Update timestamp to most recent visit
+                            if (urlEntry.timestamp > existingTitle.timestamp.getTime()) {
+                                existingTitle.timestamp = new Date(urlEntry.timestamp);
+                            }
+                        } else {
+                            appStats[appName].urls.push({
+                                url: null, // No URL, use title instead
+                                title: urlEntry.title, // Store title
+                                timestamp: new Date(urlEntry.timestamp),
+                                count: 1
+                            });
+                        }
+                    }
+                });
+            } else if (window.url) {
+                // Fallback to current URL if no history
+                const normalizedUrl = normalizeUrl(window.url);
+                if (normalizedUrl) {
+                    const existingUrl = appStats[appName].urls.find(u => u.url && normalizeUrl(u.url) === normalizedUrl);
+                    if (existingUrl) {
+                        existingUrl.count += 1;
+                        existingUrl.timestamp = new Date(window.lastSeen);
+                    } else {
+                        appStats[appName].urls.push({
+                            url: normalizedUrl, // Store normalized URL
+                            title: window.title, // Also store title
+                            timestamp: new Date(window.lastSeen),
+                            count: 1
+                        });
+                    }
+                }
+            } else if (window.title) {
+                // If no URL but we have title, add title entry
+                const existingTitle = appStats[appName].urls.find(u => !u.url && u.title === window.title);
+                if (existingTitle) {
+                    existingTitle.count += 1;
+                    existingTitle.timestamp = new Date(window.lastSeen);
+                } else {
+                    appStats[appName].urls.push({
+                        url: null, // No URL
+                        title: window.title, // Use title
+                        timestamp: new Date(window.lastSeen),
+                        count: 1
+                    });
+                }
+            }
+        });
+        
+        // Process historical logs (for apps that might not be in allWindows yet)
         logs.forEach(log => {
             const appName = log.activeWindow;
             if (!appStats[appName]) {
@@ -160,86 +347,84 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     clicks: 0,
                     timeSpent: 0,
                     urls: [],
-                    isActive: false
+                    isActive: false,
+                    title: appName
                 };
             }
             appStats[appName].count += 1;
-            // Ensure we're using the actual number values, not undefined
-            const keystrokes = typeof log.keyboardEvents === 'number' ? log.keyboardEvents : 0;
-            const clicks = typeof log.mouseEvents === 'number' ? log.mouseEvents : 0;
-            appStats[appName].keystrokes += keystrokes;
-            appStats[appName].clicks += clicks;
-            // Estimate time: each log represents ~30-60 seconds of activity
-            appStats[appName].timeSpent += 45; // Average 45 seconds per log entry
+            // Only add to stats if not already set from allWindows (allWindows takes priority)
+            if (!allWindows.find(w => w.app === appName)) {
+                const keystrokes = typeof log.keyboardEvents === 'number' ? log.keyboardEvents : 0;
+                const clicks = typeof log.mouseEvents === 'number' ? log.mouseEvents : 0;
+                appStats[appName].keystrokes += keystrokes;
+                appStats[appName].clicks += clicks;
+                // Estimate time: each log represents ~30-60 seconds of activity
+                appStats[appName].timeSpent += 45; // Average 45 seconds per log entry
+            }
             
-            // Track URLs if available
+            // Track URLs if available (normalize to prevent duplicates)
             if (log.activeUrl) {
-                const existingUrl = appStats[appName].urls.find(u => u.url === log.activeUrl);
-                if (existingUrl) {
-                    existingUrl.count += 1;
-                    // Update timestamp to most recent
-                    if (log.timestamp > existingUrl.timestamp) {
-                        existingUrl.timestamp = log.timestamp;
+                // Normalize URL helper (same as above)
+                const normalizeUrl = (url: string | null): string | null => {
+                    if (!url) return null;
+                    try {
+                        let normalized = url.trim();
+                        if (!normalized.match(/^https?:\/\//i)) {
+                            normalized = `https://${normalized}`;
+                        }
+                        const urlObj = new URL(normalized);
+                        let hostname = urlObj.hostname.toLowerCase();
+                        if (hostname.startsWith('www.')) {
+                            hostname = hostname.substring(4);
+                        }
+                        const pathname = urlObj.pathname;
+                        const search = urlObj.search || '';
+                        return `https://${hostname}${pathname}${search}`;
+                    } catch {
+                        let normalized = url.trim().toLowerCase();
+                        if (normalized.startsWith('www.')) {
+                            normalized = normalized.substring(4);
+                        }
+                        if (!normalized.startsWith('http://') && !normalized.startsWith('https://')) {
+                            normalized = `https://${normalized}`;
+                        }
+                        return normalized;
+                    }
+                };
+                
+                const normalizedUrl = normalizeUrl(log.activeUrl);
+                if (normalizedUrl) {
+                    const existingUrl = appStats[appName].urls.find(u => u.url && normalizeUrl(u.url) === normalizedUrl);
+                    if (existingUrl) {
+                        existingUrl.count += 1;
+                        // Update timestamp to most recent
+                        if (log.timestamp > existingUrl.timestamp) {
+                            existingUrl.timestamp = log.timestamp;
+                        }
+                    } else {
+                        appStats[appName].urls.push({
+                            url: normalizedUrl, // Store normalized URL
+                            title: undefined, // Title not available from logs
+                            timestamp: log.timestamp,
+                            count: 1
+                        });
                     }
                 } else {
-                    appStats[appName].urls.push({
-                        url: log.activeUrl,
-                        timestamp: log.timestamp,
-                        count: 1
-                    });
+                    // No URL but we might have window title from logs - check if we can use it
+                    // Note: logs don't store titles separately, so we skip title tracking from logs
                 }
             }
         });
-        
-        // Add real-time current activity data
-        if (currentActivity) {
-            const appName = currentActivity.app;
-            if (!appStats[appName]) {
-                appStats[appName] = {
-                    count: 0,
-                    keystrokes: 0,
-                    clicks: 0,
-                    timeSpent: 0,
-                    urls: [],
-                    isActive: true
-                };
-            }
-            
-            // Add real-time keystrokes and clicks
-            appStats[appName].keystrokes += currentActivity.keystrokes;
-            appStats[appName].clicks += currentActivity.clicks;
-            appStats[appName].isActive = true;
-            
-            // Add real-time session time
-            if (sessionStartTimeRef.current) {
-                const sessionDuration = Math.floor((Date.now() - sessionStartTimeRef.current) / 1000);
-                appStats[appName].timeSpent += sessionDuration;
-            }
-            
-            // Add current URL if available
-            if (currentActivity.url) {
-                const existingUrl = appStats[appName].urls.find(u => u.url === currentActivity.url);
-                if (existingUrl) {
-                    existingUrl.count += 1;
-                    existingUrl.timestamp = new Date();
-                } else {
-                    appStats[appName].urls.push({
-                        url: currentActivity.url,
-                        timestamp: new Date(),
-                        count: 1
-                    });
-                }
-            }
-        }
         
         // Sort URLs by count (most visited first)
         Object.values(appStats).forEach(stats => {
             stats.urls.sort((a, b) => b.count - a.count);
         });
         
-        const total = logs.length + (currentActivity ? 1 : 0) || 1;
+        const total = Math.max(logs.length, allWindows.length) || 1;
         return Object.entries(appStats).map(([name, stats]) => ({
             appName: name,
+            title: stats.title || name,
             percentage: Math.round((stats.count / total) * 100),
             icon: 'fa-window-maximize',
             color: '#60A5FA',
@@ -249,12 +434,14 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             urls: stats.urls,
             isActive: stats.isActive
         })).sort((a, b) => {
-            // Sort active app first, then by percentage
+            // Sort active app first, then by keystrokes + clicks (most active)
             if (a.isActive && !b.isActive) return -1;
             if (!a.isActive && b.isActive) return 1;
-            return b.percentage - a.percentage;
+            const aActivity = a.keystrokes + a.clicks;
+            const bActivity = b.keystrokes + b.clicks;
+            return bActivity - aActivity;
         });
-    }, [logs, currentActivity]);
+    }, [logs, currentActivity, allWindows]);
 
     // Expandable state
     const [expandedApps, setExpandedApps] = useState<Set<string>>(new Set());
@@ -298,20 +485,36 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
 
             <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
                 
-                {/* Stats Cards */}
-                <div className="grid grid-cols-3 gap-3">
-                    <div className="bg-gray-900 p-3 rounded-lg border border-gray-800 text-center">
-                        <div className="text-2xl font-bold text-green-400">{stats.avgProd}%</div>
-                        <div className="text-[10px] uppercase text-gray-500 font-bold mt-1">Productivity</div>
+                {/* Summary Section - Total Stats Across All Windows */}
+                <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-4 border border-blue-500/30">
+                    <div className="flex items-center gap-2 mb-3">
+                        <i className="fas fa-chart-pie text-blue-400"></i>
+                        <h3 className="text-sm font-bold text-gray-200">Total Activity Summary</h3>
                     </div>
-                    <div className="bg-gray-900 p-3 rounded-lg border border-gray-800 text-center">
-                        <div className="text-xl font-bold text-blue-400">{stats.totalKeys}</div>
-                        <div className="text-[10px] uppercase text-gray-500 font-bold mt-1">Keystrokes</div>
+                    <div className="grid grid-cols-3 gap-3">
+                        <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                            <div className="text-2xl font-bold text-green-400">{stats.avgProd}%</div>
+                            <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Productivity</div>
+                        </div>
+                        <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                            <div className="text-2xl font-bold text-blue-400">{stats.totalKeys.toLocaleString()}</div>
+                            <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Keystrokes</div>
+                            <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                        </div>
+                        <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                            <div className="text-2xl font-bold text-purple-400">{stats.totalClicks.toLocaleString()}</div>
+                            <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Clicks</div>
+                            <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                        </div>
                     </div>
-                    <div className="bg-gray-900 p-3 rounded-lg border border-gray-800 text-center">
-                        <div className="text-xl font-bold text-purple-400">{stats.totalClicks}</div>
-                        <div className="text-[10px] uppercase text-gray-500 font-bold mt-1">Clicks</div>
-                    </div>
+                    {allWindows.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-gray-700/50">
+                            <div className="text-xs text-gray-400">
+                                <i className="fas fa-window-restore mr-1"></i>
+                                Tracking <span className="font-bold text-blue-400">{allWindows.length}</span> {allWindows.length === 1 ? 'window' : 'windows'}
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 {/* Activity Timeline Bar Chart */}
@@ -353,108 +556,158 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     <div className="flex items-center justify-between mb-3">
                         <h3 className="text-xs font-bold text-gray-400 uppercase">Evidence Log</h3>
                         <span className="text-[10px] text-gray-500">
-                            {logs.filter(l => l.screenshotUrl || l.webcamUrl).length} captured
+                            {(() => {
+                                // Count all individual images (screenshots + webcam photos)
+                                let count = 0;
+                                logs.forEach(log => {
+                                    if (log.screenshotUrls && log.screenshotUrls.length > 0) {
+                                        count += log.screenshotUrls.length;
+                                    } else if (log.screenshotUrl) {
+                                        count += 1;
+                                    }
+                                    if (log.webcamUrl) {
+                                        count += 1;
+                                    }
+                                });
+                                return count;
+                            })()} images
                         </span>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
-                        {logs.filter(l => l.screenshotUrl || l.webcamUrl).length > 0 ? (
-                            logs
-                                .filter(l => l.screenshotUrl || l.webcamUrl)
-                                .slice(0, 10) // Show latest 10
-                                .map((log) => (
-                                <div key={log.id} className="bg-gray-800 rounded-lg overflow-hidden border border-gray-700 group relative hover:border-blue-500 transition-colors">
-                                    <div className="aspect-video relative bg-black">
-                                        {log.screenshotUrl ? (
-                                            <img 
-                                                src={log.screenshotUrl} 
-                                                alt="Screen Capture" 
-                                                className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" 
-                                                onError={(e) => {
-                                                    console.error('Failed to load screenshot:', log.id);
-                                                    (e.target as HTMLImageElement).style.display = 'none';
-                                                }}
-                                            />
-                                        ) : (
-                                            <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs">
-                                                No screenshot
-                                            </div>
-                                        )}
-                                        {/* Picture in Picture WebCam */}
-                                        {log.webcamUrl && (
-                                            <div className="absolute bottom-1 right-1 w-1/3 aspect-square rounded-full border-2 border-white/70 overflow-hidden shadow-lg bg-gray-900">
+                        {(() => {
+                            // Flatten logs to create individual evidence items for each screenshot and webcam photo
+                            const evidenceItems: Array<{
+                                id: string;
+                                imageUrl: string;
+                                type: 'screenshot' | 'webcam';
+                                log: ActivityLog;
+                                index?: number;
+                            }> = [];
+                            
+                            logs.forEach(log => {
+                                // Add all screenshots as separate items
+                                if (log.screenshotUrls && log.screenshotUrls.length > 0) {
+                                    log.screenshotUrls.forEach((url, idx) => {
+                                        evidenceItems.push({
+                                            id: `${log.id}-screenshot-${idx}`,
+                                            imageUrl: url,
+                                            type: 'screenshot',
+                                            log: log,
+                                            index: idx
+                                        });
+                                    });
+                                } else if (log.screenshotUrl) {
+                                    evidenceItems.push({
+                                        id: `${log.id}-screenshot-0`,
+                                        imageUrl: log.screenshotUrl,
+                                        type: 'screenshot',
+                                        log: log,
+                                        index: 0
+                                    });
+                                }
+                                
+                                // Add webcam photo as separate item
+                                if (log.webcamUrl) {
+                                    evidenceItems.push({
+                                        id: `${log.id}-webcam`,
+                                        imageUrl: log.webcamUrl,
+                                        type: 'webcam',
+                                        log: log
+                                    });
+                                }
+                            });
+                            
+                            // Sort by timestamp (newest first) and take latest 20
+                            evidenceItems.sort((a, b) => 
+                                b.log.timestamp.getTime() - a.log.timestamp.getTime()
+                            );
+                            
+                            return evidenceItems.length > 0 ? (
+                                <>
+                                    {evidenceItems.slice(0, 20).map((item) => (
+                                        <div key={item.id} className="bg-gray-800 rounded-lg overflow-hidden border border-gray-700 group relative hover:border-blue-500 transition-colors">
+                                            <div className="aspect-video relative bg-black">
                                                 <img 
-                                                    src={log.webcamUrl} 
-                                                    alt="Camera Photo" 
-                                                    className="w-full h-full object-cover" 
+                                                    src={item.imageUrl} 
+                                                    alt={item.type === 'screenshot' ? `Screen Capture ${(item.index || 0) + 1}` : 'Camera Photo'} 
+                                                    className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" 
                                                     onError={(e) => {
-                                                        console.error('Failed to load webcam photo:', log.id);
+                                                        console.error(`Failed to load ${item.type}:`, item.id);
                                                         (e.target as HTMLImageElement).style.display = 'none';
                                                     }}
                                                 />
-                                            </div>
-                                        )}
-                                        {/* Hover overlay with details */}
-                                        <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-xs p-2">
-                                            <div className="text-white font-bold mb-1">
-                                                {log.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                            </div>
-                                            <div className="text-gray-300 text-[10px] text-center">
-                                                {log.activeWindow}
-                                            </div>
-                                            {log.activeUrl && (
-                                                <div className="text-blue-400 text-[9px] mt-1 text-center max-w-full truncate" title={log.activeUrl}>
-                                                    {log.activeUrl}
+                                                {/* Type badge */}
+                                                <div className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[8px] font-bold ${
+                                                    item.type === 'screenshot' 
+                                                        ? 'bg-blue-500/80 text-white' 
+                                                        : 'bg-green-500/80 text-white'
+                                                }`}>
+                                                    {item.type === 'screenshot' ? '📷 Screenshot' : '📸 Camera'}
                                                 </div>
-                                            )}
-                                            <div className="text-gray-400 text-[10px] mt-1">
-                                                Prod: {log.productivityScore}%
+                                                {/* Hover overlay with details */}
+                                                <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-xs p-2">
+                                                    <div className="text-white font-bold mb-1">
+                                                        {item.log.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                                    </div>
+                                                    <div className="text-gray-300 text-[10px] text-center">
+                                                        {item.log.activeWindow}
+                                                    </div>
+                                                    {item.log.activeUrl && (
+                                                        <div className="text-blue-400 text-[9px] mt-1 text-center max-w-full truncate" title={item.log.activeUrl}>
+                                                            {item.log.activeUrl}
+                                                        </div>
+                                                    )}
+                                                    <div className="text-gray-400 text-[10px] mt-1">
+                                                        Prod: {item.log.productivityScore}%
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div className="p-2 flex flex-col gap-1 bg-gray-850">
+                                                <div className="flex justify-between items-center">
+                                                    <span className="text-[10px] text-gray-400">
+                                                        {item.log.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                                    </span>
+                                                    <div className="flex items-center gap-1">
+                                                        {item.type === 'screenshot' && (
+                                                            <span className="text-[8px] px-1 py-0.5 rounded bg-blue-500/20 text-blue-400" title="Screenshot">
+                                                                📷
+                                                            </span>
+                                                        )}
+                                                        {item.type === 'webcam' && (
+                                                            <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/20 text-green-400" title="Camera Photo">
+                                                                📸
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 truncate max-w-[120px]" title={item.log.activeWindow}>
+                                                        {item.log.activeWindow}
+                                                    </span>
+                                                    {item.log.activeUrl && (
+                                                        <span className="text-[9px] text-blue-400 truncate max-w-[150px]" title={item.log.activeUrl}>
+                                                            🔗 {item.log.activeUrl.replace(/^https?:\/\//, '').split('/')[0]}
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </div>
                                         </div>
-                                    </div>
-                                    <div className="p-2 flex flex-col gap-1 bg-gray-850">
-                                        <div className="flex justify-between items-center">
-                                            <span className="text-[10px] text-gray-400">
-                                                {log.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                            </span>
-                                            <div className="flex items-center gap-1">
-                                                {log.screenshotUrl && (
-                                                    <span className="text-[8px] px-1 py-0.5 rounded bg-blue-500/20 text-blue-400" title="Screenshot">
-                                                        📷
-                                                    </span>
-                                                )}
-                                                {log.webcamUrl && (
-                                                    <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/20 text-green-400" title="Camera Photo">
-                                                        📸
-                                                    </span>
-                                                )}
-                                            </div>
+                                    ))}
+                                    {evidenceItems.length > 20 && (
+                                        <div className="col-span-2 text-center mt-3 text-xs text-gray-500">
+                                            Showing latest 20 of {evidenceItems.length} images
                                         </div>
-                                        <div className="flex items-center justify-between">
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 truncate max-w-[120px]" title={log.activeWindow}>
-                                                {log.activeWindow}
-                                            </span>
-                                            {log.activeUrl && (
-                                                <span className="text-[9px] text-blue-400 truncate max-w-[150px]" title={log.activeUrl}>
-                                                    🔗 {log.activeUrl.replace(/^https?:\/\//, '').split('/')[0]}
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
+                                    )}
+                                </>
+                            ) : (
+                                <div className="col-span-2 text-center py-8 text-gray-600 bg-gray-900/50 rounded-lg border border-gray-800 border-dashed">
+                                    <i className="fas fa-camera text-2xl mb-2 block opacity-50"></i>
+                                    <p className="text-xs mb-1">No screenshots or photos captured yet</p>
+                                    <p className="text-[10px] text-gray-500">Start the timer to begin capturing</p>
                                 </div>
-                            ))
-                        ) : (
-                            <div className="col-span-2 text-center py-8 text-gray-600 bg-gray-900/50 rounded-lg border border-gray-800 border-dashed">
-                                <i className="fas fa-camera text-2xl mb-2 block opacity-50"></i>
-                                <p className="text-xs mb-1">No screenshots or photos captured yet</p>
-                                <p className="text-[10px] text-gray-500">Start the timer to begin capturing</p>
-                            </div>
-                        )}
+                            );
+                        })()}
                     </div>
-                    {logs.filter(l => l.screenshotUrl || l.webcamUrl).length > 10 && (
-                        <div className="text-center mt-3 text-xs text-gray-500">
-                            Showing latest 10 of {logs.filter(l => l.screenshotUrl || l.webcamUrl).length} captures
-                        </div>
-                    )}
                 </div>
 
                 {/* App Usage List */}
@@ -480,13 +733,20 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                     >
                                         <div className="flex items-center gap-3">
                                             <div className={`w-8 h-8 rounded flex items-center justify-center ${app.isActive ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-700 text-gray-400'}`}>
-                                                <i className={`fas ${app.appName.includes('Code') ? 'fa-code' : app.appName.includes('Chrome') ? 'fa-globe' : app.appName.includes('Brave') ? 'fa-shield-alt' : app.appName.includes('WhatsApp') ? 'fa-whatsapp' : 'fa-desktop'}`}></i>
+                                                <i className={`fas ${app.appName.includes('Code') || app.appName.includes('Cursor') ? 'fa-code' : app.appName.includes('Chrome') ? 'fa-globe' : app.appName.includes('Brave') ? 'fa-shield-alt' : app.appName.includes('WhatsApp') ? 'fa-whatsapp' : 'fa-desktop'}`}></i>
                                             </div>
-                                            <div className="flex items-center gap-2">
-                                                <span className="font-medium text-gray-300">{app.appName}</span>
-                                                {app.isActive && (
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 animate-pulse">
-                                                        Active
+                                            <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="font-medium text-gray-300 truncate">{app.appName}</span>
+                                                    {app.isActive && (
+                                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 animate-pulse flex-shrink-0">
+                                                            Active
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                {app.title && app.title !== app.appName && (
+                                                    <span className="text-[10px] text-gray-500 truncate" title={app.title}>
+                                                        {app.title}
                                                     </span>
                                                 )}
                                             </div>
@@ -521,12 +781,12 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                                 </div>
                                             </div>
                                             
-                                            {/* URL Details - Show for browsers */}
+                                            {/* URL/Title Details - Show for browsers */}
                                             {app.urls && app.urls.length > 0 && (
                                                 <div className="mt-3 pt-3 border-t border-gray-700/50">
                                                     <div className="text-xs font-bold text-gray-400 uppercase mb-2 flex items-center gap-2">
                                                         <i className="fas fa-link text-blue-400"></i>
-                                                        URLs Visited ({app.urls.length})
+                                                        {app.urls.some(u => u.url) ? 'URLs' : 'Pages'} Visited ({app.urls.length})
                                                     </div>
                                                     <div className="space-y-1.5 max-h-48 overflow-y-auto custom-scrollbar">
                                                         {app.urls.map((urlData, urlIdx) => (
@@ -536,23 +796,35 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                                             >
                                                                 <div className="flex items-start justify-between gap-2">
                                                                     <div className="flex-1 min-w-0">
-                                                                        <a 
-                                                                            href={urlData.url} 
-                                                                            target="_blank" 
-                                                                            rel="noopener noreferrer"
-                                                                            className="text-xs text-blue-400 hover:text-blue-300 truncate block"
-                                                                            title={urlData.url}
-                                                                        >
-                                                                            {urlData.url.replace(/^https?:\/\//, '').split('/')[0]}
-                                                                        </a>
-                                                                        <div className="text-[10px] text-gray-500 mt-0.5">
-                                                                            {urlData.url.length > 50 ? urlData.url.substring(0, 50) + '...' : urlData.url}
-                                                                        </div>
+                                                                        {urlData.url ? (
+                                                                            // Show URL if available
+                                                                            <>
+                                                                                <a 
+                                                                                    href={urlData.url} 
+                                                                                    target="_blank" 
+                                                                                    rel="noopener noreferrer"
+                                                                                    className="text-xs text-blue-400 hover:text-blue-300 truncate block"
+                                                                                    title={urlData.url}
+                                                                                >
+                                                                                    {urlData.url.replace(/^https?:\/\//, '').split('/')[0]}
+                                                                                </a>
+                                                                                <div className="text-[10px] text-gray-500 mt-0.5">
+                                                                                    {urlData.url.length > 50 ? urlData.url.substring(0, 50) + '...' : urlData.url}
+                                                                                </div>
+                                                                            </>
+                                                                        ) : (
+                                                                            // Show title if URL is unknown
+                                                                            <>
+                                                                                <div className="text-xs text-gray-300 font-medium truncate block" title={urlData.title || 'Unknown Page'}>
+                                                                                    {urlData.title || 'Unknown Page'}
+                                                                                </div>
+                                                                                <div className="text-[10px] text-gray-500 mt-0.5 italic">
+                                                                                    (URL unknown)
+                                                                                </div>
+                                                                            </>
+                                                                        )}
                                                                     </div>
                                                                     <div className="flex flex-col items-end gap-1">
-                                                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-mono">
-                                                                            {urlData.count}x
-                                                                        </span>
                                                                         <span className="text-[9px] text-gray-600">
                                                                             {urlData.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                                                                         </span>
@@ -564,7 +836,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                                 </div>
                                             )}
                                             
-                                            {/* Show message if no URLs but it's a browser */}
+                                            {/* Show message if no URLs/titles but it's a browser */}
                                             {(!app.urls || app.urls.length === 0) && 
                                              (app.appName.toLowerCase().includes('chrome') || 
                                               app.appName.toLowerCase().includes('brave') || 
@@ -573,7 +845,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                               app.appName.toLowerCase().includes('safari')) && (
                                                 <div className="mt-3 pt-3 border-t border-gray-700/50">
                                                     <div className="text-xs text-gray-500 italic text-center py-2">
-                                                        No URLs tracked for this browser session
+                                                        No URLs or pages tracked for this browser session
                                                     </div>
                                                 </div>
                                             )}

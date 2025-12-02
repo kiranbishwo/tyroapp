@@ -28,6 +28,14 @@ declare global {
                 suggestion: string;
             }>;
             getActivityInsights: (timeWindow?: { start: number; end: number }) => Promise<any>;
+            getUserConsent: () => Promise<{ consent: boolean | null; remembered: boolean }>;
+            setUserConsent: (consent: boolean, remember: boolean) => Promise<boolean>;
+            revokeConsent: () => Promise<boolean>;
+            getSettings: () => Promise<any>;
+            setSettings: (settings: any) => Promise<boolean>;
+            exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
+            deleteAllData: () => Promise<boolean>;
+            getLastActivityTimestamp: () => Promise<number | null>;
         };
     }
 }

@@ -10,17 +10,23 @@
     "preview": "vite preview",
     "electron:dev": "concurrently \"cross-env NODE_ENV=development vite\" \"wait-on http://localhost:3000 && cross-env NODE_ENV=development electron .\"",
     "electron:build": "npm run build && electron-builder",
-    "electron:pack": "npm run build && electron-builder --dir"
+    "electron:pack": "npm run build && electron-builder --dir",
+    "postinstall": "node scripts/rebuild-check.cjs || echo '⚠️  Native rebuild skipped - app will use PowerShell fallback (this is OK!)'",
+    "postinstall:force": "electron-rebuild",
+    "postinstall:skip": "echo 'Skipping native module rebuild'"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
     "active-win": "^9.0.0",
+    "electron-store": "^10.1.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "uiohook-napi": "^1.5.4"
   },
   "devDependencies": {
-    "@types/node": "^22.14.0",
-    "@vitejs/plugin-react": "^5.0.0",
+    "@electron/rebuild": "^3.6.1",
+    "@types/node": "^20.11.0",
+    "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.22",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
