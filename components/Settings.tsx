@@ -6,23 +6,12 @@ interface SettingsProps {
     timeEntries: TimeEntry[];
     onClose: () => void;
     onDataDeleted: () => void;
+    onNavigateToCalculationDetails?: () => void;
 }
 
-// Extend Window interface for Electron API
-declare global {
-    interface Window {
-        electronAPI?: {
-            getSettings: () => Promise<SettingsType>;
-            setSettings: (settings: SettingsType) => Promise<boolean>;
-            exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
-            deleteAllData: () => Promise<boolean>;
-            revokeConsent: () => Promise<boolean>;
-            getUserConsent: () => Promise<{ consent: boolean | null; remembered: boolean }>;
-        };
-    }
-}
+// Electron API types are defined in types/electron.d.ts
 
-export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, onClose, onDataDeleted }) => {
+export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, onClose, onDataDeleted, onNavigateToCalculationDetails }) => {
     const [settings, setSettings] = useState<SettingsType>({
         enableScreenshots: true,
         enableUrlTracking: true,
@@ -282,6 +271,22 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
                         </div>
                     </section>
 
+                    {/* Help & Documentation */}
+                    <section>
+                        <h3 className="text-white font-semibold text-sm mb-3">Help & Documentation</h3>
+                        <div className="space-y-3">
+                            {onNavigateToCalculationDetails && (
+                                <button
+                                    onClick={onNavigateToCalculationDetails}
+                                    className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white font-semibold py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
+                                >
+                                    <i className="fas fa-info-circle"></i>
+                                    View Metrics Explanation
+                                </button>
+                            )}
+                        </div>
+                    </section>
+
                     {/* What We Collect */}
                     <section className="bg-gray-800 rounded-lg p-4">
                         <h3 className="text-white font-semibold text-sm mb-3">What We Collect</h3>
@@ -304,7 +309,7 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
                             </div>
                             <div className="flex items-start gap-2 mt-3">
                                 <i className="fas fa-times-circle text-red-400 mt-0.5"></i>
-                                <span>We do NOT collect: keystroke content, passwords, files, microphone, or webcam (except for check-in/out)</span>
+                                <span>We do NOT collect: keystroke content, passwords, files, microphone, or webcam recordings. Photos can be taken randomly (like screenshots) for verification purposes.</span>
                             </div>
                         </div>
                         <p className="text-xs text-gray-400 mt-3">

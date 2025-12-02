@@ -7,35 +7,7 @@ interface InsightsDashboardProps {
     onClose: () => void;
 }
 
-// Extend Window interface for Electron API
-declare global {
-    interface Window {
-        electronAPI?: {
-            windowMinimize: () => Promise<void>;
-            windowMaximize: () => Promise<void>;
-            windowClose: () => Promise<void>;
-            windowIsMaximized: () => Promise<boolean>;
-            captureScreenshot: () => Promise<string | null>;
-            getActiveWindow: () => Promise<{ title: string; owner: string; url: string | null; app: string }>;
-            startActivityMonitoring: () => Promise<boolean>;
-            stopActivityMonitoring: () => Promise<boolean>;
-            onActivityUpdate: (callback: (data: any) => void) => void;
-            removeActivityListener: () => void;
-            onAllWindowsUpdate: (callback: (data: any) => void) => void;
-            removeAllWindowsListener: () => void;
-            processActivity: (input: any) => Promise<any>;
-            getActivityInsights: (timeWindow?: any) => Promise<any>;
-            getUserConsent: () => Promise<{ consent: boolean | null; remembered: boolean }>;
-            setUserConsent: (consent: boolean, remember: boolean) => Promise<boolean>;
-            revokeConsent: () => Promise<boolean>;
-            getSettings: () => Promise<any>;
-            setSettings: (settings: any) => Promise<boolean>;
-            exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
-            deleteAllData: () => Promise<boolean>;
-            getLastActivityTimestamp: () => Promise<number | null>;
-        };
-    }
-}
+// Electron API types are defined in types/electron.d.ts
 
 export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, projects, onClose }) => {
     // Real-time activity state
@@ -176,7 +148,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
     
     // Calculate aggregate stats (including real-time data from all windows)
     const stats = useMemo(() => {
-        const totalProd = logs.reduce((acc, log) => acc + log.productivityScore, 0);
+        const totalProd = logs.reduce((acc, log) => acc + (log.compositeScore || log.productivityScore || 0), 0);
+        
         // Use totalStats from all windows if available, otherwise calculate from logs
         const totalKeys = totalStats.totalKeystrokes > 0 
             ? totalStats.totalKeystrokes 
@@ -186,10 +159,45 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             : logs.reduce((acc, log) => acc + log.mouseEvents, 0) + (currentActivity?.clicks || 0);
         const avgProd = logs.length > 0 ? Math.round(totalProd / logs.length) : 0;
         
+        // TyroDesk metrics
+        const logsWithComposite = logs.filter(log => log.compositeScore !== undefined);
+        const avgCompositeScore = logsWithComposite.length > 0 
+            ? Math.round(logsWithComposite.reduce((acc, log) => acc + (log.compositeScore || 0), 0) / logsWithComposite.length)
+            : avgProd;
+        
+        // Category breakdown
+        const categoryBreakdown = logs.reduce((acc, log) => {
+            const category = log.urlCategory || log.appCategory || 'neutral';
+            acc[category] = (acc[category] || 0) + 1;
+            return acc;
+        }, {} as Record<string, number>);
+        
+        // Focus metrics
+        const focusScores = logs.filter(log => log.focusScore !== undefined).map(log => log.focusScore!);
+        const avgFocusScore = focusScores.length > 0 
+            ? Math.round(focusScores.reduce((a, b) => a + b, 0) / focusScores.length)
+            : 0;
+        
+        const totalContextSwitches = logs.reduce((acc, log) => acc + (log.contextSwitches || 0), 0);
+        
+        // Score breakdown averages
+        const breakdowns = logs.filter(log => log.scoreBreakdown).map(log => log.scoreBreakdown!);
+        const avgBreakdown = breakdowns.length > 0 ? {
+            activity: Math.round(breakdowns.reduce((acc, b) => acc + b.activity, 0) / breakdowns.length),
+            app: Math.round(breakdowns.reduce((acc, b) => acc + b.app, 0) / breakdowns.length),
+            url: Math.round(breakdowns.reduce((acc, b) => acc + b.url, 0) / breakdowns.length),
+            focus: Math.round(breakdowns.reduce((acc, b) => acc + b.focus, 0) / breakdowns.length)
+        } : null;
+        
         return {
             avgProd,
             totalKeys,
-            totalClicks
+            totalClicks,
+            avgCompositeScore,
+            categoryBreakdown,
+            avgFocusScore,
+            totalContextSwitches,
+            avgBreakdown
         };
     }, [logs, currentActivity, totalStats]);
 
@@ -225,8 +233,10 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             appStats[appName].isActive = window.isActive;
             appStats[appName].title = window.title;
             
-            // Calculate time spent based on startTime and lastSeen
+            // Calculate time spent based on startTime and lastSeen (real-time tracking)
+            // This gives accurate time for currently open windows
             const timeSpent = Math.floor((window.lastSeen - window.startTime) / 1000);
+            // Real-time tracking takes priority (more accurate for active windows)
             appStats[appName].timeSpent = timeSpent;
             
             // Normalize URL helper function
@@ -337,8 +347,22 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             }
         });
         
-        // Process historical logs (for apps that might not be in allWindows yet)
-        logs.forEach(log => {
+        // Process historical logs to calculate accurate time spent per app
+        // Sort logs by timestamp (oldest first) to calculate duration between consecutive logs
+        const sortedLogs = [...logs].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+        
+        // Detect interval duration (1 min in dev, 10 min in prod)
+        let intervalDuration = 600; // Default 10 minutes in seconds
+        if (sortedLogs.length > 1) {
+            const timeDiff = (sortedLogs[1].timestamp.getTime() - sortedLogs[0].timestamp.getTime()) / 1000;
+            // If logs are less than 2 minutes apart, it's dev mode (1-minute intervals)
+            if (timeDiff < 120 && timeDiff > 0) {
+                intervalDuration = 60; // 1 minute in dev mode
+                console.log('🔧 Detected dev mode intervals (1 minute) for time calculation');
+            }
+        }
+        
+        sortedLogs.forEach((log, index) => {
             const appName = log.activeWindow;
             if (!appStats[appName]) {
                 appStats[appName] = {
@@ -352,14 +376,50 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 };
             }
             appStats[appName].count += 1;
-            // Only add to stats if not already set from allWindows (allWindows takes priority)
+            
+            // Only add to stats if not already set from allWindows (allWindows takes priority for real-time data)
             if (!allWindows.find(w => w.app === appName)) {
                 const keystrokes = typeof log.keyboardEvents === 'number' ? log.keyboardEvents : 0;
                 const clicks = typeof log.mouseEvents === 'number' ? log.mouseEvents : 0;
                 appStats[appName].keystrokes += keystrokes;
                 appStats[appName].clicks += clicks;
-                // Estimate time: each log represents ~30-60 seconds of activity
-                appStats[appName].timeSpent += 45; // Average 45 seconds per log entry
+            }
+            
+            // Calculate actual time spent from log timestamps
+            // Each log represents one interval (10 min in prod, 1 min in dev)
+            // Only add time if app is NOT in allWindows (to avoid double counting with real-time tracking)
+            if (!allWindows.find(w => w.app === appName)) {
+                // Calculate time for this log entry
+                let timeForThisLog = intervalDuration;
+                
+                // If this is the last log, check if we should add partial time
+                if (index === sortedLogs.length - 1) {
+                    // Check if there's a next log to calculate duration
+                    const nextLog = sortedLogs[index + 1];
+                    if (nextLog) {
+                        // Calculate duration until next log
+                        const duration = Math.floor((nextLog.timestamp.getTime() - log.timestamp.getTime()) / 1000);
+                        timeForThisLog = Math.min(intervalDuration, duration);
+                    } else {
+                        // Last log - check if app is still active (add time since log creation)
+                        const isCurrentlyActive = allWindows.some(w => w.app === appName && w.isActive);
+                        if (isCurrentlyActive) {
+                            const timeSinceLog = Math.floor((Date.now() - log.timestamp.getTime()) / 1000);
+                            // Cap at interval duration to avoid overcounting
+                            timeForThisLog = Math.min(intervalDuration, timeSinceLog);
+                        }
+                    }
+                } else {
+                    // Not the last log - calculate duration until next log
+                    const nextLog = sortedLogs[index + 1];
+                    if (nextLog) {
+                        const duration = Math.floor((nextLog.timestamp.getTime() - log.timestamp.getTime()) / 1000);
+                        timeForThisLog = Math.min(intervalDuration, duration);
+                    }
+                }
+                
+                // Add time spent for this app (only if not in real-time tracking)
+                appStats[appName].timeSpent += timeForThisLog;
             }
             
             // Track URLs if available (normalize to prevent duplicates)
@@ -422,7 +482,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         });
         
         const total = Math.max(logs.length, allWindows.length) || 1;
-        return Object.entries(appStats).map(([name, stats]) => ({
+        const appUsageArray = Object.entries(appStats).map(([name, stats]) => ({
             appName: name,
             title: stats.title || name,
             percentage: Math.round((stats.count / total) * 100),
@@ -434,13 +494,13 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             urls: stats.urls,
             isActive: stats.isActive
         })).sort((a, b) => {
-            // Sort active app first, then by keystrokes + clicks (most active)
+            // Sort active app first, then by time spent (most time)
             if (a.isActive && !b.isActive) return -1;
             if (!a.isActive && b.isActive) return 1;
-            const aActivity = a.keystrokes + a.clicks;
-            const bActivity = b.keystrokes + b.clicks;
-            return bActivity - aActivity;
+            return (b.timeSpent || 0) - (a.timeSpent || 0);
         });
+        
+        return appUsageArray;
     }, [logs, currentActivity, allWindows]);
 
     // Expandable state
@@ -458,13 +518,19 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         });
     };
 
+    // Format time in min:sec format (e.g., 5:30 for 5 minutes 30 seconds)
     const formatTime = (seconds: number): string => {
-        const hours = Math.floor(seconds / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
+        const totalSeconds = Math.floor(seconds);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const secs = totalSeconds % 60;
+        
         if (hours > 0) {
-            return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+            // For hours: show as "1h 5:30" format
+            return `${hours}h ${minutes}:${secs.toString().padStart(2, '0')}`;
         }
-        return `${minutes}m`;
+        // For minutes: show as "5:30" format
+        return `${minutes}:${secs.toString().padStart(2, '0')}`;
     };
 
     return (
@@ -493,8 +559,15 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     </div>
                     <div className="grid grid-cols-3 gap-3">
                         <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                            <div className="text-2xl font-bold text-green-400">{stats.avgProd}%</div>
-                            <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Productivity</div>
+                            <div className="text-2xl font-bold text-green-400">
+                                {stats.avgCompositeScore > 0 ? stats.avgCompositeScore : stats.avgProd}%
+                            </div>
+                            <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">
+                                {stats.avgCompositeScore > 0 ? 'Composite Score' : 'Productivity'}
+                            </div>
+                            {stats.avgCompositeScore > 0 && (
+                                <div className="text-[9px] text-gray-500 mt-0.5">TyroDesk Algorithm</div>
+                            )}
                         </div>
                         <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
                             <div className="text-2xl font-bold text-blue-400">{stats.totalKeys.toLocaleString()}</div>
@@ -517,6 +590,159 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     )}
                 </div>
 
+                {/* TyroDesk Algorithm Metrics Section */}
+                {(() => {
+                    const hasTyroDeskData = logs.some(log => log.compositeScore !== undefined || log.appCategory || log.focusScore !== undefined);
+                    console.log('🔍 DEBUG - TyroDesk section check:', {
+                        hasTyroDeskData,
+                        logsCount: logs.length,
+                        logsWithComposite: logs.filter(l => l.compositeScore !== undefined).length,
+                        logsWithAppCategory: logs.filter(l => l.appCategory).length,
+                        logsWithFocusScore: logs.filter(l => l.focusScore !== undefined).length,
+                        sampleLog: logs[0] ? {
+                            hasCompositeScore: !!logs[0].compositeScore,
+                            hasAppCategory: !!logs[0].appCategory,
+                            hasFocusScore: logs[0].focusScore !== undefined
+                        } : null
+                    });
+                    return hasTyroDeskData;
+                })() && (
+                    <div className="bg-gradient-to-br from-purple-900/30 to-pink-900/30 rounded-xl p-4 border border-purple-500/30">
+                        <div className="flex items-center gap-2 mb-4">
+                            <i className="fas fa-brain text-purple-400"></i>
+                            <h3 className="text-sm font-bold text-gray-200">TyroDesk Productivity Analysis</h3>
+                        </div>
+                        
+                        {/* Composite Score with Breakdown */}
+                        {stats.avgCompositeScore > 0 && stats.avgBreakdown && (
+                            <div className="mb-4">
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs font-bold text-gray-400 uppercase">Composite Score Breakdown</span>
+                                        <span 
+                                            className="text-[8px] text-gray-500 cursor-help" 
+                                            title="Weighted combination: Activity (25%) + App (25%) + URL (20%) + Focus (30%)"
+                                        >
+                                            <i className="fas fa-info-circle"></i>
+                                        </span>
+                                    </div>
+                                    <span className="text-lg font-bold" style={{ color: logs.find(l => l.compositeScore)?.scoreClassification?.color || '#eab308' }}>
+                                        {stats.avgCompositeScore}%
+                                    </span>
+                                </div>
+                                <div className="grid grid-cols-4 gap-2">
+                                    <div 
+                                        className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-blue-500 transition-colors cursor-help" 
+                                        title="Activity Score (25% weight): Based on keystrokes + mouse clicks. Higher = more active computer use."
+                                    >
+                                        <div className="text-sm font-bold text-blue-400">{stats.avgBreakdown.activity}</div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">Activity</div>
+                                        <div className="text-[8px] text-gray-600 mt-0.5">25% weight</div>
+                                    </div>
+                                    <div 
+                                        className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-green-500 transition-colors cursor-help"
+                                        title="App Score (25% weight): Productivity of apps used. VS Code=100%, Chrome=50%, Spotify=0%"
+                                    >
+                                        <div className="text-sm font-bold text-green-400">{stats.avgBreakdown.app}</div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">App</div>
+                                        <div className="text-[8px] text-gray-600 mt-0.5">25% weight</div>
+                                    </div>
+                                    <div 
+                                        className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-yellow-500 transition-colors cursor-help"
+                                        title="URL Score (20% weight): Productivity of websites visited. GitHub=100%, Google=50%, Facebook=0%"
+                                    >
+                                        <div className="text-sm font-bold text-yellow-400">{stats.avgBreakdown.url}</div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">URL</div>
+                                        <div className="text-[8px] text-gray-600 mt-0.5">20% weight</div>
+                                    </div>
+                                    <div 
+                                        className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-purple-500 transition-colors cursor-help"
+                                        title="Focus Score (30% weight): How focused you were. Fewer app switches = higher score. 100% = excellent focus!"
+                                    >
+                                        <div className="text-sm font-bold text-purple-400">{stats.avgBreakdown.focus}</div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">Focus</div>
+                                        <div className="text-[8px] text-gray-600 mt-0.5">30% weight</div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Category Breakdown */}
+                        {Object.keys(stats.categoryBreakdown).length > 0 && (
+                            <div className="mb-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <div className="text-xs font-bold text-gray-400 uppercase">App/URL Category Distribution</div>
+                                    <span 
+                                        className="text-[8px] text-gray-500 cursor-help" 
+                                        title="Shows how your time was split: Productive (VS Code, Office), Neutral (Browsers, Communication), Unproductive (Entertainment)"
+                                    >
+                                        <i className="fas fa-info-circle"></i>
+                                    </span>
+                                </div>
+                                <div className="flex gap-2">
+                                    {stats.categoryBreakdown.productive && (
+                                        <div 
+                                            className="flex-1 bg-green-900/30 p-2 rounded border border-green-500/30 text-center hover:border-green-400 transition-colors cursor-help"
+                                            title="Productive: VS Code, Office apps, Design tools, GitHub, Stack Overflow"
+                                        >
+                                            <div className="text-sm font-bold text-green-400">{stats.categoryBreakdown.productive}</div>
+                                            <div className="text-[9px] text-gray-400 mt-0.5">Productive</div>
+                                        </div>
+                                    )}
+                                    {stats.categoryBreakdown.neutral && (
+                                        <div 
+                                            className="flex-1 bg-yellow-900/30 p-2 rounded border border-yellow-500/30 text-center hover:border-yellow-400 transition-colors cursor-help"
+                                            title="Neutral: Browsers, Communication apps (Slack, Teams), Search engines"
+                                        >
+                                            <div className="text-sm font-bold text-yellow-400">{stats.categoryBreakdown.neutral}</div>
+                                            <div className="text-[9px] text-gray-400 mt-0.5">Neutral</div>
+                                        </div>
+                                    )}
+                                    {stats.categoryBreakdown.unproductive && (
+                                        <div 
+                                            className="flex-1 bg-red-900/30 p-2 rounded border border-red-500/30 text-center hover:border-red-400 transition-colors cursor-help"
+                                            title="Unproductive: Entertainment (Spotify, Netflix), Social media (Facebook, Twitter)"
+                                        >
+                                            <div className="text-sm font-bold text-red-400">{stats.categoryBreakdown.unproductive}</div>
+                                            <div className="text-[9px] text-gray-400 mt-0.5">Unproductive</div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Focus Metrics */}
+                        {stats.avgFocusScore > 0 && (
+                            <div className="grid grid-cols-2 gap-3">
+                                <div 
+                                    className="bg-gray-900/50 p-3 rounded border border-gray-700 text-center hover:border-purple-500 transition-colors cursor-help"
+                                    title="Focus Score: Measures how focused you were. 100% = excellent focus (minimal app switching). Higher = better productivity."
+                                >
+                                    <div className="text-xl font-bold text-purple-400">{stats.avgFocusScore}%</div>
+                                    <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Avg Focus Score</div>
+                                    <div className="text-[8px] text-gray-600 mt-1">
+                                        {stats.avgFocusScore >= 80 ? '⭐ Excellent!' : 
+                                         stats.avgFocusScore >= 60 ? '✅ Good' : 
+                                         stats.avgFocusScore >= 40 ? '⚠️ Moderate' : '❌ Low'}
+                                    </div>
+                                </div>
+                                <div 
+                                    className="bg-gray-900/50 p-3 rounded border border-gray-700 text-center hover:border-orange-500 transition-colors cursor-help"
+                                    title="Context Switches: Number of times you switched between different apps. Lower = better. Each switch costs ~23 min to regain focus."
+                                >
+                                    <div className="text-xl font-bold text-orange-400">{stats.totalContextSwitches}</div>
+                                    <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Context Switches</div>
+                                    <div className="text-[8px] text-gray-600 mt-1">
+                                        {stats.totalContextSwitches === 0 ? '⭐ Perfect!' : 
+                                         stats.totalContextSwitches <= 3 ? '✅ Good' : 
+                                         stats.totalContextSwitches <= 6 ? '⚠️ Moderate' : '❌ High'}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 {/* Activity Timeline Bar Chart */}
                 <div className="bg-gray-900 rounded-lg p-4 border border-gray-800">
                     <h3 className="text-xs font-bold text-gray-400 uppercase mb-4">Activity Timeline</h3>
@@ -534,15 +760,35 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                         <div 
                                             className="absolute bottom-0 w-full rounded-sm transition-all"
                                             style={{ 
-                                                height: `${log.productivityScore}%`, 
-                                                backgroundColor: project?.color || '#555' 
+                                                height: `${(log.compositeScore || log.productivityScore || 0)}%`, 
+                                                backgroundColor: log.scoreClassification?.color || project?.color || '#555' 
                                             }}
                                         ></div>
                                         {/* Tooltip */}
-                                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block w-32 bg-black text-xs p-2 rounded border border-gray-700 z-50 pointer-events-none">
+                                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block w-48 bg-black text-xs p-2 rounded border border-gray-700 z-50 pointer-events-none">
                                             <div className="font-bold mb-1">{log.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
-                                            <div>Win: {log.activeWindow}</div>
-                                            <div>Prod: {log.productivityScore}%</div>
+                                            <div>App: {log.activeWindow}</div>
+                                            {log.compositeScore !== undefined ? (
+                                                <>
+                                                    <div className="font-semibold mt-1" style={{ color: log.scoreClassification?.color }}>
+                                                        Score: {log.compositeScore}% ({log.scoreClassification?.label})
+                                                    </div>
+                                                    {log.appCategory && (
+                                                        <div className="text-[10px] mt-0.5">
+                                                            Category: <span className={`font-semibold ${
+                                                                log.appCategory === 'productive' ? 'text-green-400' :
+                                                                log.appCategory === 'unproductive' ? 'text-red-400' :
+                                                                'text-yellow-400'
+                                                            }`}>{log.appCategory}</span>
+                                                        </div>
+                                                    )}
+                                                    {log.focusScore !== undefined && (
+                                                        <div className="text-[10px] mt-0.5">Focus: {log.focusScore}%</div>
+                                                    )}
+                                                </>
+                                            ) : (
+                                                <div>Prod: {log.productivityScore}%</div>
+                                            )}
                                         </div>
                                     </div>
                                 );

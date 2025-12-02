@@ -4,7 +4,8 @@ export enum AppView {
     DASHBOARD = 'DASHBOARD',
     SCREENCAST = 'SCREENCAST',
     INSIGHTS = 'INSIGHTS',
-    SETTINGS = 'SETTINGS'
+    SETTINGS = 'SETTINGS',
+    CALCULATION_DETAILS = 'CALCULATION_DETAILS'
 }
 
 export interface Settings {
@@ -45,6 +46,8 @@ export interface ScreenShot {
     type: 'SCREEN' | 'CAM';
 }
 
+export type ProductivityCategory = 'productive' | 'neutral' | 'unproductive';
+
 export interface ActivityLog {
     id: string;
     timestamp: Date;
@@ -59,6 +62,30 @@ export interface ActivityLog {
     webcamUrl?: string;
     isIdle?: boolean; // True if this interval was marked as idle
     idleDuration?: number; // Duration of idle time in seconds
+    // Hubstaff algorithm fields (lightweight)
+    appCategory?: ProductivityCategory; // Classified app category
+    appCategoryWeight?: number; // Weight for app category (0.0-1.0)
+    urlCategory?: ProductivityCategory; // Classified URL category (overrides app category for browsers)
+    urlCategoryWeight?: number; // Weight for URL category (0.0-1.0)
+    // Deep work metrics
+    contextSwitches?: number; // Number of app/window changes in recent period
+    focusScore?: number; // 0-100 focus score (higher = more focused)
+    averageSessionLength?: number; // Average minutes per app session
+    longestSession?: number; // Longest uninterrupted session in minutes
+    // Composite scoring
+    compositeScore?: number; // Final weighted composite score (0-100)
+    scoreBreakdown?: { // Component breakdown
+        activity: number;
+        app: number;
+        url: number;
+        focus: number;
+    };
+    scoreClassification?: { // Score classification
+        level: 'exceptional' | 'high' | 'moderate' | 'low' | 'very_low';
+        label: string;
+        description: string;
+        color: string;
+    };
 }
 
 export interface AppUsage {

@@ -58,7 +58,7 @@ export const ConsentDialog: React.FC<ConsentDialogProps> = ({ onConsent }) => {
                         </div>
                         <div className="flex items-center gap-2">
                             <i className="fas fa-times-circle text-red-400"></i>
-                            <span>Microphone or webcam (except for check-in/out)</span>
+                            <span>Microphone or webcam recordings (photos can be taken randomly, like screenshots, for verification purposes)</span>
                         </div>
                         <div className="flex items-center gap-2">
                             <i className="fas fa-times-circle text-red-400"></i>

@@ -6,39 +6,12 @@ import { InsightsDashboard } from './components/InsightsDashboard';
 import { TitleBar } from './components/TitleBar';
 import { ConsentDialog } from './components/ConsentDialog';
 import { Settings as SettingsComponent } from './components/Settings';
+import { CalculationDetails } from './components/CalculationDetails';
 import { IdleDialog } from './components/IdleDialog';
 import { useSurveillance } from './hooks/useSurveillance';
 import { applyBlurWithIntensity } from './utils/imageBlur';
 
-// Extend Window interface for Electron API
-declare global {
-    interface Window {
-        electronAPI?: {
-            windowMinimize: () => Promise<void>;
-            windowMaximize: () => Promise<void>;
-            windowClose: () => Promise<void>;
-            windowIsMaximized: () => Promise<boolean>;
-            captureScreenshot: () => Promise<string | null>;
-            getActiveWindow: () => Promise<{ title: string; owner: string; url: string | null; app: string }>;
-            startActivityMonitoring: () => Promise<boolean>;
-            stopActivityMonitoring: () => Promise<boolean>;
-            onActivityUpdate: (callback: (data: any) => void) => void;
-            removeActivityListener: () => void;
-            onAllWindowsUpdate: (callback: (data: any) => void) => void;
-            removeAllWindowsListener: () => void;
-            processActivity: (input: any) => Promise<any>;
-            getActivityInsights: (timeWindow?: any) => Promise<any>;
-            getUserConsent: () => Promise<{ consent: boolean | null; remembered: boolean }>;
-            setUserConsent: (consent: boolean, remember: boolean) => Promise<boolean>;
-            revokeConsent: () => Promise<boolean>;
-            getSettings: () => Promise<any>;
-            setSettings: (settings: any) => Promise<boolean>;
-            exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
-            deleteAllData: () => Promise<boolean>;
-            getLastActivityTimestamp: () => Promise<number | null>;
-        };
-    }
-}
+// Electron API types are defined in types/electron.d.ts
 
 // Mock Data
 const MOCK_PROJECTS: Project[] = [
@@ -182,6 +155,44 @@ const App: React.FC = () => {
         setUser({ ...INITIAL_USER, name: email.split('@')[0] });
         setView(AppView.CHECK_IN_OUT); 
     };
+
+    // Start camera when navigating to CHECK_IN_OUT view (for checkout/checkin)
+    useEffect(() => {
+        if (view === AppView.CHECK_IN_OUT) {
+            // Proactively start camera when entering check-in/out view
+            const initCamera = async () => {
+                try {
+                    // Check if stream exists and is live
+                    if (cameraStream) {
+                        const videoTracks = cameraStream.getVideoTracks();
+                        const hasLiveTracks = videoTracks.length > 0 && videoTracks.some(track => track.readyState === 'live');
+                        if (hasLiveTracks) {
+                            console.log('Camera stream already active and live');
+                            return;
+                        } else {
+                            console.log('Camera stream exists but not live, stopping and restarting...');
+                            stopCamera();
+                            await new Promise(resolve => setTimeout(resolve, 300));
+                        }
+                    }
+                    
+                    console.log('Starting camera for check-in/out...');
+                    const stream = await startCamera();
+                    if (stream) {
+                        console.log('Camera started successfully for check-in/out');
+                    } else {
+                        console.error('Camera start returned null/undefined');
+                    }
+                } catch (err) {
+                    console.error('Failed to start camera for check-in/out:', err);
+                }
+            };
+            initCamera();
+        } else {
+            // When leaving CHECK_IN_OUT view, optionally stop camera (but keep it if timer is running)
+            // Don't stop here - let the component handle it
+        }
+    }, [view, startCamera, stopCamera]);
 
     // Attach streams to hidden video elements for capture
     useEffect(() => {
@@ -931,7 +942,16 @@ const App: React.FC = () => {
                         mode={user?.isCheckedIn ? 'CHECK_OUT' : 'CHECK_IN'}
                         existingStream={cameraStream}
                         onConfirm={handleFaceConfirmed}
-                        onStreamRequest={async () => { await startCamera(); }}
+                        onStreamRequest={async () => { 
+                            console.log('FaceAttendance: onStreamRequest called');
+                            const stream = await startCamera();
+                            if (!stream) {
+                                throw new Error('Failed to start camera');
+                            }
+                            // Wait a bit for state to update
+                            await new Promise(resolve => setTimeout(resolve, 300));
+                            console.log('FaceAttendance: Camera stream should be available now');
+                        }}
                         onCancel={() => user?.isCheckedIn ? setView(AppView.DASHBOARD) : setView(AppView.LOGIN)}
                     />
                     </div>
@@ -989,6 +1009,21 @@ const App: React.FC = () => {
                             setActivityLogs([]);
                             setTimeEntries([]);
                         }}
+                        onNavigateToCalculationDetails={() => setView(AppView.CALCULATION_DETAILS)}
+                    />
+                </div>
+            </div>
+        );
+    }
+
+    if (view === AppView.CALCULATION_DETAILS) {
+        return (
+            <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
+                <TitleBar />
+                <div className="flex-1 flex justify-center">
+                    {hiddenElements}
+                    <CalculationDetails
+                        onClose={() => setView(AppView.SETTINGS)}
                     />
                 </div>
             </div>

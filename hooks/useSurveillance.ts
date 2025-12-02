@@ -1,5 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ActivityLog, Project } from '../types';
+import { appClassifier } from '../services/appClassifier';
+import { urlClassifier } from '../services/urlClassifier';
+import { deepWorkCalculator } from '../services/deepWorkCalculator';
+import { compositeScoreCalculator } from '../services/compositeScoreCalculator';
 
 // Helper function to extract URL from window title (for browsers)
 const extractUrlFromTitle = (title: string, appName: string): string | null => {
@@ -82,38 +86,10 @@ interface UseSurveillanceProps {
     currentProjectId: string;
 }
 
-// Extend Window interface for Electron API
-declare global {
-    interface Window {
-        electronAPI?: {
-            windowMinimize: () => Promise<void>;
-            windowMaximize: () => Promise<void>;
-            windowClose: () => Promise<void>;
-            windowIsMaximized: () => Promise<boolean>;
-            captureScreenshot: () => Promise<string | null>;
-            getActiveWindow: () => Promise<{ title: string; owner: string; url: string | null; app: string }>;
-            startActivityMonitoring: () => Promise<boolean>;
-            stopActivityMonitoring: () => Promise<boolean>;
-            onActivityUpdate: (callback: (data: any) => void) => void;
-            removeActivityListener: () => void;
-            processActivity: (input: any) => Promise<any>;
-            getActivityInsights: (timeWindow?: any) => Promise<any>;
-            getUserConsent: () => Promise<{ consent: boolean | null; remembered: boolean }>;
-            setUserConsent: (consent: boolean, remember: boolean) => Promise<boolean>;
-            revokeConsent: () => Promise<boolean>;
-            getSettings: () => Promise<any>;
-            setSettings: (settings: any) => Promise<boolean>;
-            exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
-            deleteAllData: () => Promise<boolean>;
-            getLastActivityTimestamp: () => Promise<number | null>;
-        };
-    }
-}
-
 interface UseSurveillanceReturn {
     cameraStream: MediaStream | null;
     activityLogs: ActivityLog[];
-    setActivityLogs: React.Dispatch<React.SetStateAction<ActivityLog[]>>;
+    setActivityLogs: (logs: ActivityLog[] | ((prev: ActivityLog[]) => ActivityLog[])) => void;
     startCamera: () => Promise<MediaStream | null>;
     stopCamera: () => void;
     idleInfo: { isIdle: boolean; duration: number } | null;
@@ -185,15 +161,15 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
             });
             
             // Listen for real-time keystroke updates
-            if (window.electronAPI.onKeystrokeUpdate) {
-                window.electronAPI.onKeystrokeUpdate((count) => {
+            if (window.electronAPI && 'onKeystrokeUpdate' in window.electronAPI) {
+                (window.electronAPI as any).onKeystrokeUpdate((count: number) => {
                     keystrokesRef.current = count;
                 });
             }
             
             // Listen for real-time mouse click updates
-            if (window.electronAPI.onMouseClickUpdate) {
-                window.electronAPI.onMouseClickUpdate((count) => {
+            if (window.electronAPI && 'onMouseClickUpdate' in window.electronAPI) {
+                (window.electronAPI as any).onMouseClickUpdate((count: number) => {
                     mouseClicksRef.current = count;
                 });
             }
@@ -291,20 +267,33 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
 
 
     // The Interval Logic - Fixed 10-minute intervals (Industry Standard)
+    // In dev mode: 1-minute intervals for faster testing
     useEffect(() => {
         if (isTimerRunning) {
-            const INTERVAL_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
+            // Check if we're in dev mode
+            const isDevMode = window.location.hostname === 'localhost' || 
+                              window.location.hostname === '127.0.0.1' ||
+                              window.location.port === '3000' ||
+                              (window as any).__DEV__ === true;
+            
+            // Use 1 minute in dev mode, 10 minutes in production
+            const INTERVAL_DURATION = isDevMode ? 1 * 60 * 1000 : 10 * 60 * 1000; // 1 min (dev) or 10 min (prod)
+            const INTERVAL_MINUTES = isDevMode ? 1 : 10;
 
             let isActive = true; // Track if effect is still active
             let intervalStartTime = Date.now(); // Track when current interval started
 
-            // Calculate time until next 10-minute boundary
+            if (isDevMode) {
+                console.log('🔧 DEV MODE: Using 1-minute intervals for TyroDesk metrics');
+            }
+
+            // Calculate time until next interval boundary
             const getTimeToNextInterval = () => {
                 const now = Date.now();
                 const currentMinute = Math.floor(now / 60000); // Current minute since epoch
-                const current10MinBlock = Math.floor(currentMinute / 10); // Current 10-minute block
-                const next10MinBlock = current10MinBlock + 1; // Next 10-minute block
-                const nextIntervalTime = next10MinBlock * 10 * 60000; // Time of next interval boundary
+                const currentBlock = Math.floor(currentMinute / INTERVAL_MINUTES); // Current interval block
+                const nextBlock = currentBlock + 1; // Next interval block
+                const nextIntervalTime = nextBlock * INTERVAL_MINUTES * 60000; // Time of next interval boundary
                 return nextIntervalTime - now; // Time until next boundary
             };
 
@@ -346,11 +335,12 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
                     finalUrl = extractUrlFromTitle(windowTitle, appName);
                 }
                 
-                console.log('Creating log at 10-minute interval:', {
+                console.log(`Creating log at ${isDevMode ? '1-minute' : '10-minute'} interval:`, {
                     app: appName,
                     title: windowTitle,
                     url: finalUrl,
-                    intervalStart: new Date(intervalStartTime).toISOString()
+                    intervalStart: new Date(intervalStartTime).toISOString(),
+                    devMode: isDevMode
                 });
                 
                 // Get keystrokes and mouse clicks from per-window tracking
@@ -390,29 +380,149 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
                 const activityPercentage = Math.round((activitySeconds / intervalDuration) * 100);
                 
                 // Calculate productivity score based on real activity
-                const activityScore = Math.min(100, Math.floor(((realKeystrokes + realClicks) / 5) * 10) + 40);
-                const baseScore = realKeystrokes > 0 || realClicks > 0 ? 50 : 20;
-                const score = isIdle ? Math.max(0, baseScore - 30) : Math.min(100, baseScore + activityScore);
+                // Formula: Score = 0-100 based on activity level
+                // - 0-10 events: 0-30 score (minimal activity)
+                // - 10-50 events: 30-70 score (moderate activity)
+                // - 50+ events: 70-100 score (high activity)
+                // Idle time significantly reduces the score
+                
+                const totalEvents = realKeystrokes + realClicks;
+                let score = 0;
+                
+                if (isIdle) {
+                    // If idle, base score is very low (0-20)
+                    // Still give some credit if there was activity before going idle
+                    score = Math.max(0, Math.min(20, Math.floor(totalEvents / 2)));
+                } else if (totalEvents === 0) {
+                    // No activity at all = 0 score
+                    score = 0;
+                } else if (totalEvents < 10) {
+                    // Minimal activity: 0-30 score
+                    score = Math.floor((totalEvents / 10) * 30);
+                } else if (totalEvents < 50) {
+                    // Moderate activity: 30-70 score
+                    score = 30 + Math.floor(((totalEvents - 10) / 40) * 40);
+                } else {
+                    // High activity: 70-100 score (capped at 100)
+                    score = 70 + Math.min(30, Math.floor((totalEvents - 50) / 5));
+                    score = Math.min(100, score);
+                }
+                
+                // Apply idle penalty if there was idle time but not fully idle
+                if (!isIdle && idleDuration > 0) {
+                    const idlePenalty = Math.floor((idleDuration / intervalDuration) * 30);
+                    score = Math.max(0, score - idlePenalty);
+                }
 
-                const newLog: ActivityLog = {
+                // Classify app (lightweight - in-memory lookup)
+                const appClassification = appClassifier.classifyApp(appName, windowTitle);
+                
+                // Classify URL if available (overrides app classification for browsers)
+                let urlClassification = null;
+                if (finalUrl) {
+                    urlClassification = urlClassifier.classifyUrl(finalUrl);
+                    console.log('URL classification:', {
+                        url: finalUrl,
+                        domain: urlClassification.domain,
+                        category: urlClassification.category,
+                        weight: urlClassification.weight,
+                        matchType: urlClassification.matchType,
+                        confidence: urlClassification.confidence
+                    });
+                }
+                
+                console.log('App classification:', {
+                    app: appName,
+                    category: appClassification.category,
+                    weight: appClassification.weight,
+                    matchType: appClassification.matchType,
+                    confidence: appClassification.confidence
+                });
+
+                // Calculate focus metrics using recent logs
+                // In dev mode: last 6 logs = 6 minutes, in prod: last 6 logs = 1 hour
+                const recentLogs = activityLogs.slice(0, 6);
+                const focusMetrics = deepWorkCalculator.calculateFocusMetrics(
+                    {
+                        id: '',
+                        timestamp: new Date(intervalStartTime),
+                        projectId: currentProjectId,
+                        keyboardEvents: realKeystrokes,
+                        mouseEvents: realClicks,
+                        productivityScore: score,
+                        activeWindow: appName,
+                        activeUrl: finalUrl || undefined
+                    },
+                    recentLogs
+                );
+
+                console.log('Focus metrics:', {
+                    contextSwitches: focusMetrics.contextSwitches,
+                    focusScore: focusMetrics.focusScore,
+                    averageSessionLength: focusMetrics.averageSessionLength,
+                    longestSession: focusMetrics.longestSession
+                });
+
+                // Create temporary log for composite score calculation
+                const tempLog: ActivityLog = {
                     id: Date.now().toString(),
-                    timestamp: new Date(intervalStartTime), // Use interval start time
+                    timestamp: new Date(intervalStartTime),
                     projectId: currentProjectId,
                     keyboardEvents: realKeystrokes,
                     mouseEvents: realClicks,
                     productivityScore: score,
                     activeWindow: appName,
                     activeUrl: finalUrl || undefined,
+                    appCategory: appClassification.category,
+                    appCategoryWeight: appClassification.weight,
+                    urlCategory: urlClassification?.category,
+                    urlCategoryWeight: urlClassification?.weight,
+                    contextSwitches: focusMetrics.contextSwitches,
+                    focusScore: focusMetrics.focusScore,
+                    averageSessionLength: focusMetrics.averageSessionLength,
+                    longestSession: focusMetrics.longestSession
+                };
+
+                // Calculate composite score
+                const compositeResult = compositeScoreCalculator.calculateCompositeScore(tempLog);
+                
+                console.log('Composite score:', {
+                    score: compositeResult.score,
+                    breakdown: compositeResult.breakdown,
+                    classification: compositeResult.classification
+                });
+
+                // 🔍 DEBUG: Verify all metrics are present
+                console.log('🔍 DEBUG - TyroDesk metrics created:', {
+                    hasAppCategory: !!appClassification.category,
+                    hasUrlCategory: !!urlClassification?.category,
+                    hasFocusScore: focusMetrics.focusScore !== undefined,
+                    hasCompositeScore: compositeResult.score !== undefined,
+                    appCategory: appClassification.category,
+                    urlCategory: urlClassification?.category,
+                    focusScore: focusMetrics.focusScore,
+                    compositeScore: compositeResult.score
+                });
+
+                const newLog: ActivityLog = {
+                    ...tempLog,
                     isIdle: isIdle || undefined,
                     idleDuration: isIdle ? idleDuration : undefined,
+                    // Composite scoring
+                    compositeScore: compositeResult.score,
+                    scoreBreakdown: compositeResult.breakdown,
+                    scoreClassification: compositeResult.classification,
                     // Screenshots will be attached by the main App component (1-3 per interval)
                 };
                 
-                console.log('New 10-minute interval log created:', {
+                console.log(`New ${isDevMode ? '1-minute' : '10-minute'} interval log created:`, {
                     app: newLog.activeWindow,
                     URL: newLog.activeUrl,
                     Idle: isIdle,
-                    ActivityPercent: activityPercentage
+                    ActivityPercent: activityPercentage,
+                    compositeScore: newLog.compositeScore,
+                    appCategory: newLog.appCategory,
+                    focusScore: newLog.focusScore
                 });
 
                 // If idle, show dialog and store log temporarily

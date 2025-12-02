@@ -8,37 +8,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { processActivity, getInsights, getTimeUsage, getSummaries, ActivityInput } from '../services/activityProcessor';
 import { ActivityCategory } from '../services/activityCategorizer';
 
-// Extend Window interface for Electron API
-declare global {
-    interface Window {
-        electronAPI?: {
-            windowMinimize: () => Promise<void>;
-            windowMaximize: () => Promise<void>;
-            windowClose: () => Promise<void>;
-            windowIsMaximized: () => Promise<boolean>;
-            captureScreenshot: () => Promise<string | null>;
-            getActiveWindow: () => Promise<{ title: string; owner: string; url: string | null; app: string }>;
-            startActivityMonitoring: () => Promise<boolean>;
-            stopActivityMonitoring: () => Promise<boolean>;
-            onActivityUpdate: (callback: (data: any) => void) => void;
-            removeActivityListener: () => void;
-            processActivity: (input: ActivityInput) => Promise<{
-                category: string;
-                description: string;
-                suggestion: string;
-            }>;
-            getActivityInsights: (timeWindow?: { start: number; end: number }) => Promise<any>;
-            getUserConsent: () => Promise<{ consent: boolean | null; remembered: boolean }>;
-            setUserConsent: (consent: boolean, remember: boolean) => Promise<boolean>;
-            revokeConsent: () => Promise<boolean>;
-            getSettings: () => Promise<any>;
-            setSettings: (settings: any) => Promise<boolean>;
-            exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
-            deleteAllData: () => Promise<boolean>;
-            getLastActivityTimestamp: () => Promise<number | null>;
-        };
-    }
-}
+// Electron API types are defined in types/electron.d.ts
 
 export interface ActivityResponse {
     category: string;
