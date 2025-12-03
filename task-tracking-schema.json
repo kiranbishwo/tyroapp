@@ -1,0 +1,386 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Task-Specific Tracking Data Schema",
+  "description": "Schema for storing task-specific tracking data including mouse clicks, keystrokes, application URLs, and screencast data",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version for future compatibility",
+      "default": "1.0.0"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When this tracking data file was created"
+        },
+        "lastUpdated": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When this tracking data file was last updated"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID who owns this tracking data"
+        }
+      },
+      "required": ["createdAt", "lastUpdated"]
+    },
+    "projects": {
+      "type": "array",
+      "description": "Array of projects, each containing tasks with their tracking data",
+      "items": {
+        "type": "object",
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "description": "Unique project identifier"
+          },
+          "projectName": {
+            "type": "string",
+            "description": "Human-readable project name"
+          },
+          "color": {
+            "type": "string",
+            "description": "Project color code (hex)"
+          },
+          "tasks": {
+            "type": "array",
+            "description": "Array of tasks within this project",
+            "items": {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string",
+                  "description": "Unique task identifier"
+                },
+                "taskName": {
+                  "type": "string",
+                  "description": "Human-readable task name"
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Task description"
+                },
+                "completed": {
+                  "type": "boolean",
+                  "description": "Whether the task is completed"
+                },
+                "trackingData": {
+                  "type": "object",
+                  "description": "All tracking data specific to this task",
+                  "properties": {
+                    "timeEntries": {
+                      "type": "array",
+                      "description": "Time tracking entries for this task",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "entryId": {
+                            "type": "string",
+                            "description": "Unique entry identifier"
+                          },
+                          "startTime": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When tracking started for this entry"
+                          },
+                          "endTime": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When tracking ended for this entry (null if still running)"
+                          },
+                          "duration": {
+                            "type": "number",
+                            "description": "Duration in seconds"
+                          },
+                          "isActive": {
+                            "type": "boolean",
+                            "description": "Whether this entry is currently active"
+                          }
+                        },
+                        "required": ["entryId", "startTime", "duration", "isActive"]
+                      }
+                    },
+                    "activityLogs": {
+                      "type": "array",
+                      "description": "Activity logs captured during task execution (10-minute intervals)",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "logId": {
+                            "type": "string",
+                            "description": "Unique log identifier"
+                          },
+                          "timestamp": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When this activity log was created"
+                          },
+                          "keyboardEvents": {
+                            "type": "number",
+                            "description": "Total keystrokes during this interval (task-specific, cumulative across all windows)"
+                          },
+                          "mouseEvents": {
+                            "type": "number",
+                            "description": "Total mouse clicks during this interval (task-specific, cumulative across all windows)"
+                          },
+                          "activeWindow": {
+                            "type": "string",
+                            "description": "Active application/window name at interval boundary"
+                          },
+                          "activeUrl": {
+                            "type": "string",
+                            "description": "Active URL if browser window (normalized)"
+                          },
+                          "productivityScore": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Productivity score for this interval"
+                          },
+                          "compositeScore": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Composite productivity score"
+                          },
+                          "appCategory": {
+                            "type": "string",
+                            "enum": ["productive", "neutral", "unproductive"],
+                            "description": "Application category classification"
+                          },
+                          "urlCategory": {
+                            "type": "string",
+                            "enum": ["productive", "neutral", "unproductive"],
+                            "description": "URL category classification (overrides app category for browsers)"
+                          },
+                          "focusScore": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Focus score based on context switches"
+                          },
+                          "contextSwitches": {
+                            "type": "number",
+                            "description": "Number of app/window switches during recent period"
+                          },
+                          "isIdle": {
+                            "type": "boolean",
+                            "description": "Whether this interval was marked as idle"
+                          },
+                          "idleDuration": {
+                            "type": "number",
+                            "description": "Idle duration in seconds (if idle)"
+                          },
+                          "screenshots": {
+                            "type": "array",
+                            "description": "Screenshots captured during this interval (1-3 per interval)",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "screenshotId": {
+                                  "type": "string",
+                                  "description": "Unique screenshot identifier"
+                                },
+                                "timestamp": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "description": "When screenshot was captured"
+                                },
+                                "dataUrl": {
+                                  "type": "string",
+                                  "description": "Base64-encoded screenshot data URL"
+                                },
+                                "isBlurred": {
+                                  "type": "boolean",
+                                  "description": "Whether screenshot has blur applied"
+                                }
+                              },
+                              "required": ["screenshotId", "timestamp", "dataUrl"]
+                            }
+                          },
+                          "webcamPhotos": {
+                            "type": "array",
+                            "description": "Webcam photos captured during this interval (typically 1 per interval)",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "photoId": {
+                                  "type": "string",
+                                  "description": "Unique photo identifier"
+                                },
+                                "timestamp": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "description": "When photo was captured"
+                                },
+                                "dataUrl": {
+                                  "type": "string",
+                                  "description": "Base64-encoded webcam photo data URL"
+                                }
+                              },
+                              "required": ["photoId", "timestamp", "dataUrl"]
+                            }
+                          },
+                          "applicationUsage": {
+                            "type": "array",
+                            "description": "Applications used during this interval with detailed stats",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "appName": {
+                                  "type": "string",
+                                  "description": "Application name"
+                                },
+                                "windowTitle": {
+                                  "type": "string",
+                                  "description": "Window title"
+                                },
+                                "keystrokes": {
+                                  "type": "number",
+                                  "description": "Keystrokes in this application (per-window)"
+                                },
+                                "mouseClicks": {
+                                  "type": "number",
+                                  "description": "Mouse clicks in this application (per-window)"
+                                },
+                                "timeSpent": {
+                                  "type": "number",
+                                  "description": "Time spent in this application in seconds"
+                                },
+                                "urls": {
+                                  "type": "array",
+                                  "description": "URLs visited in this application (for browsers)",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "url": {
+                                        "type": "string",
+                                        "description": "Normalized URL"
+                                      },
+                                      "title": {
+                                        "type": "string",
+                                        "description": "Page title"
+                                      },
+                                      "timestamp": {
+                                        "type": "string",
+                                        "format": "date-time",
+                                        "description": "When URL was visited"
+                                      },
+                                      "visitCount": {
+                                        "type": "number",
+                                        "description": "Number of times this URL was visited"
+                                      }
+                                    },
+                                    "required": ["url", "timestamp"]
+                                  }
+                                }
+                              },
+                              "required": ["appName", "keystrokes", "mouseClicks"]
+                            }
+                          }
+                        },
+                        "required": ["logId", "timestamp", "keyboardEvents", "mouseEvents", "activeWindow"]
+                      }
+                    },
+                    "summary": {
+                      "type": "object",
+                      "description": "Summary statistics for this task",
+                      "properties": {
+                        "totalTimeSpent": {
+                          "type": "number",
+                          "description": "Total time spent on task in seconds"
+                        },
+                        "totalKeystrokes": {
+                          "type": "number",
+                          "description": "Total keystrokes across all sessions"
+                        },
+                        "totalMouseClicks": {
+                          "type": "number",
+                          "description": "Total mouse clicks across all sessions"
+                        },
+                        "totalScreenshots": {
+                          "type": "number",
+                          "description": "Total number of screenshots captured"
+                        },
+                        "totalWebcamPhotos": {
+                          "type": "number",
+                          "description": "Total number of webcam photos captured"
+                        },
+                        "averageProductivityScore": {
+                          "type": "number",
+                          "description": "Average productivity score across all intervals"
+                        },
+                        "averageCompositeScore": {
+                          "type": "number",
+                          "description": "Average composite score across all intervals"
+                        },
+                        "mostUsedApplications": {
+                          "type": "array",
+                          "description": "Top applications used during this task",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "appName": {
+                                "type": "string"
+                              },
+                              "timeSpent": {
+                                "type": "number"
+                              },
+                              "keystrokes": {
+                                "type": "number"
+                              },
+                              "mouseClicks": {
+                                "type": "number"
+                              }
+                            }
+                          }
+                        },
+                        "mostVisitedUrls": {
+                          "type": "array",
+                          "description": "Top URLs visited during this task",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "url": {
+                                "type": "string"
+                              },
+                              "visitCount": {
+                                "type": "number"
+                              },
+                              "timeSpent": {
+                                "type": "number"
+                              }
+                            }
+                          }
+                        },
+                        "firstActivity": {
+                          "type": "string",
+                          "format": "date-time",
+                          "description": "Timestamp of first activity log"
+                        },
+                        "lastActivity": {
+                          "type": "string",
+                          "format": "date-time",
+                          "description": "Timestamp of last activity log"
+                        }
+                      }
+                    }
+                  },
+                  "required": ["activityLogs"]
+                }
+              },
+              "required": ["taskId", "taskName", "trackingData"]
+            }
+          }
+        },
+        "required": ["projectId", "projectName", "tasks"]
+      }
+    }
+  },
+  "required": ["version", "metadata", "projects"]
+}

@@ -76,6 +76,8 @@ const App: React.FC = () => {
     const [view, setView] = useState<AppView>(AppView.LOGIN);
     const [projects] = useState<Project[]>(MOCK_PROJECTS);
     const [timeEntries, setTimeEntries] = useState<TimeEntry[]>([]);
+    const [insightsTaskFilter, setInsightsTaskFilter] = useState<string | undefined>(undefined);
+    const [insightsProjectFilter, setInsightsProjectFilter] = useState<string | undefined>(undefined);
     
     // Consent State
     const [showConsentDialog, setShowConsentDialog] = useState(false);
@@ -96,6 +98,12 @@ const App: React.FC = () => {
     // Settings state for screenshot blur
     const [settings, setSettings] = useState<Settings | null>(null);
 
+    // Get current task and project names
+    const currentProject = projects.find(p => p.id === selectedProjectId);
+    const currentTask = currentProject?.tasks?.find(t => t.id === selectedTaskId);
+    const currentTaskName = currentTask?.name;
+    const currentProjectName = currentProject?.name;
+
     // Surveillance Hook - Only active if user has consented
     const { 
         cameraStream, 
@@ -107,7 +115,10 @@ const App: React.FC = () => {
         onIdleDecision
     } = useSurveillance({ 
         isTimerRunning: isTimerRunning && userConsent === true, // Block tracking without consent
-        currentProjectId: selectedProjectId 
+        currentProjectId: selectedProjectId,
+        currentTaskId: selectedTaskId || undefined,
+        currentTaskName: currentTaskName,
+        currentProjectName: currentProjectName
     });
 
     const timerIntervalRef = useRef<number | null>(null);
@@ -342,6 +353,7 @@ const App: React.FC = () => {
                     id: Date.now().toString(),
                     timestamp: new Date(),
                     projectId: selectedProjectId || '1',
+                    taskId: selectedTaskId || undefined,
                     keyboardEvents: 0,
                     mouseEvents: 0,
                     productivityScore: 50,
@@ -380,6 +392,7 @@ const App: React.FC = () => {
                             id: Date.now().toString(),
                             timestamp: new Date(),
                             projectId: selectedProjectId || '1',
+                            taskId: selectedTaskId || undefined,
                             keyboardEvents: 0,
                             mouseEvents: 0,
                             productivityScore: 50,
@@ -432,8 +445,25 @@ const App: React.FC = () => {
     const captureInProgressRef = useRef<boolean>(false);
     
     useEffect(() => {
-        if (activityLogs.length > 0 && isTimerRunning) {
-            const latestLog = activityLogs[0];
+        if (activityLogs.length > 0 && isTimerRunning && selectedTaskId) {
+            // Find the latest log that belongs to the CURRENT task
+            // This ensures media is only attached to logs for the active task
+            const latestLogForCurrentTask = activityLogs.find(log => 
+                log.taskId === selectedTaskId && 
+                log.projectId === selectedProjectId
+            );
+            
+            // If no log found for current task, skip (might be a new task just started)
+            if (!latestLogForCurrentTask) {
+                console.log('No log found for current task, skipping capture:', {
+                    selectedTaskId,
+                    selectedProjectId,
+                    availableLogs: activityLogs.map(l => ({ id: l.id, taskId: l.taskId, projectId: l.projectId }))
+                });
+                return;
+            }
+            
+            const latestLog = latestLogForCurrentTask;
             
             // Skip if we already processed this log
             if (latestLog.id === lastProcessedLogIdRef.current) {
@@ -446,6 +476,17 @@ const App: React.FC = () => {
                 return;
             }
             
+            // Verify this log belongs to the current task
+            if (latestLog.taskId !== selectedTaskId || latestLog.projectId !== selectedProjectId) {
+                console.warn('Log does not belong to current task, skipping capture:', {
+                    logTaskId: latestLog.taskId,
+                    currentTaskId: selectedTaskId,
+                    logProjectId: latestLog.projectId,
+                    currentProjectId: selectedProjectId
+                });
+                return;
+            }
+            
             // Increased time window to 5 minutes to allow for async operations and retries
             const isFresh = (new Date().getTime() - latestLog.timestamp.getTime()) < 300000; // 5 minutes
             
@@ -455,6 +496,8 @@ const App: React.FC = () => {
             
             console.log('Capture check:', {
                 logId: latestLog.id,
+                logTaskId: latestLog.taskId,
+                currentTaskId: selectedTaskId,
                 isFresh,
                 needsScreenshot,
                 needsWebcam,
@@ -642,12 +685,14 @@ const App: React.FC = () => {
                                 (async () => {
                                     try {
                                         console.log(`Attempting to capture screenshot ${i + 1}/${screenshotCount}...`);
-                                        let rawScreenshot = await window.electronAPI.captureScreenshot();
+                                        const shouldBlur = settings?.enableScreenshotBlur || false;
+                                        let rawScreenshot = await window.electronAPI.captureScreenshot(shouldBlur);
                                         
                                         if (rawScreenshot && rawScreenshot.length > 100) {
-                                            // Apply blur if enabled in settings
+                                            // Screenshot is already tagged with task in main process
+                                            // Apply additional blur if needed (screenshot may already be blurred)
                                             let screenUrl = rawScreenshot;
-                                            if (settings?.enableScreenshotBlur) {
+                                            if (settings?.enableScreenshotBlur && !shouldBlur) {
                                                 try {
                                                     screenUrl = await applyBlurWithIntensity(rawScreenshot, 'medium');
                                                     console.log(`Screenshot ${i + 1} blurred successfully`);
@@ -703,6 +748,15 @@ const App: React.FC = () => {
                                             
                                             webcamPhoto = canvas.toDataURL('image/jpeg', 0.8);
                                             console.log(`Webcam photo captured successfully: ${video.videoWidth}x${video.videoHeight}, size: ${webcamPhoto.length} bytes`);
+                                            
+                                            // Tag webcam photo with current task
+                                            if (selectedTaskId && selectedProjectId && window.electronAPI && window.electronAPI.addWebcamPhotoToTask) {
+                                                window.electronAPI.addWebcamPhotoToTask(webcamPhoto).then(() => {
+                                                    console.log('Webcam photo tagged with task');
+                                                }).catch(err => {
+                                                    console.error('Failed to tag webcam photo with task:', err);
+                                                });
+                                            }
                                         } else {
                                             console.warn('Canvas context not available for webcam capture');
                                         }
@@ -775,10 +829,16 @@ const App: React.FC = () => {
                     }
                     
                     // Update the log with captured media (APPEND screenshots, don't replace)
+                    // IMPORTANT: Only update logs that belong to the current task
                     if (screenshots.length > 0 || webcamPhoto) {
                         setActivityLogs(prev => {
                             const newLogs = [...prev];
-                            const logIndex = newLogs.findIndex(log => log.id === latestLog.id);
+                            // Find log by ID AND verify it belongs to current task
+                            const logIndex = newLogs.findIndex(log => 
+                                log.id === latestLog.id && 
+                                log.taskId === selectedTaskId &&
+                                log.projectId === selectedProjectId
+                            );
                             if (logIndex !== -1) {
                                 const existingLog = newLogs[logIndex];
                                 const updates: Partial<ActivityLog> = {};
@@ -879,7 +939,7 @@ const App: React.FC = () => {
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activityLogs, isTimerRunning, settings?.enableScreenshotBlur, settings?.enableScreenshots, cameraStream]); // Use activityLogs directly to detect new logs
+    }, [activityLogs, isTimerRunning, selectedTaskId, selectedProjectId, settings?.enableScreenshotBlur, settings?.enableScreenshots, cameraStream]); // Use activityLogs directly to detect new logs
 
     const formatTime = (totalSeconds: number) => {
         const h = Math.floor(totalSeconds / 3600);
@@ -916,17 +976,40 @@ const App: React.FC = () => {
                 }));
             }
             
-            const newEntry: TimeEntry = {
-                id: Date.now().toString(),
-                description: taskName,
-                projectId: selectedProjectId || '4',
-                taskId: selectedTaskId || undefined,
-                startTime: start,
-                endTime: endTime,
-                duration: currentSessionDuration
-            };
-
-            setTimeEntries([newEntry, ...timeEntries]);
+            // Check if there's an existing entry for this task today that was created when starting
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const existingEntryIndex = timeEntries.findIndex(e => 
+                e.startTime >= today && 
+                e.taskId === selectedTaskId && 
+                !e.endTime // Entry created when starting (no endTime yet)
+            );
+            
+            if (existingEntryIndex !== -1) {
+                // Update existing entry
+                const updatedEntries = [...timeEntries];
+                updatedEntries[existingEntryIndex] = {
+                    ...updatedEntries[existingEntryIndex],
+                    id: Date.now().toString(), // Replace temp ID with real ID
+                    startTime: start,
+                    endTime: endTime,
+                    duration: currentSessionDuration
+                };
+                setTimeEntries(updatedEntries);
+            } else {
+                // Create new entry (normal flow)
+                const newEntry: TimeEntry = {
+                    id: Date.now().toString(),
+                    description: taskName,
+                    projectId: selectedProjectId || '4',
+                    taskId: selectedTaskId || undefined,
+                    startTime: start,
+                    endTime: endTime,
+                    duration: currentSessionDuration
+                };
+                setTimeEntries([newEntry, ...timeEntries]);
+            }
+            
             setIsTimerRunning(false);
             setStartTime(null);
             // Keep elapsedSeconds showing the accumulated total (don't reset to 0)
@@ -936,6 +1019,33 @@ const App: React.FC = () => {
             if (!selectedTaskId && !selectedProjectId) {
                 alert('Please select a project and task first.');
                 return;
+            }
+            
+            // Check if this task is already in today's list
+            if (selectedTaskId) {
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const todayEntries = timeEntries.filter(e => e.startTime >= today);
+                const taskAlreadyListed = todayEntries.some(e => e.taskId === selectedTaskId);
+                
+                // If task is not in today's list, add it now
+                if (!taskAlreadyListed) {
+                    const selectedTask = MOCK_TASKS.find(t => t.id === selectedTaskId);
+                    const taskName = selectedTask?.name || description || '(No description)';
+                    const now = new Date();
+                    
+                    const newEntry: TimeEntry = {
+                        id: `temp-${Date.now()}`,
+                        description: taskName,
+                        projectId: selectedProjectId || '4',
+                        taskId: selectedTaskId,
+                        startTime: now,
+                        endTime: undefined, // Will be set when timer stops
+                        duration: 0 // Will be updated when timer stops
+                    };
+                    
+                    setTimeEntries([newEntry, ...timeEntries]);
+                }
             }
             
             // Start Timer - load accumulated time for this task
@@ -1083,7 +1193,23 @@ const App: React.FC = () => {
                     <InsightsDashboard 
                         logs={activityLogs}
                         projects={projects}
-                        onClose={() => setView(AppView.DASHBOARD)}
+                        tasks={MOCK_TASKS}
+                        onClose={() => {
+                            setView(AppView.DASHBOARD);
+                            setInsightsTaskFilter(undefined);
+                        }}
+                        filterTaskId={insightsTaskFilter}
+                        filterProjectId={insightsProjectFilter || (insightsTaskFilter ? (() => {
+                            const task = MOCK_TASKS.find(t => t.id === insightsTaskFilter);
+                            return task ? task.projectId : undefined;
+                        })() : undefined)}
+                        filterTimeEntries={insightsTaskFilter ? timeEntries
+                            .filter(e => e.taskId === insightsTaskFilter)
+                            .sort((a, b) => a.startTime.getTime() - b.startTime.getTime())
+                            .map(e => ({ 
+                                startTime: e.startTime, 
+                                endTime: e.endTime || new Date() // Use current time if still running
+                            })) : undefined}
                     />
                     </div>
                 </div>
@@ -1172,7 +1298,11 @@ const App: React.FC = () => {
                             <i className="fas fa-cog text-xs"></i>
                         </button>
                         <button 
-                            onClick={() => setView(AppView.INSIGHTS)}
+                            onClick={() => {
+                                setInsightsTaskFilter(undefined); // Clear filter to show all
+                                setInsightsProjectFilter(undefined);
+                                setView(AppView.INSIGHTS);
+                            }}
                             className="w-8 h-8 rounded-full bg-blue-900/30 hover:bg-blue-900/50 text-blue-400 flex items-center justify-center transition-colors relative"
                             title="Productivity Insights"
                         >
@@ -1629,41 +1759,83 @@ const App: React.FC = () => {
                                                                 {group.lastStartTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} - {group.lastEndTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                                                             </div>
                                                         )}
+                                                        {!group.lastEndTime && !isCurrentlyRunning && (
+                                                            <div className="text-gray-600 text-[10px]">
+                                                                Started {group.lastStartTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                                            </div>
+                                                        )}
                                                         {isCurrentlyRunning && (
                                                             <div className="text-green-400 text-[10px] flex items-center gap-1">
                                                                 <i className="fas fa-circle text-[6px]"></i>
-                                                                <span>Live</span>
+                                                                <span>Started {group.lastStartTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
                                                             </div>
                                                         )}
                                                     </div>
                                                     {group.taskId && (
-                                                        <button
-                                                            onClick={() => {
-                                                                if (!isTimerRunning) {
-                                                                    setSelectedProjectId(group.projectId);
-                                                                    setSelectedTaskId(group.taskId!);
-                                                                    setDescription(task?.name || group.description);
-                                                                    setShowTaskSelection(false);
-                                                                    // Auto-start timer
-                                                                    if (userConsent === true) {
-                                                                        // Load accumulated time
-                                                                        const accumulated = taskAccumulatedTime[group.taskId] || 0;
-                                                                        setElapsedSeconds(accumulated);
-                                                                        setStartTime(Date.now());
-                                                                        setIsTimerRunning(true);
+                                                        <div className="flex gap-2">
+                                                            <button
+                                                                onClick={() => {
+                                                                    // Open insights with task filter
+                                                                    const taskEntries = timeEntries.filter(e => e.taskId === group.taskId);
+                                                                    console.log('Opening task report:', {
+                                                                        taskId: group.taskId,
+                                                                        projectId: group.projectId,
+                                                                        taskName: task?.name,
+                                                                        timeEntriesCount: taskEntries.length,
+                                                                        timeEntries: taskEntries.map(e => ({
+                                                                            start: e.startTime.toISOString(),
+                                                                            end: e.endTime?.toISOString(),
+                                                                            duration: e.duration
+                                                                        })),
+                                                                        availableLogs: activityLogs.filter(l => l.taskId === group.taskId || l.projectId === group.projectId).map(l => ({
+                                                                            id: l.id,
+                                                                            taskId: l.taskId,
+                                                                            projectId: l.projectId,
+                                                                            timestamp: l.timestamp.toISOString(),
+                                                                            keystrokes: l.keyboardEvents,
+                                                                            mouseClicks: l.mouseEvents,
+                                                                            hasScreenshot: !!(l.screenshotUrl || l.screenshotUrls?.length),
+                                                                            hasWebcam: !!l.webcamUrl
+                                                                        }))
+                                                                    });
+                                                                    setInsightsTaskFilter(group.taskId);
+                                                                    setInsightsProjectFilter(group.projectId);
+                                                                    setView(AppView.INSIGHTS);
+                                                                }}
+                                                                className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300"
+                                                                title="View Report"
+                                                            >
+                                                                <i className="fas fa-chart-line text-[10px]"></i>
+                                                                <span>Report</span>
+                                                            </button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    if (!isTimerRunning) {
+                                                                        setSelectedProjectId(group.projectId);
+                                                                        setSelectedTaskId(group.taskId!);
+                                                                        setDescription(task?.name || group.description);
+                                                                        setShowTaskSelection(false);
+                                                                        // Auto-start timer
+                                                                        if (userConsent === true) {
+                                                                            // Load accumulated time
+                                                                            const accumulated = taskAccumulatedTime[group.taskId] || 0;
+                                                                            setElapsedSeconds(accumulated);
+                                                                            setStartTime(Date.now());
+                                                                            setIsTimerRunning(true);
+                                                                        }
                                                                     }
-                                                                }
-                                                            }}
-                                                            disabled={isTimerRunning}
-                                                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
-                                                                isCurrentlySelected
-                                                                    ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                                                                    : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
-                                                            } ${isTimerRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                                        >
-                                                            <i className={`fas ${displayTime > 0 ? 'fa-redo' : 'fa-play'} text-[10px]`}></i>
-                                                            <span>{displayTime > 0 ? 'Resume' : 'Start'}</span>
-                                                        </button>
+                                                                }}
+                                                                disabled={isTimerRunning}
+                                                                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
+                                                                    isCurrentlySelected
+                                                                        ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                                                                        : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                                                                } ${isTimerRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                                            >
+                                                                <i className={`fas ${displayTime > 0 ? 'fa-redo' : 'fa-play'} text-[10px]`}></i>
+                                                                <span>{displayTime > 0 ? 'Resume' : 'Start'}</span>
+                                                            </button>
+                                                        </div>
                                                     )}
                                                 </div>
                                             </div>

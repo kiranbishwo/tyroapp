@@ -84,6 +84,9 @@ const extractUrlFromTitle = (title: string, appName: string): string | null => {
 interface UseSurveillanceProps {
     isTimerRunning: boolean;
     currentProjectId: string;
+    currentTaskId?: string; // Optional: current task ID
+    currentTaskName?: string; // Optional: current task name
+    currentProjectName?: string; // Optional: current project name
 }
 
 interface UseSurveillanceReturn {
@@ -96,7 +99,7 @@ interface UseSurveillanceReturn {
     onIdleDecision: (remove: boolean) => void;
 }
 
-export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveillanceProps): UseSurveillanceReturn => {
+export const useSurveillance = ({ isTimerRunning, currentProjectId, currentTaskId, currentTaskName, currentProjectName }: UseSurveillanceProps): UseSurveillanceReturn => {
     const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
     const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
     const [idleInfo, setIdleInfo] = useState<{ isIdle: boolean; duration: number } | null>(null);
@@ -144,20 +147,20 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
     // Real Activity Tracking from Electron
     useEffect(() => {
         if (isTimerRunning && window.electronAPI) {
-            // Start Electron activity monitoring
-            window.electronAPI.startActivityMonitoring().then(() => {
-                console.log('Activity monitoring started successfully');
+            // Start Electron activity monitoring with task/project IDs and names
+            window.electronAPI.startActivityMonitoring(currentProjectId, currentTaskId, currentTaskName, currentProjectName).then(() => {
+                console.log('Activity monitoring started successfully for task:', currentTaskId, 'in project:', currentProjectId);
             }).catch(err => {
                 console.error('Failed to start activity monitoring:', err);
             });
             
-            // Listen for activity updates (now includes per-window keystrokes and mouse clicks)
+            // Listen for activity updates (now includes per-window and per-task keystrokes and mouse clicks)
             window.electronAPI.onActivityUpdate((data) => {
-                console.log('Activity update received:', data.app, data.title, 'Keys:', data.keystrokes, 'Clicks:', data.mouseClicks);
+                console.log('Activity update received:', data.app, data.title, 'Window Keys:', data.keystrokes, 'Window Clicks:', data.mouseClicks, 'Task Keys:', data.taskKeystrokes, 'Task Clicks:', data.taskClicks);
                 currentActivityRef.current = data;
-                // Use per-window tracking data from main process (data.keystrokes and data.mouseClicks are now per-window)
-                keystrokesRef.current = data.keystrokes || 0;
-                mouseClicksRef.current = data.mouseClicks || 0;
+                // Use per-task tracking data if available (cumulative across all windows), otherwise fall back to per-window
+                keystrokesRef.current = data.taskKeystrokes !== undefined ? data.taskKeystrokes : (data.keystrokes || 0);
+                mouseClicksRef.current = data.taskClicks !== undefined ? data.taskClicks : (data.mouseClicks || 0);
             });
             
             // Listen for real-time keystroke updates
@@ -182,7 +185,18 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
                 window.electronAPI.removeActivityListener();
             }
         };
-    }, [isTimerRunning]);
+    }, [isTimerRunning, currentProjectId, currentTaskId]);
+    
+    // Update task tracking when task/project changes (while timer is running)
+    useEffect(() => {
+        if (isTimerRunning && window.electronAPI && window.electronAPI.updateTaskTracking) {
+            window.electronAPI.updateTaskTracking(currentProjectId, currentTaskId, currentTaskName, currentProjectName).then(() => {
+                console.log('Task tracking updated for task:', currentTaskId, 'in project:', currentProjectId);
+            }).catch(err => {
+                console.error('Failed to update task tracking:', err);
+            });
+        }
+    }, [isTimerRunning, currentProjectId, currentTaskId, currentTaskName, currentProjectName]);
 
     // Note: System-wide tracking is now handled in the main process
     // These local listeners are kept as fallback but won't be used if system-wide tracking works
@@ -343,15 +357,20 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
                     devMode: isDevMode
                 });
                 
-                // Get keystrokes and mouse clicks from per-window tracking
-                // activity.keystrokes and activity.mouseClicks are now per-window counts
-                const realKeystrokes = activity.keystrokes || keystrokesRef.current || 0;
-                const realClicks = activity.mouseClicks || mouseClicksRef.current || 0;
+                // Get keystrokes and mouse clicks from per-task tracking (preferred) or per-window tracking (fallback)
+                // Per-task stats are cumulative across all windows for the current task
+                // Per-window stats are only for the current window
+                const realKeystrokes = activity.taskKeystrokes !== undefined ? activity.taskKeystrokes : (activity.keystrokes || keystrokesRef.current || 0);
+                const realClicks = activity.taskClicks !== undefined ? activity.taskClicks : (activity.mouseClicks || mouseClicksRef.current || 0);
                 
-                console.log('Creating log with per-window stats:', {
+                console.log('Creating log with per-task stats:', {
                     app: appName,
-                    perWindowKeystrokes: realKeystrokes,
-                    perWindowClicks: realClicks
+                    taskId: currentTaskId,
+                    perTaskKeystrokes: activity.taskKeystrokes !== undefined ? activity.taskKeystrokes : 'N/A',
+                    perTaskClicks: activity.taskClicks !== undefined ? activity.taskClicks : 'N/A',
+                    perWindowKeystrokes: activity.keystrokes || 0,
+                    perWindowClicks: activity.mouseClicks || 0,
+                    usingPerTask: activity.taskKeystrokes !== undefined
                 });
                 
                 // Check for idle time
@@ -447,6 +466,7 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
                         id: '',
                         timestamp: new Date(intervalStartTime),
                         projectId: currentProjectId,
+                        taskId: currentTaskId,
                         keyboardEvents: realKeystrokes,
                         mouseEvents: realClicks,
                         productivityScore: score,
@@ -468,6 +488,7 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
                     id: Date.now().toString(),
                     timestamp: new Date(intervalStartTime),
                     projectId: currentProjectId,
+                    taskId: currentTaskId,
                     keyboardEvents: realKeystrokes,
                     mouseEvents: realClicks,
                     productivityScore: score,
@@ -516,14 +537,28 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
                 };
                 
                 console.log(`New ${isDevMode ? '1-minute' : '10-minute'} interval log created:`, {
+                    logId: newLog.id,
+                    taskId: newLog.taskId,
+                    projectId: newLog.projectId,
                     app: newLog.activeWindow,
                     URL: newLog.activeUrl,
+                    keystrokes: newLog.keyboardEvents,
+                    mouseClicks: newLog.mouseEvents,
                     Idle: isIdle,
                     ActivityPercent: activityPercentage,
                     compositeScore: newLog.compositeScore,
                     appCategory: newLog.appCategory,
                     focusScore: newLog.focusScore
                 });
+
+                // Save activity log to task tracking data
+                if (currentTaskId && currentProjectId && window.electronAPI && window.electronAPI.addActivityLogToTask) {
+                    window.electronAPI.addActivityLogToTask(newLog).then(() => {
+                        console.log('Activity log saved to task tracking data');
+                    }).catch(err => {
+                        console.error('Failed to save activity log to task:', err);
+                    });
+                }
 
                 // If idle, show dialog and store log temporarily
                 if (isIdle && idleDuration > 0) {
@@ -566,7 +601,7 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId }: UseSurveil
                 intervalRef.current = null;
             }
         }
-    }, [isTimerRunning, currentProjectId]);
+    }, [isTimerRunning, currentProjectId, currentTaskId]);
 
     // Handle idle decision
     const onIdleDecision = (remove: boolean) => {

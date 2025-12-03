@@ -1,0 +1,350 @@
+{
+  "version": "1.0.0",
+  "metadata": {
+    "createdAt": "2024-01-15T10:00:00.000Z",
+    "lastUpdated": "2024-01-15T14:30:00.000Z",
+    "userId": "u1"
+  },
+  "projects": [
+    {
+      "projectId": "1",
+      "projectName": "Web Development",
+      "color": "#60A5FA",
+      "tasks": [
+        {
+          "taskId": "t1",
+          "taskName": "Fix login bug",
+          "description": "Fix authentication issue on login page",
+          "completed": false,
+          "trackingData": {
+            "timeEntries": [
+              {
+                "entryId": "te1",
+                "startTime": "2024-01-15T10:00:00.000Z",
+                "endTime": "2024-01-15T11:30:00.000Z",
+                "duration": 5400,
+                "isActive": false
+              },
+              {
+                "entryId": "te2",
+                "startTime": "2024-01-15T13:00:00.000Z",
+                "endTime": null,
+                "duration": 3600,
+                "isActive": true
+              }
+            ],
+            "activityLogs": [
+              {
+                "logId": "log1",
+                "timestamp": "2024-01-15T10:10:00.000Z",
+                "keyboardEvents": 1250,
+                "mouseEvents": 340,
+                "activeWindow": "Visual Studio Code",
+                "activeUrl": null,
+                "productivityScore": 85,
+                "compositeScore": 82,
+                "appCategory": "productive",
+                "urlCategory": null,
+                "focusScore": 78,
+                "contextSwitches": 3,
+                "isIdle": false,
+                "idleDuration": 0,
+                "screenshots": [
+                  {
+                    "screenshotId": "ss1",
+                    "timestamp": "2024-01-15T10:10:00.000Z",
+                    "dataUrl": "data:image/png;base64,iVBORw0KGgoAAAANS...",
+                    "isBlurred": false
+                  }
+                ],
+                "webcamPhotos": [
+                  {
+                    "photoId": "wc1",
+                    "timestamp": "2024-01-15T10:10:00.000Z",
+                    "dataUrl": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
+                  }
+                ],
+                "applicationUsage": [
+                  {
+                    "appName": "Visual Studio Code",
+                    "windowTitle": "login.tsx - tyro-app - Visual Studio Code",
+                    "keystrokes": 1250,
+                    "mouseClicks": 340,
+                    "timeSpent": 600,
+                    "urls": []
+                  }
+                ]
+              },
+              {
+                "logId": "log2",
+                "timestamp": "2024-01-15T10:20:00.000Z",
+                "keyboardEvents": 980,
+                "mouseEvents": 210,
+                "activeWindow": "Chrome",
+                "activeUrl": "https://stackoverflow.com/questions/12345",
+                "productivityScore": 75,
+                "compositeScore": 70,
+                "appCategory": "productive",
+                "urlCategory": "productive",
+                "focusScore": 65,
+                "contextSwitches": 5,
+                "isIdle": false,
+                "idleDuration": 0,
+                "screenshots": [
+                  {
+                    "screenshotId": "ss2",
+                    "timestamp": "2024-01-15T10:20:00.000Z",
+                    "dataUrl": "data:image/png;base64,iVBORw0KGgoAAAANS...",
+                    "isBlurred": false
+                  }
+                ],
+                "webcamPhotos": [
+                  {
+                    "photoId": "wc2",
+                    "timestamp": "2024-01-15T10:20:00.000Z",
+                    "dataUrl": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
+                  }
+                ],
+                "applicationUsage": [
+                  {
+                    "appName": "Chrome",
+                    "windowTitle": "How to fix login bug - Stack Overflow",
+                    "keystrokes": 50,
+                    "mouseClicks": 30,
+                    "timeSpent": 120,
+                    "urls": [
+                      {
+                        "url": "https://stackoverflow.com/questions/12345",
+                        "title": "How to fix login bug - Stack Overflow",
+                        "timestamp": "2024-01-15T10:20:00.000Z",
+                        "visitCount": 1
+                      }
+                    ]
+                  },
+                  {
+                    "appName": "Visual Studio Code",
+                    "windowTitle": "login.tsx - tyro-app - Visual Studio Code",
+                    "keystrokes": 930,
+                    "mouseClicks": 180,
+                    "timeSpent": 480,
+                    "urls": []
+                  }
+                ]
+              }
+            ],
+            "summary": {
+              "totalTimeSpent": 9000,
+              "totalKeystrokes": 15230,
+              "totalMouseClicks": 4120,
+              "totalScreenshots": 12,
+              "totalWebcamPhotos": 12,
+              "averageProductivityScore": 80,
+              "averageCompositeScore": 76,
+              "mostUsedApplications": [
+                {
+                  "appName": "Visual Studio Code",
+                  "timeSpent": 7200,
+                  "keystrokes": 12000,
+                  "mouseClicks": 3000
+                },
+                {
+                  "appName": "Chrome",
+                  "timeSpent": 1200,
+                  "keystrokes": 200,
+                  "mouseClicks": 800
+                },
+                {
+                  "appName": "Terminal",
+                  "timeSpent": 600,
+                  "keystrokes": 1030,
+                  "mouseClicks": 320
+                }
+              ],
+              "mostVisitedUrls": [
+                {
+                  "url": "https://stackoverflow.com/questions/12345",
+                  "visitCount": 5,
+                  "timeSpent": 600
+                },
+                {
+                  "url": "https://github.com/example/repo",
+                  "visitCount": 3,
+                  "timeSpent": 400
+                }
+              ],
+              "firstActivity": "2024-01-15T10:00:00.000Z",
+              "lastActivity": "2024-01-15T14:30:00.000Z"
+            }
+          }
+        },
+        {
+          "taskId": "t2",
+          "taskName": "Implement dark mode",
+          "description": "Add dark theme toggle",
+          "completed": false,
+          "trackingData": {
+            "timeEntries": [
+              {
+                "entryId": "te3",
+                "startTime": "2024-01-15T12:00:00.000Z",
+                "endTime": "2024-01-15T12:45:00.000Z",
+                "duration": 2700,
+                "isActive": false
+              }
+            ],
+            "activityLogs": [
+              {
+                "logId": "log3",
+                "timestamp": "2024-01-15T12:10:00.000Z",
+                "keyboardEvents": 850,
+                "mouseEvents": 190,
+                "activeWindow": "Visual Studio Code",
+                "activeUrl": null,
+                "productivityScore": 88,
+                "compositeScore": 85,
+                "appCategory": "productive",
+                "urlCategory": null,
+                "focusScore": 82,
+                "contextSwitches": 2,
+                "isIdle": false,
+                "idleDuration": 0,
+                "screenshots": [
+                  {
+                    "screenshotId": "ss3",
+                    "timestamp": "2024-01-15T12:10:00.000Z",
+                    "dataUrl": "data:image/png;base64,iVBORw0KGgoAAAANS...",
+                    "isBlurred": false
+                  }
+                ],
+                "webcamPhotos": [
+                  {
+                    "photoId": "wc3",
+                    "timestamp": "2024-01-15T12:10:00.000Z",
+                    "dataUrl": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
+                  }
+                ],
+                "applicationUsage": [
+                  {
+                    "appName": "Visual Studio Code",
+                    "windowTitle": "theme.tsx - tyro-app - Visual Studio Code",
+                    "keystrokes": 850,
+                    "mouseClicks": 190,
+                    "timeSpent": 600,
+                    "urls": []
+                  }
+                ]
+              }
+            ],
+            "summary": {
+              "totalTimeSpent": 2700,
+              "totalKeystrokes": 2550,
+              "totalMouseClicks": 570,
+              "totalScreenshots": 3,
+              "totalWebcamPhotos": 3,
+              "averageProductivityScore": 88,
+              "averageCompositeScore": 85,
+              "mostUsedApplications": [
+                {
+                  "appName": "Visual Studio Code",
+                  "timeSpent": 2700,
+                  "keystrokes": 2550,
+                  "mouseClicks": 570
+                }
+              ],
+              "mostVisitedUrls": [],
+              "firstActivity": "2024-01-15T12:00:00.000Z",
+              "lastActivity": "2024-01-15T12:45:00.000Z"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "projectId": "2",
+      "projectName": "Internal Audit",
+      "color": "#F472B6",
+      "tasks": [
+        {
+          "taskId": "t5",
+          "taskName": "Review Q4 financials",
+          "description": "Audit quarterly financial statements",
+          "completed": false,
+          "trackingData": {
+            "timeEntries": [
+              {
+                "entryId": "te4",
+                "startTime": "2024-01-15T09:00:00.000Z",
+                "endTime": "2024-01-15T10:00:00.000Z",
+                "duration": 3600,
+                "isActive": false
+              }
+            ],
+            "activityLogs": [
+              {
+                "logId": "log4",
+                "timestamp": "2024-01-15T09:10:00.000Z",
+                "keyboardEvents": 450,
+                "mouseEvents": 120,
+                "activeWindow": "Excel",
+                "activeUrl": null,
+                "productivityScore": 72,
+                "compositeScore": 70,
+                "appCategory": "productive",
+                "urlCategory": null,
+                "focusScore": 75,
+                "contextSwitches": 4,
+                "isIdle": false,
+                "idleDuration": 0,
+                "screenshots": [
+                  {
+                    "screenshotId": "ss4",
+                    "timestamp": "2024-01-15T09:10:00.000Z",
+                    "dataUrl": "data:image/png;base64,iVBORw0KGgoAAAANS...",
+                    "isBlurred": false
+                  }
+                ],
+                "webcamPhotos": [
+                  {
+                    "photoId": "wc4",
+                    "timestamp": "2024-01-15T09:10:00.000Z",
+                    "dataUrl": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
+                  }
+                ],
+                "applicationUsage": [
+                  {
+                    "appName": "Excel",
+                    "windowTitle": "Q4_Financials.xlsx",
+                    "keystrokes": 450,
+                    "mouseClicks": 120,
+                    "timeSpent": 600,
+                    "urls": []
+                  }
+                ]
+              }
+            ],
+            "summary": {
+              "totalTimeSpent": 3600,
+              "totalKeystrokes": 1350,
+              "totalMouseClicks": 360,
+              "totalScreenshots": 6,
+              "totalWebcamPhotos": 6,
+              "averageProductivityScore": 72,
+              "averageCompositeScore": 70,
+              "mostUsedApplications": [
+                {
+                  "appName": "Excel",
+                  "timeSpent": 3600,
+                  "keystrokes": 1350,
+                  "mouseClicks": 360
+                }
+              ],
+              "mostVisitedUrls": [],
+              "firstActivity": "2024-01-15T09:00:00.000Z",
+              "lastActivity": "2024-01-15T10:00:00.000Z"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

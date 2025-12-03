@@ -2,10 +2,21 @@ const { app, BrowserWindow, ipcMain, desktopCapturer, nativeImage, globalShortcu
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
 const isDev = process.env.NODE_ENV === 'development';
+
+// Generate UUID v4
+const generateUUID = () => {
+  return crypto.randomUUID ? crypto.randomUUID() : 
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+};
 
 // Electron Store for persistent settings (ES module - needs dynamic import)
 let store = null;
@@ -161,6 +172,171 @@ let lastActivityTimestamp = null; // Track last mouse/keyboard activity for idle
 let perWindowStats = new Map(); // Map<windowKey, { keystrokes: number, clicks: number, startTime: number, title: string, url: string | null, lastSeen: number, urlHistory: Array<{url: string | null, title: string, timestamp: number}> }>
 let currentWindowKey = null; // Track current window identifier
 
+// Enhanced per-task tracking: store all tracking data for each task
+let perTaskTracking = new Map(); // Map<taskKey, TaskTrackingData>
+let currentTaskId = null; // Track current task ID
+let currentProjectId = null; // Track current project ID
+let taskMetadata = new Map(); // Map<taskKey, { taskName: string, projectName: string }>
+let taskFilePaths = new Map(); // Map<taskKey, filePath> - Track file path for each task
+
+// Real-time save management: debounced saves to avoid too many file writes
+let saveTimers = new Map(); // Map<taskKey, NodeJS.Timeout>
+const SAVE_DEBOUNCE_MS = 2000; // Save 2 seconds after last change (real-time feel)
+
+// TaskTrackingData structure
+// {
+//   taskId: string,
+//   projectId: string,
+//   startTime: number,  // Current session start time
+//   keystrokes: number,  // Cumulative for current session (will be added to total)
+//   mouseClicks: number,  // Cumulative for current session (will be added to total)
+//   activeWindows: Map<windowKey, WindowStats>,  // Per-window stats within task
+//   urlHistory: Array<{url: string, title: string, timestamp: number}>,
+//   screenshots: Array<{id: string, timestamp: number, dataUrl: string, isBlurred: boolean}>,
+//   webcamPhotos: Array<{id: string, timestamp: number, dataUrl: string}>,
+//   activityLogs: Array<ActivityLog>
+// }
+
+// Helper to create a unique key for a task
+const getTaskKey = (projectId, taskId) => {
+  if (!taskId) return null; // No task key if no taskId
+  return `${projectId || 'unknown'}:${taskId}`;
+};
+
+// Get or create enhanced tracking data for a task
+// IMPORTANT: ONE FILE PER TASK - loads existing data and merges with new session
+const getTaskTrackingData = (projectId, taskId, loadExisting = true) => {
+  if (!taskId) return null; // No task tracking if no taskId
+  
+  const taskKey = getTaskKey(projectId, taskId);
+  if (!taskKey) return null;
+  
+  // If task tracking doesn't exist in memory, try to load from file
+  if (!perTaskTracking.has(taskKey) && loadExisting) {
+    const existingData = loadTaskTrackingDataFromFile(projectId, taskId);
+    
+    if (existingData && existingData.trackingData) {
+      // Load existing data and merge with new session
+      const activeWindowsMap = new Map();
+      if (existingData.trackingData.activeWindows) {
+        existingData.trackingData.activeWindows.forEach(item => {
+          const { windowKey, ...stats } = item;
+          activeWindowsMap.set(windowKey, stats);
+        });
+      }
+      
+      // Merge existing window data properly
+      const mergedWindowsMap = new Map();
+      if (existingData.trackingData.activeWindows) {
+        existingData.trackingData.activeWindows.forEach(item => {
+          const { windowKey, ...stats } = item;
+          mergedWindowsMap.set(windowKey, {
+            ...stats,
+            timeCapsules: stats.timeCapsules || [], // Load existing time capsules
+            startTime: null, // Will be set when window becomes active (don't restore from saved)
+            lastSeen: stats.lastSeen || Date.now(),
+            urls: stats.urls || [],
+            lastUrl: stats.lastUrl || null
+          });
+        });
+      }
+      
+      // Track what was last saved for each window to prevent double-counting
+      const lastSavedWindowData = new Map();
+      if (existingData.trackingData.activeWindows) {
+        existingData.trackingData.activeWindows.forEach(item => {
+          const { windowKey, ...stats } = item;
+          lastSavedWindowData.set(windowKey, {
+            keystrokes: stats.keystrokes || 0,
+            mouseClicks: stats.mouseClicks || 0
+          });
+        });
+      }
+      
+      perTaskTracking.set(taskKey, {
+        taskId: taskId,
+        projectId: projectId || 'unknown',
+        startTime: Date.now(), // New session start time
+        keystrokes: 0, // Reset for new session (will accumulate)
+        mouseClicks: 0, // Reset for new session (will accumulate)
+        activeWindows: mergedWindowsMap, // Load existing window stats
+        urlHistory: existingData.trackingData.urlHistory || [],
+        screenshots: existingData.trackingData.screenshots || [],
+        webcamPhotos: existingData.trackingData.webcamPhotos || [],
+        activityLogs: existingData.trackingData.activityLogs || [],
+        createdAt: existingData.metadata.createdAt, // Keep original creation date
+        totalKeystrokes: existingData.trackingData.summary?.totalKeystrokes || 0, // Cumulative total
+        totalMouseClicks: existingData.trackingData.summary?.totalMouseClicks || 0, // Cumulative total
+        lastSavedWindowData: lastSavedWindowData, // Track what was last saved to prevent double-counting
+        lastSavedKeystrokes: existingData.trackingData.summary?.currentSessionKeystrokes || 0, // Track last saved session data
+        lastSavedMouseClicks: existingData.trackingData.summary?.currentSessionMouseClicks || 0
+      });
+      
+      console.log(`[TASK-LOAD] ✅ Loaded existing data for task ${taskId}: ${existingData.trackingData.activityLogs?.length || 0} logs, ${existingData.trackingData.screenshots?.length || 0} screenshots`);
+    } else {
+      // No existing file, create fresh tracking data
+      perTaskTracking.set(taskKey, {
+        taskId: taskId,
+        projectId: projectId || 'unknown',
+        startTime: Date.now(),
+        createdAt: new Date().toISOString(),
+        keystrokes: 0,
+        mouseClicks: 0,
+        activeWindows: new Map(),
+        urlHistory: [],
+        screenshots: [],
+        webcamPhotos: [],
+        activityLogs: [],
+        totalKeystrokes: 0,
+        totalMouseClicks: 0,
+        lastSavedWindowData: new Map(), // Track what was last saved to prevent double-counting
+        lastSavedKeystrokes: 0,
+        lastSavedMouseClicks: 0
+      });
+      
+      console.log(`[TASK-NEW] ✅ Created new tracking data for task ${taskId}`);
+    }
+    
+    // Store file path for this task
+    taskFilePaths.set(taskKey, getTaskDataPath(projectId, taskId));
+  } else if (!perTaskTracking.has(taskKey)) {
+    // Create fresh if loadExisting is false
+    perTaskTracking.set(taskKey, {
+      taskId: taskId,
+      projectId: projectId || 'unknown',
+      startTime: Date.now(),
+      createdAt: new Date().toISOString(),
+      keystrokes: 0,
+      mouseClicks: 0,
+      activeWindows: new Map(),
+      urlHistory: [],
+      screenshots: [],
+      webcamPhotos: [],
+      activityLogs: [],
+      totalKeystrokes: 0,
+      totalMouseClicks: 0
+    });
+    
+    taskFilePaths.set(taskKey, getTaskDataPath(projectId, taskId));
+  }
+  
+  return perTaskTracking.get(taskKey);
+};
+
+// Legacy function for backward compatibility
+const getTaskStats = (projectId, taskId) => {
+  const taskData = getTaskTrackingData(projectId, taskId);
+  if (!taskData) return null;
+  
+  return {
+    keystrokes: taskData.keystrokes,
+    clicks: taskData.mouseClicks,
+    startTime: taskData.startTime,
+    projectId: taskData.projectId,
+    taskId: taskData.taskId
+  };
+};
+
 // Helper to normalize URLs to prevent duplicates
 // Normalizes: www, https/http, case, trailing slashes
 const normalizeUrl = (url) => {
@@ -204,6 +380,636 @@ const normalizeUrl = (url) => {
     return normalized;
   }
 };
+
+// ==================== JSON File Storage Functions ====================
+
+// Get path for task tracking data file - ONE FILE PER TASK (not per session)
+// Files are saved in project directory: {projectRoot}/tracking-data/{projectId}/{taskId}.json
+const getTaskDataPath = (projectId, taskId) => {
+  // Get project root directory (one level up from electron folder)
+  const projectRoot = path.join(__dirname, '..');
+  const dataDir = path.join(projectRoot, 'tracking-data', projectId || 'unknown');
+  
+  // Create directory if it doesn't exist
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+    if (isDev) {
+      console.log(`[TASK-PATH] Created tracking-data directory: ${dataDir}`);
+    }
+  }
+  
+  // ONE FILE PER TASK - use taskId as filename
+  return path.join(dataDir, `${taskId}.json`);
+};
+
+// Save task tracking data to JSON file (immediate save)
+// ONE FILE PER TASK - updates the same file, merging session data with totals
+const saveTaskTrackingDataToFile = (projectId, taskId, taskName = null, projectName = null, immediate = false) => {
+  try {
+    const taskKey = getTaskKey(projectId, taskId);
+    if (!taskKey) return false;
+    
+    const taskData = perTaskTracking.get(taskKey);
+    if (!taskData) return false;
+    
+    // ONE FILE PER TASK - use taskId as filename
+    const filePath = getTaskDataPath(projectId, taskId);
+    taskFilePaths.set(taskKey, filePath);
+    
+    // Get metadata
+    const metadata = taskMetadata.get(taskKey) || {};
+    const finalTaskName = taskName || metadata.taskName || 'Unknown Task';
+    const finalProjectName = projectName || metadata.projectName || 'Unknown Project';
+    
+    // Convert Map to Array for JSON serialization
+    // Update timeSpent for all windows before saving and merge with saved data
+    const now = Date.now();
+    
+    // Load saved window data and summary from file to merge with current session
+    const savedWindowsMap = new Map();
+    let baseTotalKeystrokes = 0;
+    let baseTotalMouseClicks = 0;
+    let savedCurrentSessionKeys = 0;
+    let savedCurrentSessionClicks = 0;
+    
+    try {
+      if (fs.existsSync(filePath)) {
+        const existingFile = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        
+        // Load saved windows
+        if (existingFile.trackingData?.activeWindows) {
+          existingFile.trackingData.activeWindows.forEach(item => {
+            const { windowKey, ...stats } = item;
+            savedWindowsMap.set(windowKey, stats);
+          });
+        }
+        
+        // Load saved summary
+        const savedSummary = existingFile.trackingData?.summary;
+        if (savedSummary) {
+          baseTotalKeystrokes = savedSummary.totalKeystrokes || 0;
+          baseTotalMouseClicks = savedSummary.totalMouseClicks || 0;
+          savedCurrentSessionKeys = savedSummary.currentSessionKeystrokes || 0;
+          savedCurrentSessionClicks = savedSummary.currentSessionMouseClicks || 0;
+        }
+      }
+    } catch (e) {
+      // File doesn't exist or is invalid, start fresh
+    }
+    
+    // Debug: Log active windows count
+    if (isDev) {
+      console.log(`[TASK-SAVE] Processing ${taskData.activeWindows.size} active windows for task ${taskId}`);
+    }
+    
+    taskData.activeWindows.forEach((windowData, windowKey) => {
+      const savedWindow = savedWindowsMap.get(windowKey);
+      
+      if (isDev) {
+        console.log(`[TASK-SAVE] Processing window ${windowKey}, has startTime: ${!!windowData.startTime}, timeCapsules: ${windowData.timeCapsules?.length || 0}`);
+      }
+      
+      // CRITICAL FIX: Calculate time from time capsules (exact start/end pairs)
+      // Initialize timeCapsules if it doesn't exist
+      if (!windowData.timeCapsules) {
+        windowData.timeCapsules = [];
+      }
+      
+      // Load saved time capsules from file
+      const savedCapsules = savedWindow?.timeCapsules || [];
+      
+      // Get new capsules from current session (closed during this session, not yet saved)
+      // IMPORTANT: windowData.timeCapsules contains ONLY NEW capsules that haven't been saved yet
+      // We need to separate new capsules from already-saved ones
+      const newSessionCapsules = windowData.timeCapsules || [];
+      
+      // Create a Set of saved capsule keys for fast lookup
+      const savedCapsuleKeys = new Set(savedCapsules.map(c => `${c.startTime}-${c.endTime}`));
+      
+      // Filter out new capsules that are already in saved (prevent duplicates)
+      const trulyNewCapsules = newSessionCapsules.filter(capsule => {
+        const key = `${capsule.startTime}-${capsule.endTime}`;
+        return !savedCapsuleKeys.has(key);
+      });
+      
+      // Merge: saved capsules + only truly new capsules (deduplicated)
+      const allClosedCapsules = [...savedCapsules, ...trulyNewCapsules];
+      
+      // Calculate total time from all closed capsules
+      let totalTime = allClosedCapsules.reduce((sum, capsule) => {
+        return sum + (capsule.duration || 0);
+      }, 0);
+      
+      // If window is currently active, add time from active capsule (not yet closed)
+      // This time is included in calculation but capsule is not saved until window closes
+      if (windowData.startTime) {
+        const activeDuration = Math.floor((now - windowData.startTime) / 1000);
+        totalTime += activeDuration;
+      }
+      
+      windowData.timeSpent = totalTime;
+      
+      // IMPORTANT: Store ALL capsules (saved + new) so they persist in memory
+      // This ensures that when we check windowData.timeCapsules, we see all capsules
+      // The deduplication logic above ensures we don't add duplicates
+      windowData.timeCapsules = allClosedCapsules;
+      windowData.lastSeen = now;
+      
+      // CRITICAL FIX: Only add NEW data since last save to prevent double-counting
+      const savedKeystrokes = savedWindow?.keystrokes || 0;
+      const savedClicks = savedWindow?.mouseClicks || 0;
+      
+      // Get what was last saved for this window (to calculate difference)
+      const lastSavedWindow = taskData.lastSavedWindowData?.get(windowKey);
+      const lastSavedWindowKeystrokes = lastSavedWindow?.keystrokes !== undefined ? lastSavedWindow.keystrokes : savedKeystrokes;
+      const lastSavedWindowClicks = lastSavedWindow?.mouseClicks !== undefined ? lastSavedWindow.mouseClicks : savedClicks;
+      
+      // Current session data (cumulative since task start)
+      const currentKeystrokes = windowData.keystrokes || 0;
+      const currentClicks = windowData.mouseClicks || 0;
+      
+      // Calculate NEW data since last save (difference)
+      const newKeystrokes = Math.max(0, currentKeystrokes - lastSavedWindowKeystrokes);
+      const newClicks = Math.max(0, currentClicks - lastSavedWindowClicks);
+      
+      // Total = saved + NEW data only (not entire current session)
+      windowData.keystrokes = savedKeystrokes + newKeystrokes;
+      windowData.mouseClicks = savedClicks + newClicks;
+      
+      // Update last saved data for this window
+      if (!taskData.lastSavedWindowData) {
+        taskData.lastSavedWindowData = new Map();
+      }
+      const lastSavedData = {
+        keystrokes: currentKeystrokes, // Save current session total
+        mouseClicks: currentClicks,
+        timeSpent: windowData.timeSpent // Save total time (calculated from capsules)
+      };
+      taskData.lastSavedWindowData.set(windowKey, lastSavedData);
+      
+      // Merge URLs from both windowData.urls and perWindowStats.urlHistory
+      const savedUrls = savedWindow?.urls || [];
+      const currentUrls = windowData.urls || [];
+      const mergedUrls = [...savedUrls];
+      
+      // Helper function to find existing URL entry
+      const findExistingUrl = (url, title) => {
+        if (url) {
+          const normalizedUrl = normalizeUrl(url);
+          if (normalizedUrl) {
+            return mergedUrls.find(u => {
+              const uNormalized = normalizeUrl(u.url);
+              return uNormalized && normalizedUrl === uNormalized;
+            });
+          }
+        } else if (title) {
+          // For null URLs, match by exact title
+          return mergedUrls.find(u => !u.url && u.title === title);
+        }
+        return null;
+      };
+      
+      // Add URLs from current windowData (deduplicate)
+      currentUrls.forEach(newUrl => {
+        const existing = findExistingUrl(newUrl.url, newUrl.title);
+        if (existing) {
+          // Just update timestamp and title, no visit count
+          existing.timestamp = Math.max(existing.timestamp || 0, newUrl.timestamp || Date.now());
+          // Update title if it changed
+          if (newUrl.title && newUrl.title !== existing.title) {
+            existing.title = newUrl.title;
+          }
+        } else {
+          // Remove visitCount if present
+          const { visitCount, ...urlWithoutCount } = newUrl;
+          mergedUrls.push(urlWithoutCount);
+        }
+      });
+      
+      // Also add URLs from perWindowStats.urlHistory (this includes file paths from code editors)
+      // IMPORTANT: Deduplicate urlHistory first to avoid processing the same entry multiple times
+      const windowStats = perWindowStats.get(windowKey);
+      if (windowStats && windowStats.urlHistory && windowStats.urlHistory.length > 0) {
+        // Create a map to deduplicate urlHistory entries first
+        const urlHistoryMap = new Map();
+        windowStats.urlHistory.forEach(urlEntry => {
+          const key = urlEntry.url ? normalizeUrl(urlEntry.url) || urlEntry.url : urlEntry.title;
+          if (key) {
+            if (!urlHistoryMap.has(key)) {
+              urlHistoryMap.set(key, {
+                url: urlEntry.url,
+                title: urlEntry.title,
+                timestamp: urlEntry.timestamp || Date.now(),
+                count: 1
+              });
+            } else {
+              const existing = urlHistoryMap.get(key);
+              existing.count += 1;
+              existing.timestamp = Math.max(existing.timestamp || 0, urlEntry.timestamp || Date.now());
+              // Update title if it changed
+              if (urlEntry.title && urlEntry.title !== existing.title) {
+                existing.title = urlEntry.title;
+              }
+            }
+          }
+        });
+        
+        // Now process deduplicated urlHistory
+        urlHistoryMap.forEach((urlEntry, key) => {
+          // Only add if it has a URL (not just a title)
+          if (urlEntry.url) {
+            const normalizedUrl = normalizeUrl(urlEntry.url);
+            if (normalizedUrl) {
+              const existing = findExistingUrl(normalizedUrl, null);
+              if (existing) {
+                // Just update timestamp and title, no visit count
+                existing.timestamp = Math.max(existing.timestamp || 0, urlEntry.timestamp || Date.now());
+                if (urlEntry.title && urlEntry.title !== existing.title) {
+                  existing.title = urlEntry.title;
+                }
+              } else {
+                mergedUrls.push({
+                  url: normalizedUrl,
+                  title: urlEntry.title || windowData.title || 'Unknown',
+                  timestamp: urlEntry.timestamp || Date.now()
+                });
+              }
+            }
+          } else if (urlEntry.title) {
+            // For entries without URL (like file paths from code editors), create a file:// URL
+            // Check if it looks like a file path (has extension)
+            const fileExtensionPattern = /\.([a-zA-Z0-9]+)$/;
+            if (fileExtensionPattern.test(urlEntry.title)) {
+              // Extract file name from title (format: "filename.ext - project - Editor")
+              const filePart = urlEntry.title.split(' - ')[0].trim();
+              const fileUrl = `file://${filePart}`;
+              const existing = findExistingUrl(fileUrl, null);
+              if (existing) {
+                // Just update timestamp and title, no visit count
+                existing.timestamp = Math.max(existing.timestamp || 0, urlEntry.timestamp || Date.now());
+                if (urlEntry.title && urlEntry.title !== existing.title) {
+                  existing.title = urlEntry.title;
+                }
+              } else {
+                mergedUrls.push({
+                  url: fileUrl,
+                  title: urlEntry.title,
+                  timestamp: urlEntry.timestamp || Date.now()
+                });
+              }
+            } else {
+              // Not a file path, add as title-only entry
+              const existing = findExistingUrl(null, urlEntry.title);
+              if (existing) {
+                // Just update timestamp, no visit count
+                existing.timestamp = Math.max(existing.timestamp || 0, urlEntry.timestamp || Date.now());
+              } else {
+                mergedUrls.push({
+                  url: null,
+                  title: urlEntry.title,
+                  timestamp: urlEntry.timestamp || Date.now()
+                });
+              }
+            }
+          }
+        });
+      }
+      
+      // Final deduplication pass to ensure no duplicates remain
+      const finalUrls = [];
+      const seenUrls = new Set();
+      mergedUrls.forEach(urlEntry => {
+        const key = urlEntry.url ? normalizeUrl(urlEntry.url) || urlEntry.url : `title:${urlEntry.title}`;
+        if (!seenUrls.has(key)) {
+          seenUrls.add(key);
+          finalUrls.push(urlEntry);
+        } else {
+          // If duplicate found, merge with existing
+          const existing = finalUrls.find(u => {
+            if (urlEntry.url) {
+              const uNormalized = normalizeUrl(u.url);
+              const entryNormalized = normalizeUrl(urlEntry.url);
+              return uNormalized && entryNormalized && uNormalized === entryNormalized;
+            } else {
+              return !u.url && u.title === urlEntry.title;
+            }
+          });
+          if (existing) {
+            // Just update timestamp, no visit count
+            existing.timestamp = Math.max(existing.timestamp || 0, urlEntry.timestamp || Date.now());
+          }
+        }
+      });
+      
+      windowData.urls = finalUrls;
+    });
+    
+    // Also include windows that existed before but aren't active now
+    savedWindowsMap.forEach((windowData, windowKey) => {
+      if (!taskData.activeWindows.has(windowKey)) {
+        // Window was used before but not in current session - keep it
+        taskData.activeWindows.set(windowKey, {
+          ...windowData,
+          lastSeen: now
+        });
+      }
+    });
+    
+    const activeWindowsArray = Array.from(taskData.activeWindows.entries()).map(([key, value]) => {
+      const windowEntry = {
+        windowKey: key,
+        appName: key, // Window key is the app name
+        title: value.title || key,
+        keystrokes: value.keystrokes || 0,
+        mouseClicks: value.mouseClicks || 0,
+        timeSpent: value.timeSpent || 0, // Total seconds spent in this window (calculated from capsules)
+        timeCapsules: value.timeCapsules || [], // Time capsules with start/end pairs
+        startTime: value.startTime || null, // Current active session start (if window is active)
+        lastSeen: value.lastSeen || now,
+        urls: value.urls || []
+      };
+      
+      if (isDev) {
+        console.log(`[TASK-SAVE] Serializing window ${key}:`, {
+          timeSpent: windowEntry.timeSpent,
+          capsules: windowEntry.timeCapsules.length,
+          keystrokes: windowEntry.keystrokes,
+          clicks: windowEntry.mouseClicks
+        });
+      }
+      
+      return windowEntry;
+    });
+    
+    if (isDev) {
+      console.log(`[TASK-SAVE] Serialized ${activeWindowsArray.length} windows to save`);
+    }
+    
+    // CRITICAL: Calculate cumulative totals properly
+    // CRITICAL FIX: Only add NEW data since last save to prevent double-counting
+    const currentSessionKeystrokes = taskData.keystrokes || 0;
+    const currentSessionMouseClicks = taskData.mouseClicks || 0;
+    
+    // Get what was last saved (from in-memory or file)
+    const lastSavedSessionKeys = taskData.lastSavedKeystrokes !== undefined 
+      ? taskData.lastSavedKeystrokes 
+      : savedCurrentSessionKeys;
+    const lastSavedSessionClicks = taskData.lastSavedMouseClicks !== undefined 
+      ? taskData.lastSavedMouseClicks 
+      : savedCurrentSessionClicks;
+    
+    // Calculate NEW data since last save (difference)
+    const newKeystrokes = Math.max(0, currentSessionKeystrokes - lastSavedSessionKeys);
+    const newClicks = Math.max(0, currentSessionMouseClicks - lastSavedSessionClicks);
+    
+    // Add only NEW data to base totals
+    const totalKeystrokes = baseTotalKeystrokes + newKeystrokes;
+    const totalMouseClicks = baseTotalMouseClicks + newClicks;
+    
+    // Update in-memory totals and last saved values
+    taskData.totalKeystrokes = totalKeystrokes;
+    taskData.totalMouseClicks = totalMouseClicks;
+    taskData.lastSavedKeystrokes = currentSessionKeystrokes; // Update what was last saved
+    taskData.lastSavedMouseClicks = currentSessionMouseClicks;
+    
+    // activeWindowsArray already has all the data with timeSpent calculated above
+    const activeWindowsWithTime = activeWindowsArray;
+    
+    const dataToSave = {
+      version: '1.0.0',
+      metadata: {
+        createdAt: taskData.createdAt || new Date().toISOString(),
+        lastUpdated: new Date().toISOString(),
+        taskId: taskData.taskId,
+        projectId: taskData.projectId,
+        taskName: finalTaskName,
+        projectName: finalProjectName,
+        currentSessionStart: taskData.startTime ? new Date(taskData.startTime).toISOString() : null
+      },
+      trackingData: {
+        activityLogs: taskData.activityLogs || [],
+        screenshots: taskData.screenshots || [],
+        webcamPhotos: taskData.webcamPhotos || [],
+        urlHistory: taskData.urlHistory || [],
+        activeWindows: activeWindowsWithTime,
+        summary: {
+          totalKeystrokes: totalKeystrokes, // Cumulative total across all sessions
+          totalMouseClicks: totalMouseClicks, // Cumulative total across all sessions
+          currentSessionKeystrokes: taskData.keystrokes, // Current session only
+          currentSessionMouseClicks: taskData.mouseClicks, // Current session only
+          totalScreenshots: (taskData.screenshots || []).length,
+          totalWebcamPhotos: (taskData.webcamPhotos || []).length,
+          totalUrls: (taskData.urlHistory || []).length,
+          totalActivityLogs: (taskData.activityLogs || []).length,
+          firstActivity: taskData.createdAt || (taskData.startTime ? new Date(taskData.startTime).toISOString() : null),
+          lastActivity: new Date().toISOString()
+        }
+      }
+    };
+    
+    // CRITICAL: Write file synchronously to ensure data is saved before continuing
+    fs.writeFileSync(filePath, JSON.stringify(dataToSave, null, 2), 'utf8');
+    
+    // CRITICAL: Verify file was actually created and has content
+    if (!fs.existsSync(filePath)) {
+      console.error(`[TASK-SAVE] ❌ CRITICAL ERROR: File was not created at ${filePath}`);
+      return false;
+    }
+    
+    const stats = fs.statSync(filePath);
+    if (stats.size === 0) {
+      console.error(`[TASK-SAVE] ❌ CRITICAL ERROR: File is empty at ${filePath}`);
+      return false;
+    }
+    
+    // Verify JSON is valid by reading it back
+    try {
+      const verifyData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (!verifyData.metadata || !verifyData.trackingData) {
+        console.error(`[TASK-SAVE] ❌ CRITICAL ERROR: Saved file has invalid structure`);
+        return false;
+      }
+    } catch (verifyError) {
+      console.error(`[TASK-SAVE] ❌ CRITICAL ERROR: Saved file is not valid JSON:`, verifyError);
+      return false;
+    }
+    
+    // Always log file path (not just in dev mode) so user can see where files are saved
+    if (immediate) {
+      console.log(`[TASK-SAVE] ✅ Immediately saved tracking data for task ${taskId}`);
+      console.log(`[TASK-SAVE] 📁 File location: ${filePath}`);
+      console.log(`[TASK-SAVE] 📊 Current session: ${taskData.keystrokes} keystrokes, ${taskData.mouseClicks} clicks`);
+      console.log(`[TASK-SAVE] 📊 Total cumulative: ${totalKeystrokes} keystrokes, ${totalMouseClicks} clicks`);
+      console.log(`[TASK-SAVE] 📊 Data: ${taskData.activityLogs?.length || 0} logs, ${taskData.screenshots?.length || 0} screenshots, ${activeWindowsWithTime.length} windows`);
+    } else {
+      console.log(`[TASK-SAVE] ✅ Saved tracking data for task ${taskId}`);
+      console.log(`[TASK-SAVE] 📁 File location: ${filePath}`);
+    }
+    
+    console.log(`[TASK-SAVE] ✅ File verified: ${stats.size} bytes written, JSON valid`);
+    
+    return true;
+  } catch (error) {
+    console.error(`[TASK-SAVE] Error saving task tracking data:`, error);
+    return false;
+  }
+};
+
+// Debounced save: schedules a save after a delay, cancels previous scheduled saves
+const scheduleTaskSave = (projectId, taskId, taskName = null, projectName = null, immediate = false) => {
+  const taskKey = getTaskKey(projectId, taskId);
+  if (!taskKey) return;
+  
+  // If immediate save requested, save now and clear any pending saves
+  if (immediate) {
+    if (saveTimers.has(taskKey)) {
+      clearTimeout(saveTimers.get(taskKey));
+      saveTimers.delete(taskKey);
+    }
+    saveTaskTrackingDataToFile(projectId, taskId, taskName, projectName, true);
+    return;
+  }
+  
+  // Clear existing timer for this task
+  if (saveTimers.has(taskKey)) {
+    clearTimeout(saveTimers.get(taskKey));
+  }
+  
+  // Schedule new save
+  const timer = setTimeout(() => {
+    saveTaskTrackingDataToFile(projectId, taskId, taskName, projectName, false);
+    saveTimers.delete(taskKey);
+  }, SAVE_DEBOUNCE_MS);
+  
+  saveTimers.set(taskKey, timer);
+};
+
+// Load task tracking data from JSON file - ONE FILE PER TASK
+const loadTaskTrackingDataFromFile = (projectId, taskId) => {
+  try {
+    const filePath = getTaskDataPath(projectId, taskId);
+    
+    if (!fs.existsSync(filePath)) {
+      if (isDev) {
+        console.log(`[TASK-LOAD] File not found for task ${taskId}, will create new: ${filePath}`);
+      }
+      return null;
+    }
+    
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    const savedData = JSON.parse(fileContent);
+    
+    console.log(`[TASK-LOAD] ✅ Loaded existing file for task ${taskId}: ${filePath}`);
+    console.log(`[TASK-LOAD] 📊 Existing data: ${savedData.trackingData?.activityLogs?.length || 0} logs, ${savedData.trackingData?.screenshots?.length || 0} screenshots`);
+    console.log(`[TASK-LOAD] 📊 Existing totals: ${savedData.trackingData?.summary?.totalKeystrokes || 0} keystrokes, ${savedData.trackingData?.summary?.totalMouseClicks || 0} clicks`);
+    
+    return savedData;
+  } catch (error) {
+    console.error(`[TASK-LOAD] ❌ Error loading task tracking data:`, error);
+    return null;
+  }
+};
+
+// Initialize task tracking (save previous, initialize new with NEW UUID)
+const initializeTaskTracking = async (projectId, taskId, taskName = null, projectName = null) => {
+  // CRITICAL: Save previous task data if exists (IMMEDIATE save on task switch)
+  // This ensures no data is lost when switching tasks
+  if (currentTaskId && currentProjectId) {
+    const prevTaskKey = getTaskKey(currentProjectId, currentTaskId);
+    if (prevTaskKey && perTaskTracking.has(prevTaskKey)) {
+      const prevTaskData = perTaskTracking.get(prevTaskKey);
+      
+      // Clear any pending saves for previous task
+      if (saveTimers.has(prevTaskKey)) {
+        clearTimeout(saveTimers.get(prevTaskKey));
+        saveTimers.delete(prevTaskKey);
+      }
+      
+      // CRITICAL: Save previous task data IMMEDIATELY before switching
+      // Verify data exists before saving
+      if (prevTaskData) {
+        const saveSuccess = saveTaskTrackingDataToFile(currentProjectId, currentTaskId, null, null, true);
+        
+        if (saveSuccess) {
+          console.log(`[TASK-SWITCH] ✅ Successfully saved previous task ${currentTaskId} data before switching`);
+          console.log(`[TASK-SWITCH] 📊 Previous task stats: ${prevTaskData.keystrokes} keystrokes, ${prevTaskData.mouseClicks} clicks, ${prevTaskData.activityLogs?.length || 0} logs`);
+        } else {
+          console.error(`[TASK-SWITCH] ❌ FAILED to save previous task ${currentTaskId} data - DATA MAY BE LOST!`);
+          // Retry save once
+          setTimeout(() => {
+            const retrySuccess = saveTaskTrackingDataToFile(currentProjectId, currentTaskId, null, null, true);
+            if (retrySuccess) {
+              console.log(`[TASK-SWITCH] ✅ Retry save successful for task ${currentTaskId}`);
+            } else {
+              console.error(`[TASK-SWITCH] ❌ Retry save also failed for task ${currentTaskId}`);
+            }
+          }, 100);
+        }
+      } else {
+        console.warn(`[TASK-SWITCH] ⚠️  Previous task ${currentTaskId} has no tracking data to save`);
+      }
+      
+      // IMPORTANT: Keep previous task data in memory until we're sure it's saved
+      // Don't delete it - it will be overwritten when the same task is started again with new UUID
+      // This ensures we can retry saving if needed
+    }
+  }
+  
+  // Set new task (only after previous task is saved)
+  currentProjectId = projectId;
+  currentTaskId = taskId;
+  
+  // Store metadata
+  if (taskName || projectName) {
+    const taskKey = getTaskKey(projectId, taskId);
+    if (taskKey) {
+      taskMetadata.set(taskKey, {
+        taskName: taskName || 'Unknown Task',
+        projectName: projectName || 'Unknown Project'
+      });
+    }
+  }
+  
+  // IMPORTANT: Load existing task data or create new
+  // ONE FILE PER TASK - loads existing data and merges with new session
+  const taskData = getTaskTrackingData(projectId, taskId, true); // true = load existing if available
+  
+  if (taskData) {
+    const filePath = getTaskDataPath(projectId, taskId);
+    const projectRoot = path.join(__dirname, '..');
+    const hasExistingData = taskData.activityLogs && taskData.activityLogs.length > 0;
+    
+    console.log(`[TASK-INIT] ✅ Initialized tracking for task ${taskId} in project ${projectId}`);
+    console.log(`[TASK-INIT] 📁 JSON file: ${filePath}`);
+    console.log(`[TASK-INIT] 📂 Project root: ${projectRoot}`);
+    console.log(`[TASK-INIT] 📂 Tracking data folder: ${path.join(projectRoot, 'tracking-data')}`);
+    
+    if (hasExistingData) {
+      console.log(`[TASK-INIT] 💾 Loaded existing data: ${taskData.activityLogs.length} logs, ${taskData.screenshots?.length || 0} screenshots`);
+      console.log(`[TASK-INIT] 💾 Cumulative totals: ${taskData.totalKeystrokes || 0} keystrokes, ${taskData.totalMouseClicks || 0} clicks`);
+      console.log(`[TASK-INIT] 🔄 New session started - data will be merged with existing`);
+    } else {
+      console.log(`[TASK-INIT] 🆕 New task - creating fresh tracking data`);
+    }
+    
+    // Save immediately to create/update file
+    const saveSuccess = saveTaskTrackingDataToFile(projectId, taskId, taskName, projectName, true);
+    if (!saveSuccess) {
+      console.error(`[TASK-INIT] ❌ CRITICAL: Failed to save initial file for task`);
+      // Retry once
+      setTimeout(() => {
+        const retrySuccess = saveTaskTrackingDataToFile(projectId, taskId, taskName, projectName, true);
+        if (retrySuccess) {
+          console.log(`[TASK-INIT] ✅ Retry save successful`);
+        }
+      }, 100);
+    }
+  }
+  
+  return taskData;
+};
+
+// ==================== End JSON File Storage Functions ====================
 
 // Helper to create a unique key for a window (app + title combination)
 const getWindowKey = (app, title) => {
@@ -523,7 +1329,7 @@ ipcMain.handle('delete-all-data', async () => {
 });
 
 // Screenshot capture handler (no screen share needed)
-ipcMain.handle('capture-screenshot', async () => {
+ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
   try {
     console.log('Starting screenshot capture...');
     
@@ -561,6 +1367,30 @@ ipcMain.handle('capture-screenshot', async () => {
           const image = nativeImage.createFromBuffer(pngBuffer);
           const dataUrl = image.toDataURL();
           console.log('Screenshot captured successfully, data URL length:', dataUrl.length);
+          
+          // Tag screenshot with current task
+          if (currentTaskId && currentProjectId) {
+            const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+            if (taskData) {
+              const screenshotId = `ss_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+              taskData.screenshots.push({
+                id: screenshotId,
+                timestamp: Date.now(),
+                dataUrl: dataUrl,
+                isBlurred: isBlurred,
+                taskId: currentTaskId,
+                projectId: currentProjectId
+              });
+              
+              // Schedule real-time save (debounced) - saves 2 seconds after screenshot
+              scheduleTaskSave(currentProjectId, currentTaskId);
+              
+              if (isDev) {
+                console.log(`[TASK-SCREENSHOT] Tagged screenshot with task ${currentTaskId}, scheduled save`);
+              }
+            }
+          }
+          
           return dataUrl;
         } else {
           console.warn('Thumbnail has invalid dimensions');
@@ -580,6 +1410,49 @@ ipcMain.handle('capture-screenshot', async () => {
   }
 });
 
+// Helper function to extract file path from code editor window title
+// Pattern: "filename.ext - project - Editor" or "filename.ext - Editor"
+const extractFilePathFromTitle = (title, appName) => {
+  if (!title || !appName) return null;
+  
+  const lowerApp = appName.toLowerCase();
+  
+  // Check if it's a code editor
+  const isCodeEditor = lowerApp.includes('cursor') || 
+                       lowerApp.includes('code') || 
+                       lowerApp.includes('vscode') ||
+                       lowerApp.includes('sublime') ||
+                       lowerApp.includes('atom') ||
+                       lowerApp.includes('webstorm') ||
+                       lowerApp.includes('intellij') ||
+                       lowerApp.includes('phpstorm') ||
+                       lowerApp.includes('pycharm') ||
+                       lowerApp.includes('rider') ||
+                       lowerApp.includes('clion') ||
+                       lowerApp.includes('goland') ||
+                       lowerApp.includes('rubymine') ||
+                       lowerApp.includes('android studio') ||
+                       lowerApp.includes('xcode');
+  
+  if (!isCodeEditor) return null;
+  
+  // Pattern: "filename.ext - project - Editor" or "filename.ext - Editor"
+  // Extract the file path part (before the first " - ")
+  const parts = title.split(' - ');
+  if (parts.length > 0) {
+    const filePart = parts[0].trim();
+    // Check if it looks like a file path (has extension)
+    const fileExtensionPattern = /\.([a-zA-Z0-9]+)$/;
+    if (fileExtensionPattern.test(filePart)) {
+      // Format as file:// URL or just return the file path
+      // For now, return as file path (can be converted to file:// URL if needed)
+      return `file://${filePart}`;
+    }
+  }
+  
+  return null;
+};
+
 // Helper function to extract URL from window title (for browsers)
 // Improved version that extracts URLs more aggressively
 const extractUrlFromTitle = (title, appName) => {
@@ -587,6 +1460,10 @@ const extractUrlFromTitle = (title, appName) => {
   
   const lowerTitle = title.toLowerCase();
   const lowerApp = appName.toLowerCase();
+  
+  // First, try to extract file path from code editors
+  const filePath = extractFilePathFromTitle(title, appName);
+  if (filePath) return filePath;
   
   // Check if it's a browser
   const isBrowser = lowerApp.includes('chrome') || 
@@ -645,6 +1522,7 @@ const extractUrlFromTitle = (title, appName) => {
   }
   
   // Check for common sites in title (improved matching with more sites)
+  // Expanded list with AI tools, development tools, and common services
   const sitePatterns = [
     { pattern: /youtube|youtu\.be/i, url: (t) => {
       const videoIdMatch = t.match(/watch\?v=([a-zA-Z0-9_-]+)/i);
@@ -674,6 +1552,44 @@ const extractUrlFromTitle = (title, appName) => {
     { pattern: /tumblr/i, url: () => 'https://www.tumblr.com' },
     { pattern: /spotify/i, url: () => 'https://open.spotify.com' },
     { pattern: /soundcloud/i, url: () => 'https://soundcloud.com' },
+    // AI Tools
+    { pattern: /\bclaude\b/i, url: () => 'https://claude.ai' },
+    { pattern: /\bchatgpt|openai\b/i, url: () => 'https://chat.openai.com' },
+    { pattern: /\bperplexity\b/i, url: () => 'https://www.perplexity.ai' },
+    { pattern: /\bcopilot\b/i, url: () => 'https://copilot.microsoft.com' },
+    { pattern: /\bgemini\b/i, url: () => 'https://gemini.google.com' },
+    // Development Tools
+    { pattern: /\bvercel\b/i, url: () => 'https://vercel.com' },
+    { pattern: /\bnetlify\b/i, url: () => 'https://www.netlify.com' },
+    { pattern: /\bheroku\b/i, url: () => 'https://www.heroku.com' },
+    { pattern: /\baws\b/i, url: () => 'https://aws.amazon.com' },
+    { pattern: /\bazure\b/i, url: () => 'https://azure.microsoft.com' },
+    { pattern: /\bcloudflare\b/i, url: () => 'https://www.cloudflare.com' },
+    { pattern: /\bdocker\b/i, url: () => 'https://www.docker.com' },
+    { pattern: /\bkubernetes\b/i, url: () => 'https://kubernetes.io' },
+    // Code Platforms
+    { pattern: /\bgitlab\b/i, url: () => 'https://gitlab.com' },
+    { pattern: /\bbitbucket\b/i, url: () => 'https://bitbucket.org' },
+    { pattern: /\bcode\.sandbox|sandbox\b/i, url: () => 'https://codesandbox.io' },
+    { pattern: /\bstackblitz\b/i, url: () => 'https://stackblitz.com' },
+    { pattern: /\breplit\b/i, url: () => 'https://replit.com' },
+    // Design Tools
+    { pattern: /\bcanva\b/i, url: () => 'https://www.canva.com' },
+    { pattern: /\badobe\b/i, url: () => 'https://www.adobe.com' },
+    { pattern: /\bsketch\b/i, url: () => 'https://www.sketch.com' },
+    // Productivity
+    { pattern: /\btrello\b/i, url: () => 'https://trello.com' },
+    { pattern: /\basana\b/i, url: () => 'https://asana.com' },
+    { pattern: /\bjira\b/i, url: () => 'https://www.atlassian.com/software/jira' },
+    { pattern: /\blinear\b/i, url: () => 'https://linear.app' },
+    { pattern: /\bclickup\b/i, url: () => 'https://clickup.com' },
+    // Communication
+    { pattern: /\bwhatsapp\b/i, url: () => 'https://web.whatsapp.com' },
+    { pattern: /\btelegram\b/i, url: () => 'https://web.telegram.org' },
+    { pattern: /\bsignal\b/i, url: () => 'https://signal.org' },
+    // Documentation
+    { pattern: /\bconfluence\b/i, url: () => 'https://www.atlassian.com/software/confluence' },
+    { pattern: /\bwikimedia\b/i, url: () => 'https://www.wikimedia.org' },
   ];
   
   for (const site of sitePatterns) {
@@ -696,6 +1612,27 @@ const extractUrlFromTitle = (title, appName) => {
         !domain.toLowerCase().includes('firefox') &&
         !domain.toLowerCase().includes('edge')) {
       return `https://${domain}`;
+    }
+  }
+  
+  // Additional fallback: Try to extract site name from common patterns
+  // Pattern: "Page Title - SiteName - Browser" or "SiteName - Page Title"
+  // This helps when site name is mentioned but not as a domain
+  const siteNamePatterns = [
+    // Look for standalone site names (word boundaries to avoid partial matches)
+    { name: 'claude', domain: 'claude.ai' },
+    { name: 'chatgpt', domain: 'chat.openai.com' },
+    { name: 'openai', domain: 'openai.com' },
+    { name: 'perplexity', domain: 'www.perplexity.ai' },
+    { name: 'gemini', domain: 'gemini.google.com' },
+    { name: 'copilot', domain: 'copilot.microsoft.com' },
+  ];
+  
+  for (const site of siteNamePatterns) {
+    // Use word boundary to match whole words only
+    const siteRegex = new RegExp(`\\b${site.name}\\b`, 'i');
+    if (siteRegex.test(title)) {
+      return `https://${site.domain}`;
     }
   }
   
@@ -905,6 +1842,14 @@ $keys -join ','`;
               stats.keystrokes++;
             }
             
+            // Increment per-task counter if we have a current task
+            if (currentTaskId && currentProjectId) {
+              const taskStats = getTaskStats(currentProjectId, currentTaskId);
+              if (taskStats) {
+                taskStats.keystrokes++;
+              }
+            }
+            
             if (isTrackingActive && mainWindow) {
               mainWindow.webContents.send('keystroke-update', keystrokeCount);
             }
@@ -976,6 +1921,35 @@ const initSystemTracking = () => {
         stats.keystrokes++;
       }
       
+      // Increment per-task counter if we have a current task
+      if (currentTaskId && currentProjectId) {
+        const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+        if (taskData) {
+          taskData.keystrokes++;
+          
+          // Also track per-window within task
+          if (currentWindowKey) {
+            if (!taskData.activeWindows.has(currentWindowKey)) {
+              taskData.activeWindows.set(currentWindowKey, {
+                keystrokes: 0,
+                mouseClicks: 0,
+                timeSpent: 0,
+                startTime: Date.now(),
+                lastSeen: Date.now(),
+                urls: []
+              });
+            }
+            const windowData = taskData.activeWindows.get(currentWindowKey);
+            // Increment keystrokes (this is current session only, will be merged on save)
+            windowData.keystrokes = (windowData.keystrokes || 0) + 1;
+            windowData.lastSeen = Date.now();
+          }
+          
+          // Schedule real-time save (debounced)
+          scheduleTaskSave(currentProjectId, currentTaskId);
+        }
+      }
+      
       if (isTrackingActive && mainWindow) {
         mainWindow.webContents.send('keystroke-update', keystrokeCount);
       }
@@ -995,6 +1969,35 @@ const initSystemTracking = () => {
         if (currentWindowKey) {
           const stats = getWindowStats(currentWindowKey);
           stats.clicks++;
+        }
+        
+        // Increment per-task counter if we have a current task
+        if (currentTaskId && currentProjectId) {
+          const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+          if (taskData) {
+            taskData.mouseClicks++;
+            
+            // Also track per-window within task
+            if (currentWindowKey) {
+              if (!taskData.activeWindows.has(currentWindowKey)) {
+                taskData.activeWindows.set(currentWindowKey, {
+                  keystrokes: 0,
+                  mouseClicks: 0,
+                  timeSpent: 0,
+                  startTime: Date.now(),
+                  lastSeen: Date.now(),
+                  urls: []
+                });
+              }
+              const windowData = taskData.activeWindows.get(currentWindowKey);
+              // Increment mouse clicks (this is current session only, will be merged on save)
+              windowData.mouseClicks = (windowData.mouseClicks || 0) + 1;
+              windowData.lastSeen = Date.now();
+            }
+            
+            // Schedule real-time save (debounced)
+            scheduleTaskSave(currentProjectId, currentTaskId);
+          }
         }
         
         if (isTrackingActive && mainWindow) {
@@ -1124,6 +2127,14 @@ if ([MouseChecker]::IsLeftMousePressed()) { Write-Output "1" } else { Write-Outp
             stats.clicks++;
           }
           
+          // Increment per-task counter if we have a current task
+          if (currentTaskId && currentProjectId) {
+            const taskStats = getTaskStats(currentProjectId, currentTaskId);
+            if (taskStats) {
+              taskStats.clicks++;
+            }
+          }
+          
           if (isTrackingActive && mainWindow) {
             mainWindow.webContents.send('mouseclick-update', mouseClickCount);
           }
@@ -1179,20 +2190,31 @@ const initMouseTracking = async () => {
 };
 
 // Start activity monitoring
-ipcMain.handle('start-activity-monitoring', async () => {
+ipcMain.handle('start-activity-monitoring', async (event, projectId, taskId, taskName = null, projectName = null) => {
   if (activityMonitoringInterval) {
     clearInterval(activityMonitoringInterval);
   }
 
-  // Reset counters
+  // Reset global counters (for idle detection only)
   keystrokeCount = 0;
   mouseClickCount = 0;
   lastActivityTimestamp = Date.now(); // Initialize last activity timestamp
   isTrackingActive = true;
   
-  // Reset per-window tracking
+  // Reset per-window tracking (for display purposes)
   perWindowStats.clear();
   currentWindowKey = null;
+  
+  // Initialize task tracking (saves previous task, loads/creates new task)
+  if (taskId && projectId) {
+    await initializeTaskTracking(projectId, taskId, taskName, projectName);
+  } else {
+    currentProjectId = null;
+    currentTaskId = null;
+    if (isDev) {
+      console.log('[TASK-TRACKING] No task specified - per-task tracking disabled');
+    }
+  }
 
   // Initialize system-wide tracking using uiohook-napi
   const trackingInitialized = initSystemTracking();
@@ -1237,8 +2259,54 @@ ipcMain.handle('start-activity-monitoring', async () => {
         // Create window key for per-window tracking
         const windowKey = getWindowKey(ownerName, win.title);
         
-        // Check if window changed - if so, reset counters for new window
+        // Check if window changed - if so, update time tracking for previous window
         if (windowKey !== currentWindowKey) {
+          // CRITICAL FIX: Close time capsule for the previous window when switching
+          if (currentWindowKey && currentTaskId && currentProjectId) {
+            const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+            if (taskData && taskData.activeWindows.has(currentWindowKey)) {
+              const previousWindowData = taskData.activeWindows.get(currentWindowKey);
+              if (previousWindowData.startTime) {
+                // Initialize timeCapsules array if it doesn't exist
+                if (!previousWindowData.timeCapsules) {
+                  previousWindowData.timeCapsules = [];
+                }
+                
+                // Close the current time capsule
+                const endTime = Date.now();
+                const startTime = previousWindowData.startTime; // Save before clearing
+                const duration = Math.floor((endTime - startTime) / 1000);
+                
+                // Check if this capsule already exists (prevent duplicates)
+                const capsuleKey = `${startTime}-${endTime}`;
+                const existingCapsule = previousWindowData.timeCapsules.find(c => 
+                  `${c.startTime}-${c.endTime}` === capsuleKey
+                );
+                
+                if (!existingCapsule) {
+                  // Only add if it doesn't already exist
+                  previousWindowData.timeCapsules.push({
+                    startTime: startTime,
+                    endTime: endTime,
+                    duration: duration
+                  });
+                  
+                  if (isDev) {
+                    console.log(`[WINDOW-PAUSE] Closed NEW time capsule for ${currentWindowKey}, duration: ${duration}s (total capsules: ${previousWindowData.timeCapsules.length})`);
+                  }
+                } else {
+                  if (isDev) {
+                    console.log(`[WINDOW-PAUSE] Skipped duplicate capsule for ${currentWindowKey} (already exists)`);
+                  }
+                }
+                
+                // Clear startTime to indicate window is inactive
+                previousWindowData.startTime = null;
+                previousWindowData.lastSeen = endTime;
+              }
+            }
+          }
+          
           if (isDev && currentWindowKey) {
             const oldStats = perWindowStats.get(currentWindowKey);
             console.log('[WINDOW-SWITCH] Switched from', currentWindowKey, 'to', windowKey);
@@ -1246,7 +2314,53 @@ ipcMain.handle('start-activity-monitoring', async () => {
           } else if (isDev && !currentWindowKey) {
             console.log('[WINDOW-INIT] Initializing tracking for window:', windowKey);
           }
+          
+          const oldWindowKey = currentWindowKey;
           currentWindowKey = windowKey;
+          
+          // Initialize new window in task tracking
+          if (currentTaskId && currentProjectId) {
+            const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+            if (taskData && !taskData.activeWindows.has(windowKey)) {
+              // New window - initialize with empty time capsules array
+              const startTime = Date.now();
+              taskData.activeWindows.set(windowKey, {
+                keystrokes: 0,
+                mouseClicks: 0,
+                timeSpent: 0,
+                timeCapsules: [], // Array of {startTime, endTime, duration} objects
+                startTime: startTime, // Current active session start time
+                lastSeen: startTime,
+                title: win.title || windowKey,
+                urls: [],
+                lastUrl: null // Track last URL to detect actual visits (not just checks)
+              });
+            } else if (taskData && taskData.activeWindows.has(windowKey)) {
+              // Window already exists - start new time capsule if it was paused
+              const windowData = taskData.activeWindows.get(windowKey);
+              
+              // CRITICAL: Ensure timeCapsules array exists and preserve existing capsules
+              if (!windowData.timeCapsules) {
+                windowData.timeCapsules = [];
+              }
+              
+              if (!windowData.startTime) {
+                // Start new time capsule - window is becoming active again
+                // NOTE: We don't create a capsule here, just set startTime
+                // The capsule will be created when the window closes
+                windowData.startTime = Date.now();
+                windowData.lastSeen = Date.now();
+                
+                if (isDev) {
+                  console.log(`[WINDOW-RESUME] Started new time capsule for ${windowKey} (existing capsules: ${windowData.timeCapsules.length})`);
+                }
+              } else {
+                // Window is already active - just update lastSeen
+                windowData.lastSeen = Date.now();
+              }
+            }
+          }
+          
           // Get stats for new window (will create if doesn't exist)
           getWindowStats(windowKey, win.title, url);
         }
@@ -1260,6 +2374,235 @@ ipcMain.handle('start-activity-monitoring', async () => {
           console.log('[URL-CHANGE]', windowKey, 'URL changed from', windowStats.url, 'to', url);
         }
         
+        // Get per-task stats if we have a current task
+        let taskKeystrokes = 0;
+        let taskClicks = 0;
+        if (currentTaskId && currentProjectId) {
+          const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+          if (taskData) {
+            taskKeystrokes = taskData.keystrokes;
+            taskClicks = taskData.mouseClicks;
+            
+            // CRITICAL: Update active window tracking with time spent
+            if (currentWindowKey) {
+              if (!taskData.activeWindows.has(currentWindowKey)) {
+                const startTime = Date.now();
+                taskData.activeWindows.set(currentWindowKey, {
+                  keystrokes: 0,
+                  mouseClicks: 0,
+                  timeSpent: 0, // in seconds (will be calculated from capsules on save)
+                  timeCapsules: [], // Array of {startTime, endTime, duration} objects
+                  startTime: startTime, // Current active session start time
+                  lastSeen: startTime,
+                  title: win.title || currentWindowKey,
+                  urls: [],
+                  lastUrl: null // Track last URL to detect actual visits (not just checks)
+                });
+              }
+              
+              const windowData = taskData.activeWindows.get(currentWindowKey);
+              
+              // Initialize timeCapsules if not exists
+              if (!windowData.timeCapsules) {
+                windowData.timeCapsules = [];
+              }
+              
+              // Ensure startTime is set if window is active (start new capsule if paused)
+              if (!windowData.startTime) {
+                windowData.startTime = Date.now();
+                if (isDev) {
+                  console.log(`[WINDOW-RESUME] Started new time capsule for ${currentWindowKey} in real-time update`);
+                }
+              }
+              
+              // Don't update timeSpent here - it will be calculated on save
+              // Just update lastSeen
+              windowData.lastSeen = Date.now();
+              
+              // Update window title if changed
+              if (win.title && win.title !== windowData.title) {
+                windowData.title = win.title;
+              }
+              
+              // Note: Keystrokes and clicks are tracked directly in event handlers
+              // perWindowStats is used for reference, but windowData.keystrokes/clicks
+              // are incremented directly in uIOhook event handlers
+              // On save, we'll merge with saved data properly
+            }
+            
+            // Track URL in task's URL history
+            // Always try to extract URL even if previous extraction failed (retry extraction)
+            let currentUrl = url;
+            if (!currentUrl) {
+              currentUrl = extractUrlFromTitle(win.title, ownerName);
+            }
+            
+            // Check if it's a browser for debug logging
+            const lowerApp = (ownerName || '').toLowerCase();
+            const isBrowser = lowerApp.includes('chrome') || 
+                              lowerApp.includes('brave') || 
+                              lowerApp.includes('firefox') || 
+                              lowerApp.includes('edge') || 
+                              lowerApp.includes('safari') ||
+                              lowerApp.includes('opera') ||
+                              lowerApp.includes('vivaldi');
+            
+            if (isDev && !currentUrl && isBrowser) {
+              console.log(`[URL-DEBUG] Failed to extract URL from title: "${win.title}" (app: ${ownerName})`);
+            }
+            
+            if (currentUrl) {
+              const normalizedUrl = normalizeUrl(currentUrl);
+              if (normalizedUrl) {
+                // Check if URL already exists in history
+                const urlExists = taskData.urlHistory.some(entry => 
+                  normalizeUrl(entry.url) === normalizedUrl
+                );
+                
+                if (!urlExists) {
+                  taskData.urlHistory.push({
+                    url: normalizedUrl,
+                    title: win.title || 'Unknown',
+                    timestamp: Date.now()
+                  });
+                  
+                  // Keep only last 100 URLs
+                  if (taskData.urlHistory.length > 100) {
+                    taskData.urlHistory = taskData.urlHistory.slice(-100);
+                  }
+                  
+                  if (isDev) {
+                    console.log(`[TASK-URL] Added URL to task ${currentTaskId}:`, normalizedUrl, 'from title:', win.title);
+                  }
+                  
+                  // Schedule real-time save when URL is added
+                  scheduleTaskSave(currentProjectId, currentTaskId);
+                }
+                
+                // Also track URL in active window within task
+                // CRITICAL FIX: Only increment visit count when URL actually changes, not on every check
+                if (currentWindowKey && taskData.activeWindows.has(currentWindowKey)) {
+                  const windowData = taskData.activeWindows.get(currentWindowKey);
+                  if (!windowData.urls) {
+                    windowData.urls = [];
+                  }
+                  const urlInWindow = windowData.urls.find(u => {
+                    const uNormalized = normalizeUrl(u.url);
+                    return uNormalized && normalizedUrl && uNormalized === normalizedUrl;
+                  });
+                  if (!urlInWindow) {
+                    // New URL - add it (no visit count tracking)
+                    windowData.urls.push({
+                      url: normalizedUrl,
+                      title: win.title || 'Unknown',
+                      timestamp: Date.now()
+                    });
+                    
+                    // Track this as the current URL
+                    windowData.lastUrl = normalizedUrl;
+                    
+                    if (isDev) {
+                      console.log(`[WINDOW-URL] Added new URL to window ${currentWindowKey}:`, normalizedUrl);
+                    }
+                    
+                    // Schedule save when new URL is added
+                    scheduleTaskSave(currentProjectId, currentTaskId);
+                  } else {
+                    // URL already exists - just update timestamp if URL changed
+                    const urlChanged = windowData.lastUrl !== normalizedUrl;
+                    if (urlChanged) {
+                      // URL changed - update timestamp
+                      urlInWindow.timestamp = Date.now();
+                      windowData.lastUrl = normalizedUrl; // Track current URL
+                      
+                      if (isDev) {
+                        console.log(`[WINDOW-URL] URL changed in window ${currentWindowKey}:`, normalizedUrl);
+                      }
+                      
+                      // Schedule save when URL changes
+                      scheduleTaskSave(currentProjectId, currentTaskId);
+                    } else {
+                      // Same URL - just update timestamp
+                      urlInWindow.timestamp = Date.now();
+                    }
+                  }
+                }
+              } else if (isDev) {
+                console.log(`[URL-DEBUG] Failed to normalize URL:`, currentUrl);
+              }
+            } else {
+              // No URL extracted, but check if it's a code editor with file path in title
+              const lowerApp = (ownerName || '').toLowerCase();
+              const isCodeEditor = lowerApp.includes('cursor') || 
+                                  lowerApp.includes('code') || 
+                                  lowerApp.includes('vscode') ||
+                                  lowerApp.includes('sublime') ||
+                                  lowerApp.includes('atom') ||
+                                  lowerApp.includes('webstorm') ||
+                                  lowerApp.includes('intellij');
+              
+              if (isCodeEditor && win.title) {
+                // Extract file path from code editor title
+                const filePath = extractFilePathFromTitle(win.title, ownerName);
+                if (filePath) {
+                  const normalizedFilePath = normalizeUrl(filePath);
+                  if (normalizedFilePath && currentWindowKey && taskData.activeWindows.has(currentWindowKey)) {
+                    const windowData = taskData.activeWindows.get(currentWindowKey);
+                    if (!windowData.urls) {
+                      windowData.urls = [];
+                    }
+                    const fileInWindow = windowData.urls.find(u => {
+                      const uNormalized = normalizeUrl(u.url);
+                      return uNormalized && normalizedFilePath && uNormalized === normalizedFilePath;
+                    });
+                    if (!fileInWindow) {
+                      // New file path - add it (no visit count tracking)
+                      windowData.urls.push({
+                        url: normalizedFilePath,
+                        title: win.title,
+                        timestamp: Date.now()
+                      });
+                      
+                      // Track this as the current file path
+                      windowData.lastUrl = normalizedFilePath;
+                      
+                      if (isDev) {
+                        console.log(`[WINDOW-FILE] Added new file path to window ${currentWindowKey}:`, normalizedFilePath);
+                      }
+                      
+                      // Schedule save when new file path is added
+                      scheduleTaskSave(currentProjectId, currentTaskId);
+                    } else {
+                      // File path already exists - just update timestamp and title if file changed
+                      const fileChanged = windowData.lastUrl !== normalizedFilePath;
+                      if (fileChanged) {
+                        // File changed - update timestamp and title
+                        fileInWindow.timestamp = Date.now();
+                        fileInWindow.title = win.title; // Update title in case it changed
+                        windowData.lastUrl = normalizedFilePath; // Track current file path
+                        
+                        if (isDev) {
+                          console.log(`[WINDOW-FILE] File path changed in window ${currentWindowKey}:`, normalizedFilePath);
+                        }
+                        
+                        // Schedule save when file path changes
+                        scheduleTaskSave(currentProjectId, currentTaskId);
+                      } else {
+                        // Same file - just update timestamp and title
+                        fileInWindow.timestamp = Date.now();
+                        fileInWindow.title = win.title; // Update title in case it changed
+                      }
+                    }
+                  }
+                }
+              } else if (isDev && isBrowser) {
+                // Log when URL extraction fails for browsers
+                console.log(`[URL-DEBUG] No URL extracted for browser window: "${win.title}" (app: ${ownerName})`);
+              }
+            }
+          }
+        }
+        
         const currentWindow = {
           title: win.title || 'Unknown',
           owner: ownerName,
@@ -1267,6 +2610,9 @@ ipcMain.handle('start-activity-monitoring', async () => {
           app: ownerName,
           keystrokes: windowStats.keystrokes, // Per-window keystrokes
           mouseClicks: windowStats.clicks, // Per-window clicks
+          // Per-task stats (cumulative across all windows for this task)
+          taskKeystrokes: taskKeystrokes,
+          taskClicks: taskClicks,
           // Also include global counters for backward compatibility
           globalKeystrokes: keystrokeCount,
           globalClicks: mouseClickCount
@@ -1276,7 +2622,7 @@ ipcMain.handle('start-activity-monitoring', async () => {
         lastActiveWindow = currentWindow;
         mainWindow.webContents.send('activity-update', currentWindow);
         
-        console.log('[ACTIVITY] App:', currentWindow.app, '| Title:', currentWindow.title.substring(0, 50), '| URL:', currentWindow.url || 'N/A', '| Keys:', windowStats.keystrokes, '| Clicks:', windowStats.clicks);
+        console.log('[ACTIVITY] App:', currentWindow.app, '| Title:', currentWindow.title.substring(0, 50), '| URL:', currentWindow.url || 'N/A', '| Window Keys:', windowStats.keystrokes, '| Window Clicks:', windowStats.clicks, '| Task Keys:', taskKeystrokes, '| Task Clicks:', taskClicks);
       } else {
         // Fallback to Windows PowerShell method if active-win didn't work
         if (!win && process.platform === 'win32') {
@@ -1288,21 +2634,351 @@ ipcMain.handle('start-activity-monitoring', async () => {
             // Create window key for per-window tracking
             const windowKey = getWindowKey(windowInfo.app, windowInfo.title);
             
-            // Check if window changed
+            // Check if window changed - if so, update time tracking for previous window
             if (windowKey !== currentWindowKey) {
+              // CRITICAL FIX: Close time capsule for the previous window when switching (PowerShell path)
+              if (currentWindowKey && currentTaskId && currentProjectId) {
+                const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+                if (taskData && taskData.activeWindows.has(currentWindowKey)) {
+                  const previousWindowData = taskData.activeWindows.get(currentWindowKey);
+                  if (previousWindowData.startTime) {
+                    // Initialize timeCapsules array if it doesn't exist
+                    if (!previousWindowData.timeCapsules) {
+                      previousWindowData.timeCapsules = [];
+                    }
+                    
+                    // Close the current time capsule
+                    const endTime = Date.now();
+                    const startTime = previousWindowData.startTime; // Save before clearing
+                    const duration = Math.floor((endTime - startTime) / 1000);
+                    
+                    // Check if this capsule already exists (prevent duplicates)
+                    const capsuleKey = `${startTime}-${endTime}`;
+                    const existingCapsule = previousWindowData.timeCapsules.find(c => 
+                      `${c.startTime}-${c.endTime}` === capsuleKey
+                    );
+                    
+                    if (!existingCapsule) {
+                      // Only add if it doesn't already exist
+                      previousWindowData.timeCapsules.push({
+                        startTime: startTime,
+                        endTime: endTime,
+                        duration: duration
+                      });
+                      
+                      if (isDev) {
+                        console.log(`[WINDOW-PAUSE] Closed NEW time capsule for ${currentWindowKey} (PowerShell), duration: ${duration}s (total capsules: ${previousWindowData.timeCapsules.length})`);
+                      }
+                    } else {
+                      if (isDev) {
+                        console.log(`[WINDOW-PAUSE] Skipped duplicate capsule for ${currentWindowKey} (PowerShell) (already exists)`);
+                      }
+                    }
+                    
+                    // Clear startTime to indicate window is inactive
+                    previousWindowData.startTime = null;
+                    previousWindowData.lastSeen = endTime;
+                  }
+                }
+              }
+              
               if (isDev && currentWindowKey) {
                 const oldStats = perWindowStats.get(currentWindowKey);
-                console.log('[WINDOW-SWITCH] Switched from', currentWindowKey, 'to', windowKey);
+                console.log('[WINDOW-SWITCH] Switched from', currentWindowKey, 'to', windowKey, '(PowerShell)');
                 console.log('[WINDOW-SWITCH] Previous window stats:', oldStats ? { keystrokes: oldStats.keystrokes, clicks: oldStats.clicks } : 'none');
               } else if (isDev && !currentWindowKey) {
-                console.log('[WINDOW-INIT] Initializing tracking for window:', windowKey);
+                console.log('[WINDOW-INIT] Initializing tracking for window:', windowKey, '(PowerShell)');
               }
+              
+              const oldWindowKey = currentWindowKey;
               currentWindowKey = windowKey;
+              
+              // Initialize new window in task tracking
+              if (currentTaskId && currentProjectId) {
+                const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+                if (taskData && !taskData.activeWindows.has(windowKey)) {
+                  // New window - initialize with empty time capsules array
+                  const startTime = Date.now();
+                  taskData.activeWindows.set(windowKey, {
+                    keystrokes: 0,
+                    mouseClicks: 0,
+                    timeSpent: 0,
+                    timeCapsules: [], // Array of {startTime, endTime, duration} objects
+                    startTime: startTime, // Current active session start time
+                    lastSeen: startTime,
+                    title: windowInfo.title || windowKey,
+                    urls: [],
+                    lastUrl: null // Track last URL to detect actual visits (not just checks)
+                  });
+                } else if (taskData && taskData.activeWindows.has(windowKey)) {
+                    // Window already exists - start new time capsule if it was paused
+                    const windowData = taskData.activeWindows.get(windowKey);
+                    
+                    // CRITICAL: Ensure timeCapsules array exists and preserve existing capsules
+                    if (!windowData.timeCapsules) {
+                      windowData.timeCapsules = [];
+                    }
+                    
+                    if (!windowData.startTime) {
+                      // Start new time capsule - window is becoming active again
+                      // NOTE: We don't create a capsule here, just set startTime
+                      // The capsule will be created when the window closes
+                      windowData.startTime = Date.now();
+                      windowData.lastSeen = Date.now();
+                      
+                      if (isDev) {
+                        console.log(`[WINDOW-RESUME] Started new time capsule for ${windowKey} (PowerShell) (existing capsules: ${windowData.timeCapsules.length})`);
+                      }
+                    } else {
+                      // Window is already active - just update lastSeen
+                      windowData.lastSeen = Date.now();
+                    }
+                }
+              }
+              
               getWindowStats(windowKey, windowInfo.title, url);
             }
             
             // Get per-window statistics (update title and URL)
             const windowStats = getWindowStats(windowKey, windowInfo.title, url);
+            
+            // Get per-task stats if we have a current task
+            let taskKeystrokes = 0;
+            let taskClicks = 0;
+            if (currentTaskId && currentProjectId) {
+              const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+              if (taskData) {
+                taskKeystrokes = taskData.keystrokes;
+                taskClicks = taskData.mouseClicks;
+                
+                // CRITICAL: Update active window tracking with time spent
+                if (currentWindowKey) {
+                  if (!taskData.activeWindows.has(currentWindowKey)) {
+                    const startTime = Date.now();
+                    taskData.activeWindows.set(currentWindowKey, {
+                      keystrokes: 0,
+                      mouseClicks: 0,
+                      timeSpent: 0, // in seconds (will be calculated from capsules on save)
+                      timeCapsules: [], // Array of {startTime, endTime, duration} objects
+                      startTime: startTime, // Current active session start time
+                      lastSeen: startTime,
+                      title: windowInfo.title || currentWindowKey,
+                      urls: [],
+                      lastUrl: null // Track last URL to detect actual visits (not just checks)
+                    });
+                  }
+                  
+                  const windowData = taskData.activeWindows.get(currentWindowKey);
+                  
+                  // Initialize timeCapsules if not exists
+                  if (!windowData.timeCapsules) {
+                    windowData.timeCapsules = [];
+                  }
+                  
+                  // Ensure startTime is set if window is active (start new capsule if paused)
+                  if (!windowData.startTime) {
+                    windowData.startTime = Date.now();
+                    if (isDev) {
+                      console.log(`[WINDOW-RESUME] Started new time capsule for ${currentWindowKey} in real-time update (PowerShell)`);
+                    }
+                  }
+                  
+                  // Don't update timeSpent here - it will be calculated on save
+                  // Just update lastSeen
+                  windowData.lastSeen = Date.now();
+                  
+                  // Update window title if changed
+                  if (windowInfo.title && windowInfo.title !== windowData.title) {
+                    windowData.title = windowInfo.title;
+                  }
+                  
+                  // Update keystrokes and clicks from per-window stats (current session)
+                  const windowStats = perWindowStats.get(currentWindowKey);
+                  if (windowStats) {
+                    // Store current session counts (will be merged with saved on save)
+                    if (windowData.currentSessionKeystrokes === undefined) {
+                  windowData.currentSessionKeystrokes = 0;
+                }
+                if (windowData.currentSessionMouseClicks === undefined) {
+                  windowData.currentSessionMouseClicks = 0;
+                }
+                // Update from perWindowStats (these are current session totals)
+                windowData.currentSessionKeystrokes = windowStats.keystrokes || 0;
+                windowData.currentSessionMouseClicks = windowStats.clicks || 0;
+                  }
+                }
+                
+                // Track URL in task's URL history
+                // Always try to extract URL even if previous extraction failed (retry extraction)
+                let currentUrl = url;
+                if (!currentUrl) {
+                  currentUrl = extractUrlFromTitle(windowInfo.title, windowInfo.app);
+                }
+                
+                // Check if it's a browser for debug logging
+                const lowerAppName = (windowInfo.app || '').toLowerCase();
+                const isBrowserApp = lowerAppName.includes('chrome') || 
+                                    lowerAppName.includes('brave') || 
+                                    lowerAppName.includes('firefox') || 
+                                    lowerAppName.includes('edge') || 
+                                    lowerAppName.includes('safari') ||
+                                    lowerAppName.includes('opera') ||
+                                    lowerAppName.includes('vivaldi');
+                
+                if (isDev && !currentUrl && isBrowserApp) {
+                  console.log(`[URL-DEBUG] Failed to extract URL from title (PowerShell): "${windowInfo.title}" (app: ${windowInfo.app})`);
+                }
+                
+                if (currentUrl) {
+                  const normalizedUrl = normalizeUrl(currentUrl);
+                  if (normalizedUrl) {
+                    // Check if URL already exists in history
+                    const urlExists = taskData.urlHistory.some(entry => 
+                      normalizeUrl(entry.url) === normalizedUrl
+                    );
+                    
+                    if (!urlExists) {
+                      taskData.urlHistory.push({
+                        url: normalizedUrl,
+                        title: windowInfo.title || 'Unknown',
+                        timestamp: Date.now()
+                      });
+                      
+                      // Keep only last 100 URLs
+                      if (taskData.urlHistory.length > 100) {
+                        taskData.urlHistory = taskData.urlHistory.slice(-100);
+                      }
+                      
+                      if (isDev) {
+                        console.log(`[TASK-URL] Added URL to task ${currentTaskId} (PowerShell):`, normalizedUrl, 'from title:', windowInfo.title);
+                      }
+                      
+                      // Schedule real-time save when URL is added
+                      scheduleTaskSave(currentProjectId, currentTaskId);
+                    }
+                    
+                    // Also track URL in active window within task
+                    if (currentWindowKey && taskData.activeWindows.has(currentWindowKey)) {
+                      const windowData = taskData.activeWindows.get(currentWindowKey);
+                      if (!windowData.urls) {
+                        windowData.urls = [];
+                      }
+                      const urlInWindow = windowData.urls.find(u => {
+                        const uNormalized = normalizeUrl(u.url);
+                        return uNormalized && normalizedUrl && uNormalized === normalizedUrl;
+                      });
+                      if (!urlInWindow) {
+                        // New URL - add it (no visit count tracking)
+                        windowData.urls.push({
+                          url: normalizedUrl,
+                          title: windowInfo.title || 'Unknown',
+                          timestamp: Date.now()
+                        });
+                        
+                        // Track this as the current URL
+                        windowData.lastUrl = normalizedUrl;
+                        
+                        if (isDev) {
+                          console.log(`[WINDOW-URL] Added new URL to window ${currentWindowKey} (PowerShell):`, normalizedUrl);
+                        }
+                        
+                        // Schedule save when new URL is added
+                        scheduleTaskSave(currentProjectId, currentTaskId);
+                      } else {
+                        // URL already exists - just update timestamp if URL changed
+                        const urlChanged = windowData.lastUrl !== normalizedUrl;
+                        if (urlChanged) {
+                          // URL changed - update timestamp
+                          urlInWindow.timestamp = Date.now();
+                          windowData.lastUrl = normalizedUrl; // Track current URL
+                          
+                          if (isDev) {
+                            console.log(`[WINDOW-URL] URL changed in window ${currentWindowKey} (PowerShell):`, normalizedUrl);
+                          }
+                          
+                          // Schedule save when URL changes
+                          scheduleTaskSave(currentProjectId, currentTaskId);
+                        } else {
+                          // Same URL - just update timestamp
+                          urlInWindow.timestamp = Date.now();
+                        }
+                      }
+                    }
+                  } else if (isDev) {
+                    console.log(`[URL-DEBUG] Failed to normalize URL (PowerShell):`, currentUrl);
+                  }
+                } else {
+                  // No URL extracted, but check if it's a code editor with file path in title
+                  const lowerAppName = (windowInfo.app || '').toLowerCase();
+                  const isCodeEditor = lowerAppName.includes('cursor') || 
+                                      lowerAppName.includes('code') || 
+                                      lowerAppName.includes('vscode') ||
+                                      lowerAppName.includes('sublime') ||
+                                      lowerAppName.includes('atom') ||
+                                      lowerAppName.includes('webstorm') ||
+                                      lowerAppName.includes('intellij');
+                  
+                  if (isCodeEditor && windowInfo.title) {
+                    // Extract file path from code editor title
+                    const filePath = extractFilePathFromTitle(windowInfo.title, windowInfo.app);
+                    if (filePath) {
+                      const normalizedFilePath = normalizeUrl(filePath);
+                      if (normalizedFilePath && currentWindowKey && taskData.activeWindows.has(currentWindowKey)) {
+                        const windowData = taskData.activeWindows.get(currentWindowKey);
+                        if (!windowData.urls) {
+                          windowData.urls = [];
+                        }
+                        const fileInWindow = windowData.urls.find(u => {
+                          const uNormalized = normalizeUrl(u.url);
+                          return uNormalized && normalizedFilePath && uNormalized === normalizedFilePath;
+                        });
+                        if (!fileInWindow) {
+                          // New file path - add it (no visit count tracking)
+                          windowData.urls.push({
+                            url: normalizedFilePath,
+                            title: windowInfo.title,
+                            timestamp: Date.now()
+                          });
+                          
+                          // Track this as the current file path
+                          windowData.lastUrl = normalizedFilePath;
+                          
+                          if (isDev) {
+                            console.log(`[WINDOW-FILE] Added new file path to window ${currentWindowKey} (PowerShell):`, normalizedFilePath);
+                          }
+                          
+                          // Schedule save when new file path is added
+                          scheduleTaskSave(currentProjectId, currentTaskId);
+                        } else {
+                          // File path already exists - just update timestamp and title if file changed
+                          const fileChanged = windowData.lastUrl !== normalizedFilePath;
+                          if (fileChanged) {
+                            // File changed - update timestamp and title
+                            fileInWindow.timestamp = Date.now();
+                            fileInWindow.title = windowInfo.title; // Update title in case it changed
+                            windowData.lastUrl = normalizedFilePath; // Track current file path
+                            
+                            if (isDev) {
+                              console.log(`[WINDOW-FILE] File path changed in window ${currentWindowKey} (PowerShell):`, normalizedFilePath);
+                            }
+                            
+                            // Schedule save when file path changes
+                            scheduleTaskSave(currentProjectId, currentTaskId);
+                          } else {
+                            // Same file - just update timestamp and title
+                            fileInWindow.timestamp = Date.now();
+                            fileInWindow.title = windowInfo.title; // Update title in case it changed
+                          }
+                        }
+                      }
+                    }
+                  } else if (isDev && isBrowserApp) {
+                    // Log when URL extraction fails for browsers
+                    console.log(`[URL-DEBUG] No URL extracted for browser window (PowerShell): "${windowInfo.title}" (app: ${windowInfo.app})`);
+                  }
+                }
+              }
+            }
             
             const currentWindow = {
               title: windowInfo.title || 'Unknown',
@@ -1311,6 +2987,9 @@ ipcMain.handle('start-activity-monitoring', async () => {
               app: windowInfo.owner || windowInfo.title || 'Unknown',
               keystrokes: windowStats.keystrokes, // Per-window keystrokes
               mouseClicks: windowStats.clicks, // Per-window clicks
+              // Per-task stats (cumulative across all windows for this task)
+              taskKeystrokes: taskKeystrokes,
+              taskClicks: taskClicks,
               // Also include global counters for backward compatibility
               globalKeystrokes: keystrokeCount,
               globalClicks: mouseClickCount
@@ -1318,7 +2997,7 @@ ipcMain.handle('start-activity-monitoring', async () => {
             lastActiveWindow = currentWindow;
             mainWindow.webContents.send('activity-update', currentWindow);
             
-            console.log('[ACTIVITY-PS] App:', currentWindow.app, '| Title:', currentWindow.title.substring(0, 50), '| URL:', currentWindow.url || 'N/A', '| Keys:', windowStats.keystrokes, '| Clicks:', windowStats.clicks);
+            console.log('[ACTIVITY-PS] App:', currentWindow.app, '| Title:', currentWindow.title.substring(0, 50), '| URL:', currentWindow.url || 'N/A', '| Window Keys:', windowStats.keystrokes, '| Window Clicks:', windowStats.clicks, '| Task Keys:', taskKeystrokes, '| Task Clicks:', taskClicks);
           }
         }
         
@@ -1334,8 +3013,84 @@ ipcMain.handle('start-activity-monitoring', async () => {
   return true;
 });
 
+// Update task tracking (called when task changes)
+ipcMain.handle('update-task-tracking', async (event, projectId, taskId, taskName = null, projectName = null) => {
+  const oldTaskId = currentTaskId;
+  const oldProjectId = currentProjectId;
+  
+  if (isDev) {
+    if (oldTaskId !== taskId || oldProjectId !== projectId) {
+      console.log('[TASK-TRACKING] Task changed from', oldTaskId, 'to', taskId, 'in project', projectId);
+    }
+  }
+  
+  // Initialize task tracking (saves previous task, loads/creates new task)
+  if (taskId && projectId) {
+    await initializeTaskTracking(projectId, taskId, taskName, projectName);
+  } else {
+    // Save current task before clearing
+    if (oldTaskId && oldProjectId) {
+      saveTaskTrackingDataToFile(oldProjectId, oldTaskId);
+    }
+    currentProjectId = null;
+    currentTaskId = null;
+  }
+  
+  return true;
+});
+
 // Stop activity monitoring
 ipcMain.handle('stop-activity-monitoring', () => {
+  // Close all active time capsules before stopping
+  if (currentTaskId && currentProjectId) {
+    const taskKey = getTaskKey(currentProjectId, currentTaskId);
+    if (taskKey && perTaskTracking.has(taskKey)) {
+      const taskData = perTaskTracking.get(taskKey);
+      if (taskData && taskData.activeWindows) {
+        taskData.activeWindows.forEach((windowData, windowKey) => {
+          if (windowData.startTime) {
+            // Initialize timeCapsules array if it doesn't exist
+            if (!windowData.timeCapsules) {
+              windowData.timeCapsules = [];
+            }
+            
+            // Close the active time capsule
+            const endTime = Date.now();
+            const startTime = windowData.startTime;
+            const duration = Math.floor((endTime - startTime) / 1000);
+            
+            // Check if this capsule already exists (prevent duplicates)
+            const capsuleKey = `${startTime}-${endTime}`;
+            const existingCapsule = windowData.timeCapsules.find(c => 
+              `${c.startTime}-${c.endTime}` === capsuleKey
+            );
+            
+            if (!existingCapsule) {
+              // Only add if it doesn't already exist
+              windowData.timeCapsules.push({
+                startTime: startTime,
+                endTime: endTime,
+                duration: duration
+              });
+              
+              if (isDev) {
+                console.log(`[STOP-TRACKING] Closed NEW time capsule for ${windowKey}, duration: ${duration}s`);
+              }
+            } else {
+              if (isDev) {
+                console.log(`[STOP-TRACKING] Skipped duplicate capsule for ${windowKey} (already exists)`);
+              }
+            }
+            
+            // Clear startTime
+            windowData.startTime = null;
+            windowData.lastSeen = endTime;
+          }
+        });
+      }
+    }
+  }
+  
   if (activityMonitoringInterval) {
     clearInterval(activityMonitoringInterval);
     activityMonitoringInterval = null;
@@ -1344,6 +3099,21 @@ ipcMain.handle('stop-activity-monitoring', () => {
   if (allWindowsUpdateInterval) {
     clearInterval(allWindowsUpdateInterval);
     allWindowsUpdateInterval = null;
+  }
+  
+  // Save current task data before stopping (IMMEDIATE save)
+  if (currentTaskId && currentProjectId) {
+    const taskKey = getTaskKey(currentProjectId, currentTaskId);
+    // Clear any pending saves
+    if (taskKey && saveTimers.has(taskKey)) {
+      clearTimeout(saveTimers.get(taskKey));
+      saveTimers.delete(taskKey);
+    }
+    // Immediate save
+    saveTaskTrackingDataToFile(currentProjectId, currentTaskId, null, null, true);
+    if (isDev) {
+      console.log(`[TASK-STOP] Immediately saved task ${currentTaskId} data before stopping`);
+    }
   }
   
   isTrackingActive = false;
@@ -1393,6 +3163,11 @@ ipcMain.handle('stop-activity-monitoring', () => {
   // Clear per-window tracking
   perWindowStats.clear();
   currentWindowKey = null;
+  
+  // Clear per-task tracking
+  perTaskTracking.clear();
+  currentTaskId = null;
+  currentProjectId = null;
   
   return true;
 });
@@ -1545,12 +3320,369 @@ app.on('window-all-closed', (event) => {
   }
 });
 
+// ==================== Task Tracking IPC Handlers ====================
+
+// Get current task tracking data
+ipcMain.handle('get-current-task-tracking', async () => {
+  if (!currentTaskId || !currentProjectId) {
+    return null;
+  }
+  
+  const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+  if (!taskData) {
+    return null;
+  }
+  
+  // Return a serializable version (convert Map to Array)
+  const activeWindowsArray = Array.from(taskData.activeWindows.entries()).map(([key, value]) => ({
+    windowKey: key,
+    ...value
+  }));
+  
+  return {
+    taskId: taskData.taskId,
+    projectId: taskData.projectId,
+    keystrokes: taskData.keystrokes,
+    mouseClicks: taskData.mouseClicks,
+    startTime: taskData.startTime,
+    activeWindows: activeWindowsArray,
+    urlHistory: taskData.urlHistory,
+    screenshots: taskData.screenshots,
+    webcamPhotos: taskData.webcamPhotos,
+    activityLogs: taskData.activityLogs
+  };
+});
+
+// Add activity log to current task
+ipcMain.handle('add-activity-log-to-task', async (event, activityLog) => {
+  if (!currentTaskId || !currentProjectId) {
+    return false;
+  }
+  
+  const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+  if (!taskData) {
+    return false;
+  }
+  
+  // Add activity log
+  if (!taskData.activityLogs) {
+    taskData.activityLogs = [];
+  }
+  
+  taskData.activityLogs.push({
+    ...activityLog,
+    taskId: currentTaskId,
+    projectId: currentProjectId
+  });
+  
+  // Schedule real-time save (debounced) - saves 2 seconds after activity log
+  scheduleTaskSave(currentProjectId, currentTaskId);
+  
+  if (isDev) {
+    console.log(`[TASK-LOG] Added activity log to task ${currentTaskId}, scheduled save`);
+  }
+  
+  return true;
+});
+
+// Add webcam photo to current task
+ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
+  if (!currentTaskId || !currentProjectId) {
+    return false;
+  }
+  
+  const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
+  if (!taskData) {
+    return false;
+  }
+  
+  const photoId = `wc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  taskData.webcamPhotos.push({
+    id: photoId,
+    timestamp: Date.now(),
+    dataUrl: photoDataUrl,
+    taskId: currentTaskId,
+    projectId: currentProjectId
+  });
+  
+  // Schedule real-time save (debounced) - saves 2 seconds after webcam photo
+  scheduleTaskSave(currentProjectId, currentTaskId);
+  
+  if (isDev) {
+    console.log(`[TASK-WEBCAM] Tagged webcam photo with task ${currentTaskId}, scheduled save`);
+  }
+  
+  return true;
+});
+
+// Save current task data manually
+ipcMain.handle('save-task-tracking-data', async (event, projectId, taskId, taskName, projectName) => {
+  const taskKey = projectId && taskId ? getTaskKey(projectId, taskId) : getTaskKey(currentProjectId, currentTaskId);
+  if (!taskKey) {
+    return false;
+  }
+  
+  const saveProjectId = projectId || currentProjectId;
+  const saveTaskId = taskId || currentTaskId;
+  
+  return saveTaskTrackingDataToFile(saveProjectId, saveTaskId, taskName, projectName);
+});
+
+// Load task tracking data from file - ONE FILE PER TASK
+ipcMain.handle('load-task-tracking-data', async (event, projectId, taskId) => {
+  if (!projectId || !taskId) {
+    return null;
+  }
+  
+  // Load the task's file (one file per task)
+  const loadedData = loadTaskTrackingDataFromFile(projectId, taskId);
+  if (!loadedData) {
+    return null;
+  }
+  
+  // Return the full data structure
+  return {
+    metadata: loadedData.metadata,
+    trackingData: loadedData.trackingData
+  };
+});
+
+// Get the file path where JSON files are saved
+ipcMain.handle('get-tracking-data-path', async () => {
+  const projectRoot = path.join(__dirname, '..');
+  const trackingDataPath = path.join(projectRoot, 'tracking-data');
+  return {
+    projectRoot: projectRoot,
+    trackingDataPath: trackingDataPath,
+    exists: fs.existsSync(trackingDataPath)
+  };
+});
+
+// Verify all task data files and their integrity
+ipcMain.handle('verify-tracking-data', async (event, projectId = null) => {
+  try {
+    const projectRoot = path.join(__dirname, '..');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    
+    if (!fs.existsSync(trackingDataPath)) {
+      return {
+        success: false,
+        message: 'Tracking data directory does not exist',
+        files: []
+      };
+    }
+    
+    const results = {
+      success: true,
+      totalFiles: 0,
+      validFiles: 0,
+      invalidFiles: 0,
+      totalSize: 0,
+      projects: {}
+    };
+    
+    // Get all project directories
+    const projectDirs = projectId 
+      ? [projectId] 
+      : fs.readdirSync(trackingDataPath).filter(item => {
+          const itemPath = path.join(trackingDataPath, item);
+          return fs.statSync(itemPath).isDirectory();
+        });
+    
+    for (const projId of projectDirs) {
+      const projectDir = path.join(trackingDataPath, projId);
+      if (!fs.existsSync(projectDir)) continue;
+      
+      const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.json'));
+      results.projects[projId] = {
+        projectId: projId,
+        files: [],
+        totalFiles: files.length,
+        totalSize: 0
+      };
+      
+      for (const file of files) {
+        const filePath = path.join(projectDir, file);
+        results.totalFiles++;
+        
+        try {
+          const stats = fs.statSync(filePath);
+          const fileContent = fs.readFileSync(filePath, 'utf8');
+          const data = JSON.parse(fileContent);
+          
+          // Verify structure
+          const isValid = data.metadata && 
+                         data.trackingData && 
+                         data.metadata.sessionUUID &&
+                         data.metadata.taskId;
+          
+          if (isValid) {
+            results.validFiles++;
+            results.totalSize += stats.size;
+            results.projects[projId].totalSize += stats.size;
+            
+            results.projects[projId].files.push({
+              filename: file,
+              uuid: data.metadata.sessionUUID,
+              taskId: data.metadata.taskId,
+              taskName: data.metadata.taskName,
+              createdAt: data.metadata.createdAt,
+              lastUpdated: data.metadata.lastUpdated,
+              size: stats.size,
+              keystrokes: data.trackingData.summary?.totalKeystrokes || 0,
+              mouseClicks: data.trackingData.summary?.totalMouseClicks || 0,
+              activityLogs: data.trackingData.activityLogs?.length || 0,
+              screenshots: data.trackingData.screenshots?.length || 0,
+              webcamPhotos: data.trackingData.webcamPhotos?.length || 0,
+              valid: true
+            });
+          } else {
+            results.invalidFiles++;
+            results.projects[projId].files.push({
+              filename: file,
+              valid: false,
+              error: 'Invalid structure'
+            });
+          }
+        } catch (error) {
+          results.invalidFiles++;
+          results.projects[projId].files.push({
+            filename: file,
+            valid: false,
+            error: error.message
+          });
+        }
+      }
+    }
+    
+    console.log(`[DATA-VERIFY] Verified ${results.totalFiles} files: ${results.validFiles} valid, ${results.invalidFiles} invalid`);
+    console.log(`[DATA-VERIFY] Total size: ${(results.totalSize / 1024).toFixed(2)} KB`);
+    
+    return results;
+  } catch (error) {
+    console.error('[DATA-VERIFY] Error verifying tracking data:', error);
+    return {
+      success: false,
+      error: error.message,
+      files: []
+    };
+  }
+});
+
+// Get all tasks for a project - ONE FILE PER TASK (taskId-based)
+ipcMain.handle('get-project-tasks-tracking', async (event, projectId) => {
+  try {
+    const projectRoot = path.join(__dirname, '..');
+    const projectDir = path.join(projectRoot, 'tracking-data', projectId || 'unknown');
+    
+    if (!fs.existsSync(projectDir)) {
+      return [];
+    }
+    
+    const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.json'));
+    const tasks = [];
+    
+    for (const file of files) {
+      const filePath = path.join(projectDir, file);
+      const taskId = file.replace('.json', ''); // Filename is the taskId
+      
+      try {
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+        const data = JSON.parse(fileContent);
+        
+        tasks.push({
+          taskId: taskId,
+          projectId: projectId,
+          taskName: data.metadata?.taskName || 'Unknown Task',
+          projectName: data.metadata?.projectName || 'Unknown Project',
+          createdAt: data.metadata?.createdAt,
+          lastUpdated: data.metadata?.lastUpdated,
+          summary: data.trackingData?.summary,
+          filePath: filePath
+        });
+      } catch (error) {
+        console.error(`Error loading task file ${file}:`, error);
+      }
+    }
+    
+    return tasks;
+  } catch (error) {
+    console.error('Error getting project tasks:', error);
+    return [];
+  }
+});
+
+// ==================== End Task Tracking IPC Handlers ====================
+
 // Cleanup on quit
 app.on('will-quit', () => {
+  // Close all active time capsules before app quits
+  perTaskTracking.forEach((taskData, taskKey) => {
+    if (taskData && taskData.activeWindows) {
+      taskData.activeWindows.forEach((windowData, windowKey) => {
+        if (windowData.startTime) {
+          // Initialize timeCapsules array if it doesn't exist
+          if (!windowData.timeCapsules) {
+            windowData.timeCapsules = [];
+          }
+          
+          // Close the active time capsule
+          const endTime = Date.now();
+          const startTime = windowData.startTime;
+          const duration = Math.floor((endTime - startTime) / 1000);
+          
+          // Check if this capsule already exists (prevent duplicates)
+          const capsuleKey = `${startTime}-${endTime}`;
+          const existingCapsule = windowData.timeCapsules.find(c => 
+            `${c.startTime}-${c.endTime}` === capsuleKey
+          );
+          
+          if (!existingCapsule) {
+            // Only add if it doesn't already exist
+            windowData.timeCapsules.push({
+              startTime: startTime,
+              endTime: endTime,
+              duration: duration
+            });
+          }
+          
+          // Clear startTime
+          windowData.startTime = null;
+          windowData.lastSeen = endTime;
+        }
+      });
+      
+      // Save task data immediately before quitting
+      const [projectId, taskId] = taskKey.split(':');
+      if (projectId && taskId) {
+        saveTaskTrackingDataToFile(projectId, taskId, null, null, true);
+      }
+    }
+  });
+  
   globalShortcut.unregisterAll();
   if (activityMonitoringInterval) {
     clearInterval(activityMonitoringInterval);
   }
+  
+  // Save all active task data before quitting (IMMEDIATE save)
+  if (currentTaskId && currentProjectId) {
+    const taskKey = getTaskKey(currentProjectId, currentTaskId);
+    // Clear any pending saves
+    if (taskKey && saveTimers.has(taskKey)) {
+      clearTimeout(saveTimers.get(taskKey));
+      saveTimers.delete(taskKey);
+    }
+    // Immediate save
+    saveTaskTrackingDataToFile(currentProjectId, currentTaskId, null, null, true);
+    if (isDev) {
+      console.log(`[APP-QUIT] Immediately saved task ${currentTaskId} data before quitting`);
+    }
+  }
+  
+  // Clear all pending save timers
+  saveTimers.forEach(timer => clearTimeout(timer));
+  saveTimers.clear();
   
   // Cleanup tracking
   try {

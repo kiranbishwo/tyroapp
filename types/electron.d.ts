@@ -11,12 +11,23 @@ declare global {
             windowIsMaximized: () => Promise<boolean>;
             
             // Screenshot & capture
-            captureScreenshot: () => Promise<string | null>;
+            captureScreenshot: (isBlurred?: boolean) => Promise<string | null>;
             
             // Activity monitoring
             getActiveWindow: () => Promise<{ title: string; owner: string; url: string | null; app: string }>;
-            startActivityMonitoring: () => Promise<boolean>;
+            startActivityMonitoring: (projectId?: string, taskId?: string, taskName?: string, projectName?: string) => Promise<boolean>;
             stopActivityMonitoring: () => Promise<boolean>;
+            updateTaskTracking: (projectId?: string, taskId?: string, taskName?: string, projectName?: string) => Promise<boolean>;
+            
+            // Task tracking data management
+            getCurrentTaskTracking: () => Promise<any | null>;
+            addActivityLogToTask: (activityLog: any) => Promise<boolean>;
+            addWebcamPhotoToTask: (photoDataUrl: string) => Promise<boolean>;
+            saveTaskTrackingData: (projectId?: string, taskId?: string, taskName?: string, projectName?: string) => Promise<boolean>;
+            loadTaskTrackingData: (projectId: string, taskId: string) => Promise<any | null>;
+            getProjectTasksTracking: (projectId: string) => Promise<any[]>;
+            getTrackingDataPath: () => Promise<{ projectRoot: string; trackingDataPath: string; exists: boolean }>;
+            verifyTrackingData: (projectId?: string) => Promise<any>;
             onActivityUpdate: (callback: (data: any) => void) => void;
             removeActivityListener: () => void;
             onAllWindowsUpdate: (callback: (data: any) => void) => void;

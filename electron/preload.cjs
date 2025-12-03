@@ -17,11 +17,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   windowClose: () => ipcRenderer.invoke('window-close'),
   windowIsMaximized: () => ipcRenderer.invoke('window-is-maximized'),
   // Screenshot capture (no screen share needed)
-  captureScreenshot: () => ipcRenderer.invoke('capture-screenshot'),
+  captureScreenshot: (isBlurred) => ipcRenderer.invoke('capture-screenshot', isBlurred),
   // System activity tracking
   getActiveWindow: () => ipcRenderer.invoke('get-active-window'),
-  startActivityMonitoring: () => ipcRenderer.invoke('start-activity-monitoring'),
+  startActivityMonitoring: (projectId, taskId, taskName, projectName) => ipcRenderer.invoke('start-activity-monitoring', projectId, taskId, taskName, projectName),
   stopActivityMonitoring: () => ipcRenderer.invoke('stop-activity-monitoring'),
+  updateTaskTracking: (projectId, taskId, taskName, projectName) => ipcRenderer.invoke('update-task-tracking', projectId, taskId, taskName, projectName),
+  // Task tracking data management
+  getCurrentTaskTracking: () => ipcRenderer.invoke('get-current-task-tracking'),
+  addActivityLogToTask: (activityLog) => ipcRenderer.invoke('add-activity-log-to-task', activityLog),
+  addWebcamPhotoToTask: (photoDataUrl) => ipcRenderer.invoke('add-webcam-photo-to-task', photoDataUrl),
+  saveTaskTrackingData: (projectId, taskId, taskName, projectName) => ipcRenderer.invoke('save-task-tracking-data', projectId, taskId, taskName, projectName),
+  loadTaskTrackingData: (projectId, taskId) => ipcRenderer.invoke('load-task-tracking-data', projectId, taskId),
+  getProjectTasksTracking: (projectId) => ipcRenderer.invoke('get-project-tasks-tracking', projectId),
+  getTrackingDataPath: () => ipcRenderer.invoke('get-tracking-data-path'),
+  verifyTrackingData: (projectId) => ipcRenderer.invoke('verify-tracking-data', projectId),
   // Listen for activity updates
   onActivityUpdate: (callback) => {
     ipcRenderer.on('activity-update', (_, data) => callback(data));

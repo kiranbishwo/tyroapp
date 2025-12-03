@@ -1,15 +1,184 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { ActivityLog, Project, AppUsage } from '../types';
+import { ActivityLog, Project, AppUsage, Task } from '../types';
 
 interface InsightsDashboardProps {
     logs: ActivityLog[];
     projects: Project[];
     onClose: () => void;
+    filterTaskId?: string; // Optional: filter logs by taskId
+    filterProjectId?: string; // Optional: filter logs by projectId (for task filtering)
+    filterTimeEntries?: Array<{ startTime: Date; endTime?: Date }>; // Optional: filter logs by time range
+    tasks?: Task[]; // Optional: tasks list to get task name
 }
 
 // Electron API types are defined in types/electron.d.ts
 
-export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, projects, onClose }) => {
+export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, projects, onClose, filterTaskId, filterProjectId, filterTimeEntries, tasks }) => {
+    // State for JSON tracking data
+    const [jsonTrackingData, setJsonTrackingData] = useState<any | null>(null);
+    const [isLoadingJsonData, setIsLoadingJsonData] = useState(false);
+    const [isTaskActive, setIsTaskActive] = useState(false);
+    
+    // Fetch JSON tracking data when task filter is provided
+    useEffect(() => {
+        if (filterTaskId && filterProjectId && window.electronAPI) {
+            setIsLoadingJsonData(true);
+            const fetchJsonData = async () => {
+                try {
+                    const data = await window.electronAPI!.loadTaskTrackingData(filterProjectId, filterTaskId);
+                    if (data) {
+                        setJsonTrackingData(data);
+                        console.log('✅ Loaded JSON tracking data:', data);
+                    } else {
+                        console.log('⚠️ No JSON data found for task');
+                        setJsonTrackingData(null);
+                    }
+                } catch (error) {
+                    console.error('❌ Error loading JSON tracking data:', error);
+                    setJsonTrackingData(null);
+                } finally {
+                    setIsLoadingJsonData(false);
+                }
+            };
+            fetchJsonData();
+            
+            // Check if task is currently active
+            const checkActiveTask = async () => {
+                try {
+                    const currentTracking = await window.electronAPI!.getCurrentTaskTracking();
+                    if (currentTracking && currentTracking.taskId === filterTaskId && currentTracking.projectId === filterProjectId) {
+                        setIsTaskActive(true);
+                    } else {
+                        setIsTaskActive(false);
+                    }
+                } catch (error) {
+                    console.error('Error checking active task:', error);
+                }
+            };
+            checkActiveTask();
+        } else {
+            setJsonTrackingData(null);
+            setIsTaskActive(false);
+        }
+    }, [filterTaskId, filterProjectId]);
+    
+    // Live updates when task is active - refresh JSON data periodically
+    useEffect(() => {
+        if (!isTaskActive || !filterTaskId || !filterProjectId || !window.electronAPI) return;
+        
+        const refreshInterval = setInterval(async () => {
+            try {
+                const data = await window.electronAPI!.loadTaskTrackingData(filterProjectId, filterTaskId);
+                if (data) {
+                    setJsonTrackingData(data);
+                }
+            } catch (error) {
+                console.error('Error refreshing JSON data:', error);
+            }
+        }, 3000); // Refresh every 3 seconds when task is active
+        
+        return () => clearInterval(refreshInterval);
+    }, [isTaskActive, filterTaskId, filterProjectId]);
+    
+    // Filter logs by task if provided - STRICT filtering by taskId and time ranges
+    const filteredLogs = useMemo(() => {
+        if (filterTaskId && filterProjectId && filterTimeEntries && filterTimeEntries.length > 0) {
+            // Create a sorted list of time ranges for efficient checking
+            const timeRanges = filterTimeEntries
+                .map(entry => ({
+                    start: entry.startTime.getTime(),
+                    end: entry.endTime ? entry.endTime.getTime() : Date.now()
+                }))
+                .sort((a, b) => a.start - b.start);
+            
+            const filtered = logs.filter(log => {
+                // PRIMARY CHECK: If log has taskId, it MUST match (strict)
+                if (log.taskId) {
+                    // Log has taskId - only include if it matches
+                    if (log.taskId !== filterTaskId) {
+                        return false; // Log belongs to a different task
+                    }
+                    // If taskId matches, include it (don't need time range check for logs with taskId)
+                    return true;
+                }
+                
+                // FALLBACK: If log doesn't have taskId, use projectId + time range
+                // This handles old logs created before taskId was added
+                if (log.projectId !== filterProjectId) {
+                    return false;
+                }
+                
+                // SECONDARY CHECK: Log timestamp must fall within one of the task's time entry ranges
+                const logTime = log.timestamp.getTime();
+                
+                // Use a buffer to account for interval timing precision
+                const buffer = 60000; // 1 minute buffer for interval timing
+                
+                const isInTimeRange = timeRanges.some(range => {
+                    const rangeStart = range.start - buffer;
+                    const rangeEnd = range.end + buffer;
+                    return logTime >= rangeStart && logTime <= rangeEnd;
+                });
+                
+                // Only include if in time range
+                return isInTimeRange;
+            });
+            
+            // Debug logging
+            if (filterTaskId) {
+                const logsWithTaskId = filtered.filter(l => l.taskId === filterTaskId).length;
+                const logsWithoutTaskId = filtered.filter(l => !l.taskId).length;
+                const totalKeystrokes = filtered.reduce((sum, l) => sum + (l.keyboardEvents || 0), 0);
+                const totalMouseClicks = filtered.reduce((sum, l) => sum + (l.mouseEvents || 0), 0);
+                const totalScreenshots = filtered.reduce((sum, l) => {
+                    if (l.screenshotUrls && l.screenshotUrls.length > 0) return sum + l.screenshotUrls.length;
+                    if (l.screenshotUrl) return sum + 1;
+                    return sum;
+                }, 0);
+                const totalWebcam = filtered.filter(l => l.webcamUrl).length;
+                
+                console.log('Task Report Filtering:', {
+                    taskId: filterTaskId,
+                    projectId: filterProjectId,
+                    timeRanges: timeRanges.length,
+                    totalLogs: logs.length,
+                    filteredLogs: filtered.length,
+                    logsWithTaskId,
+                    logsWithoutTaskId,
+                    totalKeystrokes,
+                    totalMouseClicks,
+                    totalScreenshots,
+                    totalWebcam,
+                    sampleLogs: filtered.slice(0, 3).map(l => ({
+                        id: l.id,
+                        taskId: l.taskId,
+                        timestamp: l.timestamp.toISOString(),
+                        keystrokes: l.keyboardEvents,
+                        mouseClicks: l.mouseEvents,
+                        hasScreenshot: !!(l.screenshotUrl || l.screenshotUrls?.length),
+                        hasWebcam: !!l.webcamUrl
+                    })),
+                    timeRangesDetail: timeRanges.map(r => ({
+                        start: new Date(r.start).toISOString(),
+                        end: new Date(r.end).toISOString()
+                    }))
+                });
+            }
+            
+            return filtered;
+        } else if (filterTaskId && filterProjectId) {
+            // If filtering by taskId only (no time entries), filter by taskId or projectId
+            // This is a fallback - prefer taskId but allow projectId if taskId not set
+            return logs.filter(log => {
+                if (log.taskId) {
+                    return log.taskId === filterTaskId;
+                }
+                // Fallback: if no taskId, match by projectId
+                return log.projectId === filterProjectId;
+            });
+        }
+        return logs;
+    }, [logs, filterTaskId, filterProjectId, filterTimeEntries]);
     // Real-time activity state
     const [currentActivity, setCurrentActivity] = useState<{
         app: string;
@@ -51,26 +220,30 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         const handleActivityUpdate = (data: any) => {
             const now = Date.now();
             
+            // Use per-task stats if available (cumulative across all windows), otherwise use per-window stats
+            const taskKeystrokes = data.taskKeystrokes !== undefined ? data.taskKeystrokes : (data.keystrokes || 0);
+            const taskClicks = data.taskClicks !== undefined ? data.taskClicks : (data.mouseClicks || 0);
+            
             // If app changed, reset session counters
             if (data.app !== currentAppRef.current) {
                 currentAppRef.current = data.app;
                 sessionStartTimeRef.current = now;
-                // Reset to per-window counts from the new window
-                keystrokesRef.current = data.keystrokes || 0;
-                clicksRef.current = data.mouseClicks || 0;
+                // Reset to per-task counts (preferred) or per-window counts (fallback)
+                keystrokesRef.current = taskKeystrokes;
+                clicksRef.current = taskClicks;
             } else {
-                // Same app - update with per-window counts
-                keystrokesRef.current = data.keystrokes || keystrokesRef.current;
-                clicksRef.current = data.mouseClicks || clicksRef.current;
+                // Same app - update with per-task counts (preferred) or per-window counts (fallback)
+                keystrokesRef.current = taskKeystrokes;
+                clicksRef.current = taskClicks;
             }
             
-            // Update current activity with per-window statistics
+            // Update current activity with per-task statistics (preferred) or per-window statistics (fallback)
             setCurrentActivity({
                 app: data.app || 'Unknown',
                 title: data.title || 'Unknown',
                 url: data.url || undefined,
-                keystrokes: data.keystrokes || keystrokesRef.current, // Per-window keystrokes
-                clicks: data.mouseClicks || clicksRef.current, // Per-window clicks
+                keystrokes: taskKeystrokes, // Per-task keystrokes (cumulative) or per-window keystrokes (fallback)
+                clicks: taskClicks, // Per-task clicks (cumulative) or per-window clicks (fallback)
                 timestamp: now
             });
         };
@@ -148,40 +321,44 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
     
     // Calculate aggregate stats (including real-time data from all windows)
     const stats = useMemo(() => {
-        const totalProd = logs.reduce((acc, log) => acc + (log.compositeScore || log.productivityScore || 0), 0);
+        const totalProd = filteredLogs.reduce((acc, log) => acc + (log.compositeScore || log.productivityScore || 0), 0);
         
-        // Use totalStats from all windows if available, otherwise calculate from logs
-        const totalKeys = totalStats.totalKeystrokes > 0 
-            ? totalStats.totalKeystrokes 
-            : logs.reduce((acc, log) => acc + log.keyboardEvents, 0) + (currentActivity?.keystrokes || 0);
-        const totalClicks = totalStats.totalClicks > 0
-            ? totalStats.totalClicks
-            : logs.reduce((acc, log) => acc + log.mouseEvents, 0) + (currentActivity?.clicks || 0);
-        const avgProd = logs.length > 0 ? Math.round(totalProd / logs.length) : 0;
+        // Use JSON data if available (preferred), otherwise use totalStats from all windows, otherwise calculate from logs
+        const totalKeys = jsonTrackingData?.trackingData?.summary?.totalKeystrokes !== undefined
+            ? jsonTrackingData.trackingData.summary.totalKeystrokes
+            : (totalStats.totalKeystrokes > 0 
+                ? totalStats.totalKeystrokes 
+                : filteredLogs.reduce((acc, log) => acc + log.keyboardEvents, 0) + (currentActivity?.keystrokes || 0));
+        const totalClicks = jsonTrackingData?.trackingData?.summary?.totalMouseClicks !== undefined
+            ? jsonTrackingData.trackingData.summary.totalMouseClicks
+            : (totalStats.totalClicks > 0
+                ? totalStats.totalClicks
+                : filteredLogs.reduce((acc, log) => acc + log.mouseEvents, 0) + (currentActivity?.clicks || 0));
+        const avgProd = filteredLogs.length > 0 ? Math.round(totalProd / filteredLogs.length) : 0;
         
         // TyroDesk metrics
-        const logsWithComposite = logs.filter(log => log.compositeScore !== undefined);
+        const logsWithComposite = filteredLogs.filter(log => log.compositeScore !== undefined);
         const avgCompositeScore = logsWithComposite.length > 0 
             ? Math.round(logsWithComposite.reduce((acc, log) => acc + (log.compositeScore || 0), 0) / logsWithComposite.length)
             : avgProd;
         
         // Category breakdown
-        const categoryBreakdown = logs.reduce((acc, log) => {
+        const categoryBreakdown = filteredLogs.reduce((acc, log) => {
             const category = log.urlCategory || log.appCategory || 'neutral';
             acc[category] = (acc[category] || 0) + 1;
             return acc;
         }, {} as Record<string, number>);
         
         // Focus metrics
-        const focusScores = logs.filter(log => log.focusScore !== undefined).map(log => log.focusScore!);
+        const focusScores = filteredLogs.filter(log => log.focusScore !== undefined).map(log => log.focusScore!);
         const avgFocusScore = focusScores.length > 0 
             ? Math.round(focusScores.reduce((a, b) => a + b, 0) / focusScores.length)
             : 0;
         
-        const totalContextSwitches = logs.reduce((acc, log) => acc + (log.contextSwitches || 0), 0);
+        const totalContextSwitches = filteredLogs.reduce((acc, log) => acc + (log.contextSwitches || 0), 0);
         
         // Score breakdown averages
-        const breakdowns = logs.filter(log => log.scoreBreakdown).map(log => log.scoreBreakdown!);
+        const breakdowns = filteredLogs.filter(log => log.scoreBreakdown).map(log => log.scoreBreakdown!);
         const avgBreakdown = breakdowns.length > 0 ? {
             activity: Math.round(breakdowns.reduce((acc, b) => acc + b.activity, 0) / breakdowns.length),
             app: Math.round(breakdowns.reduce((acc, b) => acc + b.app, 0) / breakdowns.length),
@@ -199,7 +376,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             totalContextSwitches,
             avgBreakdown
         };
-    }, [logs, currentActivity, totalStats]);
+    }, [filteredLogs, currentActivity, totalStats]);
 
     // Calculate App Usage with detailed stats (including all windows data)
     const appUsage = useMemo(() => {
@@ -213,9 +390,32 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             title: string; // Window title
         }> = {};
         
-        // First, add all windows from real-time tracking (this includes ALL opened windows)
-        allWindows.forEach(window => {
+        // Filter allWindows by task if filtering is active
+        // Only include windows that were active during the task's time entries
+        const filteredWindows = filterTaskId && filterTimeEntries && filterTimeEntries.length > 0
+            ? allWindows.filter(window => {
+                // Check if window was active during any of the task's time entries
+                const windowTime = window.startTime;
+                return filterTimeEntries.some(entry => {
+                    const entryStart = entry.startTime.getTime();
+                    const entryEnd = entry.endTime ? entry.endTime.getTime() : Date.now();
+                    return windowTime >= entryStart && windowTime <= entryEnd;
+                });
+            })
+            : filterTaskId
+            ? [] // If filtering by task but no time entries, don't use allWindows (use only logs)
+            : allWindows; // No filtering, use all windows
+        
+        // First, add filtered windows from real-time tracking
+        // Skip Electron app itself
+        filteredWindows.forEach(window => {
             const appName = window.app;
+            
+            // Skip Electron app itself - we don't want to track the tracking app
+            if (appName.toLowerCase().includes('electron') || appName.toLowerCase().includes('tyro')) {
+                return; // Skip this window
+            }
+            
             if (!appStats[appName]) {
                 appStats[appName] = {
                     count: 0,
@@ -228,18 +428,19 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 };
             }
             // Use per-window stats from real-time tracking
-            appStats[appName].keystrokes = window.keystrokes;
-            appStats[appName].clicks = window.mouseClicks;
+            // These will be merged with log data below
+            appStats[appName].keystrokes = Math.max(appStats[appName].keystrokes || 0, window.keystrokes || 0);
+            appStats[appName].clicks = Math.max(appStats[appName].clicks || 0, window.mouseClicks || 0);
             appStats[appName].isActive = window.isActive;
-            appStats[appName].title = window.title;
+            appStats[appName].title = window.title || appStats[appName].title || appName;
             
             // Calculate time spent based on startTime and lastSeen (real-time tracking)
             // This gives accurate time for currently open windows
             const timeSpent = Math.floor((window.lastSeen - window.startTime) / 1000);
-            // Real-time tracking takes priority (more accurate for active windows)
-            appStats[appName].timeSpent = timeSpent;
+            // Use the maximum of real-time time or log time (whichever is higher)
+            appStats[appName].timeSpent = Math.max(appStats[appName].timeSpent || 0, timeSpent);
             
-            // Normalize URL helper function
+            // Normalize URL helper function (local to this scope)
             const normalizeUrl = (url: string | null): string | null => {
                 if (!url) return null;
                 try {
@@ -348,8 +549,9 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         });
         
         // Process historical logs to calculate accurate time spent per app
+        // IMPORTANT: Use filteredLogs, not logs, to only count time for the current task
         // Sort logs by timestamp (oldest first) to calculate duration between consecutive logs
-        const sortedLogs = [...logs].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+        const sortedLogs = [...filteredLogs].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
         
         // Detect interval duration (1 min in dev, 10 min in prod)
         let intervalDuration = 600; // Default 10 minutes in seconds
@@ -364,6 +566,12 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         
         sortedLogs.forEach((log, index) => {
             const appName = log.activeWindow;
+            
+            // Skip Electron app itself - we don't want to track the tracking app
+            if (appName.toLowerCase().includes('electron') || appName.toLowerCase().includes('tyro')) {
+                return; // Skip this log entry
+            }
+            
             if (!appStats[appName]) {
                 appStats[appName] = {
                     count: 0,
@@ -377,18 +585,31 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             }
             appStats[appName].count += 1;
             
-            // Only add to stats if not already set from allWindows (allWindows takes priority for real-time data)
-            if (!allWindows.find(w => w.app === appName)) {
-                const keystrokes = typeof log.keyboardEvents === 'number' ? log.keyboardEvents : 0;
-                const clicks = typeof log.mouseEvents === 'number' ? log.mouseEvents : 0;
+            // ALWAYS add keystrokes and clicks from logs (they're task-specific)
+            // If app is also in filteredWindows, we'll merge the data
+            const keystrokes = typeof log.keyboardEvents === 'number' ? log.keyboardEvents : 0;
+            const clicks = typeof log.mouseEvents === 'number' ? log.mouseEvents : 0;
+            
+            // If app is in filteredWindows, use the higher value (real-time might be more accurate)
+            // Otherwise, add from logs
+            const existingWindow = filteredWindows.find(w => w.app === appName);
+            if (existingWindow) {
+                // App is in real-time tracking - use real-time data (already set above)
+                // But also add log data if it's higher (in case real-time missed some)
+                appStats[appName].keystrokes = Math.max(appStats[appName].keystrokes, keystrokes);
+                appStats[appName].clicks = Math.max(appStats[appName].clicks, clicks);
+            } else {
+                // App not in real-time tracking - add from logs
                 appStats[appName].keystrokes += keystrokes;
                 appStats[appName].clicks += clicks;
             }
             
+            
             // Calculate actual time spent from log timestamps
             // Each log represents one interval (10 min in prod, 1 min in dev)
-            // Only add time if app is NOT in allWindows (to avoid double counting with real-time tracking)
-            if (!allWindows.find(w => w.app === appName)) {
+            // Always calculate time from logs for accuracy (logs are task-specific)
+            // If app is also in filteredWindows, logs take priority for time calculation
+            {
                 // Calculate time for this log entry
                 let timeForThisLog = intervalDuration;
                 
@@ -402,7 +623,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                         timeForThisLog = Math.min(intervalDuration, duration);
                     } else {
                         // Last log - check if app is still active (add time since log creation)
-                        const isCurrentlyActive = allWindows.some(w => w.app === appName && w.isActive);
+                        const isCurrentlyActive = filteredWindows.some(w => w.app === appName && w.isActive);
                         if (isCurrentlyActive) {
                             const timeSinceLog = Math.floor((Date.now() - log.timestamp.getTime()) / 1000);
                             // Cap at interval duration to avoid overcounting
@@ -481,11 +702,13 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             stats.urls.sort((a, b) => b.count - a.count);
         });
         
-        const total = Math.max(logs.length, allWindows.length) || 1;
+        // Calculate total time spent across all apps for percentage calculation
+        // Percentage should be based on time, not count, to avoid >100% issues
+        const totalTimeSpent = Object.values(appStats).reduce((sum, stats) => sum + stats.timeSpent, 0);
         const appUsageArray = Object.entries(appStats).map(([name, stats]) => ({
             appName: name,
             title: stats.title || name,
-            percentage: Math.round((stats.count / total) * 100),
+            percentage: totalTimeSpent > 0 ? Math.round((stats.timeSpent / totalTimeSpent) * 100) : 0,
             icon: 'fa-window-maximize',
             color: '#60A5FA',
             keystrokes: stats.keystrokes,
@@ -500,8 +723,33 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             return (b.timeSpent || 0) - (a.timeSpent || 0);
         });
         
+        // Debug logging for app usage
+        if (filterTaskId) {
+            console.log('App Usage Calculation:', {
+                taskId: filterTaskId,
+                filteredLogsCount: filteredLogs.length,
+                filteredWindowsCount: filteredWindows.length,
+                totalApps: appUsageArray.length,
+                apps: appUsageArray.map(a => ({
+                    name: a.appName,
+                    keystrokes: a.keystrokes,
+                    clicks: a.clicks,
+                    timeSpent: a.timeSpent,
+                    percentage: a.percentage,
+                    urlsCount: a.urls.length
+                })),
+                totalTimeSpent,
+                sampleLogs: filteredLogs.slice(0, 3).map(l => ({
+                    app: l.activeWindow,
+                    keystrokes: l.keyboardEvents,
+                    mouseClicks: l.mouseEvents,
+                    timestamp: l.timestamp.toISOString()
+                }))
+            });
+        }
+        
         return appUsageArray;
-    }, [logs, currentActivity, allWindows]);
+    }, [filteredLogs, currentActivity, allWindows, filterTaskId, filterTimeEntries]);
 
     // Expandable state
     const [expandedApps, setExpandedApps] = useState<Set<string>>(new Set());
@@ -540,9 +788,26 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 <div>
                     <h2 className="text-lg font-bold flex items-center">
                         <i className="fas fa-chart-line text-blue-500 mr-2"></i>
-                        Insights
+                        {filterTaskId && tasks ? (
+                            <>
+                                Task Report
+                                {(() => {
+                                    const task = tasks.find(t => t.id === filterTaskId);
+                                    const project = filterProjectId ? projects.find(p => p.id === filterProjectId) : null;
+                                    return task && (
+                                        <span className="ml-2 text-sm font-normal text-gray-400">
+                                            • {project?.name} / {task.name}
+                                        </span>
+                                    );
+                                })()}
+                            </>
+                        ) : (
+                            'Insights'
+                        )}
                     </h2>
-                    <p className="text-xs text-gray-500">Activity & Productivity Log</p>
+                    <p className="text-xs text-gray-500">
+                        {filterTaskId ? 'Task-specific activity & productivity report' : 'Activity & Productivity Log'}
+                    </p>
                 </div>
                 <button onClick={onClose} className="text-gray-400 hover:text-white bg-gray-800 p-2 rounded-lg transition-colors">
                     <i className="fas fa-times"></i>
@@ -551,60 +816,452 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
 
             <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
                 
-                {/* Summary Section - Total Stats Across All Windows */}
-                <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-4 border border-blue-500/30">
-                    <div className="flex items-center gap-2 mb-3">
-                        <i className="fas fa-chart-pie text-blue-400"></i>
-                        <h3 className="text-sm font-bold text-gray-200">Total Activity Summary</h3>
-                    </div>
-                    <div className="grid grid-cols-3 gap-3">
-                        <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                            <div className="text-2xl font-bold text-green-400">
-                                {stats.avgCompositeScore > 0 ? stats.avgCompositeScore : stats.avgProd}%
-                            </div>
-                            <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">
-                                {stats.avgCompositeScore > 0 ? 'Composite Score' : 'Productivity'}
-                            </div>
-                            {stats.avgCompositeScore > 0 && (
-                                <div className="text-[9px] text-gray-500 mt-0.5">TyroDesk Algorithm</div>
-                            )}
-                        </div>
-                        <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                            <div className="text-2xl font-bold text-blue-400">{stats.totalKeys.toLocaleString()}</div>
-                            <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Keystrokes</div>
-                            <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
-                        </div>
-                        <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                            <div className="text-2xl font-bold text-purple-400">{stats.totalClicks.toLocaleString()}</div>
-                            <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Clicks</div>
-                            <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
-                        </div>
-                    </div>
-                    {allWindows.length > 0 && (
-                        <div className="mt-3 pt-3 border-t border-gray-700/50">
-                            <div className="text-xs text-gray-400">
-                                <i className="fas fa-window-restore mr-1"></i>
-                                Tracking <span className="font-bold text-blue-400">{allWindows.length}</span> {allWindows.length === 1 ? 'window' : 'windows'}
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                {/* TyroDesk Algorithm Metrics Section */}
-                {(() => {
-                    const hasTyroDeskData = logs.some(log => log.compositeScore !== undefined || log.appCategory || log.focusScore !== undefined);
-                    console.log('🔍 DEBUG - TyroDesk section check:', {
-                        hasTyroDeskData,
-                        logsCount: logs.length,
-                        logsWithComposite: logs.filter(l => l.compositeScore !== undefined).length,
-                        logsWithAppCategory: logs.filter(l => l.appCategory).length,
-                        logsWithFocusScore: logs.filter(l => l.focusScore !== undefined).length,
-                        sampleLog: logs[0] ? {
-                            hasCompositeScore: !!logs[0].compositeScore,
-                            hasAppCategory: !!logs[0].appCategory,
-                            hasFocusScore: logs[0].focusScore !== undefined
-                        } : null
+                {/* JSON Tracking Data Section - Calculated from JSON file, same format as Insights */}
+                {jsonTrackingData && filterTaskId && (() => {
+                    // Calculate metrics from JSON data
+                    const jsonSummary = jsonTrackingData.trackingData?.summary || {};
+                    const jsonWindows = jsonTrackingData.trackingData?.activeWindows || [];
+                    const jsonUrls = jsonTrackingData.trackingData?.urlHistory || [];
+                    
+                    // Calculate activity score (0-100) based on keystrokes and clicks
+                    const totalKeys = jsonSummary.totalKeystrokes || 0;
+                    const totalClicks = jsonSummary.totalMouseClicks || 0;
+                    const activityScore = Math.min(100, Math.round((totalKeys + totalClicks * 10) / 100)); // Normalize
+                    
+                    // Calculate app score from active windows
+                    const appScores: number[] = [];
+                    jsonWindows.forEach((win: any) => {
+                        const appName = win.appName || win.windowKey || '';
+                        // Simple categorization
+                        if (appName.toLowerCase().includes('code') || appName.toLowerCase().includes('studio')) {
+                            appScores.push(100); // VS Code, etc.
+                        } else if (appName.toLowerCase().includes('chrome') || appName.toLowerCase().includes('edge') || appName.toLowerCase().includes('firefox')) {
+                            appScores.push(50); // Browsers
+                        } else {
+                            appScores.push(30); // Other
+                        }
                     });
+                    const avgAppScore = appScores.length > 0 ? Math.round(appScores.reduce((a, b) => a + b, 0) / appScores.length) : 50;
+                    
+                    // Calculate URL score from URL history
+                    const urlScores: number[] = [];
+                    jsonUrls.forEach((urlEntry: any) => {
+                        const url = urlEntry.url || '';
+                        if (url.includes('github.com') || url.includes('stackoverflow.com')) {
+                            urlScores.push(100);
+                        } else if (url.includes('google.com') || url.includes('youtube.com')) {
+                            urlScores.push(50);
+                        } else if (url.includes('facebook.com') || url.includes('twitter.com')) {
+                            urlScores.push(0);
+                        } else {
+                            urlScores.push(50);
+                        }
+                    });
+                    const avgUrlScore = urlScores.length > 0 ? Math.round(urlScores.reduce((a, b) => a + b, 0) / urlScores.length) : 50;
+                    
+                    // Calculate focus score (based on number of windows - fewer = better focus)
+                    const windowCount = jsonWindows.length;
+                    const focusScore = windowCount <= 2 ? 100 : windowCount <= 4 ? 80 : windowCount <= 6 ? 60 : 40;
+                    
+                    // Calculate composite score
+                    const compositeScore = Math.round(
+                        (activityScore * 0.25) +
+                        (avgAppScore * 0.25) +
+                        (avgUrlScore * 0.20) +
+                        (focusScore * 0.30)
+                    );
+                    
+                    // Calculate category breakdown
+                    const categoryBreakdown: Record<string, number> = { productive: 0, neutral: 0, unproductive: 0 };
+                    jsonWindows.forEach((win: any) => {
+                        const appName = (win.appName || win.windowKey || '').toLowerCase();
+                        if (appName.includes('code') || appName.includes('studio')) {
+                            categoryBreakdown.productive++;
+                        } else if (appName.includes('chrome') || appName.includes('edge')) {
+                            categoryBreakdown.neutral++;
+                        } else {
+                            categoryBreakdown.neutral++;
+                        }
+                    });
+                    
+                    // Count context switches (window changes)
+                    const contextSwitches = Math.max(0, jsonWindows.length - 1);
+                    
+                    return (
+                        <>
+                            {/* Summary Section - Total Stats Across All Windows */}
+                            <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-4 border border-blue-500/30">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <i className="fas fa-chart-pie text-blue-400"></i>
+                                    <h3 className="text-sm font-bold text-gray-200">Total Activity Summary</h3>
+                                    {isTaskActive && (
+                                        <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] rounded-full flex items-center gap-1">
+                                            <i className="fas fa-circle text-[6px] animate-pulse"></i>
+                                            Live
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                                        <div className="text-2xl font-bold text-green-400">
+                                            {compositeScore}%
+                                        </div>
+                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">
+                                            Composite Score
+                                        </div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">TyroDesk Algorithm</div>
+                                    </div>
+                                    <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                                        <div className="text-2xl font-bold text-blue-400">{totalKeys.toLocaleString()}</div>
+                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Keystrokes</div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                                    </div>
+                                    <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                                        <div className="text-2xl font-bold text-purple-400">{totalClicks.toLocaleString()}</div>
+                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Clicks</div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                                    </div>
+                                </div>
+                                {jsonWindows.length > 0 && (
+                                    <div className="mt-3 pt-3 border-t border-gray-700/50">
+                                        <div className="text-xs text-gray-400">
+                                            <i className="fas fa-window-restore mr-1"></i>
+                                            Tracking <span className="font-bold text-blue-400">{jsonWindows.length}</span> {jsonWindows.length === 1 ? 'window' : 'windows'}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* TyroDesk Algorithm Metrics Section */}
+                            <div className="bg-gradient-to-br from-purple-900/30 to-pink-900/30 rounded-xl p-4 border border-purple-500/30">
+                                <div className="flex items-center gap-2 mb-4">
+                                    <i className="fas fa-brain text-purple-400"></i>
+                                    <h3 className="text-sm font-bold text-gray-200">TyroDesk Productivity Analysis</h3>
+                                </div>
+                                
+                                {/* Composite Score with Breakdown */}
+                                <div className="mb-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs font-bold text-gray-400 uppercase">Composite Score Breakdown</span>
+                                            <span 
+                                                className="text-[8px] text-gray-500 cursor-help" 
+                                                title="Weighted combination: Activity (25%) + App (25%) + URL (20%) + Focus (30%)"
+                                            >
+                                                <i className="fas fa-info-circle"></i>
+                                            </span>
+                                        </div>
+                                        <span className="text-lg font-bold text-green-400">
+                                            {compositeScore}%
+                                        </span>
+                                    </div>
+                                    <div className="grid grid-cols-4 gap-2">
+                                        <div 
+                                            className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-blue-500 transition-colors cursor-help" 
+                                            title="Activity Score (25% weight): Based on keystrokes + mouse clicks. Higher = more active computer use."
+                                        >
+                                            <div className="text-sm font-bold text-blue-400">{activityScore}</div>
+                                            <div className="text-[9px] text-gray-500 mt-0.5">Activity</div>
+                                            <div className="text-[8px] text-gray-600 mt-0.5">25% weight</div>
+                                        </div>
+                                        <div 
+                                            className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-green-500 transition-colors cursor-help"
+                                            title="App Score (25% weight): Productivity of apps used. VS Code=100%, Chrome=50%, Spotify=0%"
+                                        >
+                                            <div className="text-sm font-bold text-green-400">{avgAppScore}</div>
+                                            <div className="text-[9px] text-gray-500 mt-0.5">App</div>
+                                            <div className="text-[8px] text-gray-600 mt-0.5">25% weight</div>
+                                        </div>
+                                        <div 
+                                            className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-yellow-500 transition-colors cursor-help"
+                                            title="URL Score (20% weight): Productivity of websites visited. GitHub=100%, Google=50%, Facebook=0%"
+                                        >
+                                            <div className="text-sm font-bold text-yellow-400">{avgUrlScore}</div>
+                                            <div className="text-[9px] text-gray-500 mt-0.5">URL</div>
+                                            <div className="text-[8px] text-gray-600 mt-0.5">20% weight</div>
+                                        </div>
+                                        <div 
+                                            className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-purple-500 transition-colors cursor-help"
+                                            title="Focus Score (30% weight): How focused you were. Fewer app switches = higher score. 100% = excellent focus!"
+                                        >
+                                            <div className="text-sm font-bold text-purple-400">{focusScore}</div>
+                                            <div className="text-[9px] text-gray-500 mt-0.5">Focus</div>
+                                            <div className="text-[8px] text-gray-600 mt-0.5">30% weight</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {/* Category Breakdown */}
+                                {Object.keys(categoryBreakdown).length > 0 && (
+                                    <div className="mb-4">
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <div className="text-xs font-bold text-gray-400 uppercase">App/URL Category Distribution</div>
+                                            <span 
+                                                className="text-[8px] text-gray-500 cursor-help" 
+                                                title="Shows how your time was split: Productive (VS Code, Office), Neutral (Browsers, Communication), Unproductive (Entertainment)"
+                                            >
+                                                <i className="fas fa-info-circle"></i>
+                                            </span>
+                                        </div>
+                                        <div className="flex gap-2">
+                                            {categoryBreakdown.productive > 0 && (
+                                                <div 
+                                                    className="flex-1 bg-green-900/30 p-2 rounded border border-green-500/30 text-center hover:border-green-400 transition-colors cursor-help"
+                                                    title="Productive: VS Code, Office apps, Design tools, GitHub, Stack Overflow"
+                                                >
+                                                    <div className="text-sm font-bold text-green-400">{categoryBreakdown.productive}</div>
+                                                    <div className="text-[9px] text-gray-400 mt-0.5">Productive</div>
+                                                </div>
+                                            )}
+                                            {categoryBreakdown.neutral > 0 && (
+                                                <div 
+                                                    className="flex-1 bg-yellow-900/30 p-2 rounded border border-yellow-500/30 text-center hover:border-yellow-400 transition-colors cursor-help"
+                                                    title="Neutral: Browsers, Communication apps (Slack, Teams), Search engines"
+                                                >
+                                                    <div className="text-sm font-bold text-yellow-400">{categoryBreakdown.neutral}</div>
+                                                    <div className="text-[9px] text-gray-400 mt-0.5">Neutral</div>
+                                                </div>
+                                            )}
+                                            {categoryBreakdown.unproductive > 0 && (
+                                                <div 
+                                                    className="flex-1 bg-red-900/30 p-2 rounded border border-red-500/30 text-center hover:border-red-400 transition-colors cursor-help"
+                                                    title="Unproductive: Entertainment (Spotify, Netflix), Social media (Facebook, Twitter)"
+                                                >
+                                                    <div className="text-sm font-bold text-red-400">{categoryBreakdown.unproductive}</div>
+                                                    <div className="text-[9px] text-gray-400 mt-0.5">Unproductive</div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                {/* Focus Metrics */}
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div 
+                                        className="bg-gray-900/50 p-3 rounded border border-gray-700 text-center hover:border-purple-500 transition-colors cursor-help"
+                                        title="Focus Score: Measures how focused you were. 100% = excellent focus (minimal app switching). Higher = better productivity."
+                                    >
+                                        <div className="text-xl font-bold text-purple-400">{focusScore}%</div>
+                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Avg Focus Score</div>
+                                        <div className="text-[8px] text-gray-600 mt-1">
+                                            {focusScore >= 80 ? '⭐ Excellent!' : 
+                                             focusScore >= 60 ? '✅ Good' : 
+                                             focusScore >= 40 ? '⚠️ Moderate' : '❌ Low'}
+                                        </div>
+                                    </div>
+                                    <div 
+                                        className="bg-gray-900/50 p-3 rounded border border-gray-700 text-center hover:border-orange-500 transition-colors cursor-help"
+                                        title="Context Switches: Number of times you switched between different apps. Lower = better. Each switch costs ~23 min to regain focus."
+                                    >
+                                        <div className="text-xl font-bold text-orange-400">{contextSwitches}</div>
+                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Context Switches</div>
+                                        <div className="text-[8px] text-gray-600 mt-1">
+                                            {contextSwitches === 0 ? '⭐ Perfect!' : 
+                                             contextSwitches <= 3 ? '✅ Good' : 
+                                             contextSwitches <= 6 ? '⚠️ Moderate' : '❌ High'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Active Windows with URL Details - Expandable format like App Usage */}
+                            {jsonWindows.length > 0 && (
+                                <div>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <h3 className="text-xs font-bold text-gray-400 uppercase">Active Windows & URLs</h3>
+                                        {isTaskActive && (
+                                            <span className="text-[10px] text-green-400 flex items-center gap-1">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+                                                Live
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="space-y-2">
+                                        {jsonWindows.map((win: any, idx: number) => {
+                                            const appName = win.appName || win.windowKey || 'Unknown';
+                                            const isExpanded = expandedApps.has(appName);
+                                            const totalTime = jsonWindows.reduce((sum: number, w: any) => sum + (w.timeSpent || 0), 0);
+                                            const percentage = totalTime > 0 ? Math.round((win.timeSpent || 0) / totalTime * 100) : 0;
+                                            
+                                            return (
+                                                <div key={idx} className="bg-gray-800/50 rounded border border-gray-800 overflow-hidden">
+                                                    {/* Main Item - Clickable */}
+                                                    <div 
+                                                        className={`flex items-center justify-between text-sm p-2 cursor-pointer hover:bg-gray-800/70 transition-colors ${isTaskActive && idx === 0 ? 'bg-blue-500/10 border-l-2 border-blue-500' : ''}`}
+                                                        onClick={() => toggleExpand(appName)}
+                                                    >
+                                                        <div className="flex items-center gap-3">
+                                                            <div className={`w-8 h-8 rounded flex items-center justify-center ${isTaskActive && idx === 0 ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-700 text-gray-400'}`}>
+                                                                <i className={`fas ${appName.includes('Code') || appName.includes('Cursor') ? 'fa-code' : appName.includes('Chrome') ? 'fa-globe' : appName.includes('Brave') ? 'fa-shield-alt' : appName.includes('Edge') ? 'fa-edge' : appName.includes('Firefox') ? 'fa-firefox' : 'fa-desktop'}`}></i>
+                                                            </div>
+                                                            <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="font-medium text-gray-300 truncate">{appName}</span>
+                                                                    {isTaskActive && idx === 0 && (
+                                                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 animate-pulse flex-shrink-0">
+                                                                            Active
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                {win.title && win.title !== appName && (
+                                                                    <span className="text-[10px] text-gray-500 truncate" title={win.title}>
+                                                                        {win.title}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="w-24 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                                                                <div className="h-full bg-blue-500" style={{ width: `${percentage}%` }}></div>
+                                                            </div>
+                                                            <span className="text-xs font-mono w-8 text-right text-gray-400">{percentage}%</span>
+                                                            <button className="text-gray-500 hover:text-gray-300 transition-colors">
+                                                                <i className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs`}></i>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    
+                                                    {/* Expanded Content */}
+                                                    {isExpanded && (
+                                                        <div className="px-2 pb-2 pt-1 border-t border-gray-700/50 bg-gray-900/30">
+                                                            {/* Stats Grid */}
+                                                            <div className="grid grid-cols-3 gap-3 mt-2 mb-3">
+                                                                <div className="text-center">
+                                                                    <div className="text-lg font-bold text-blue-400">{(win.keystrokes || 0).toLocaleString()}</div>
+                                                                    <div className="text-[10px] text-gray-500 uppercase font-bold mt-0.5">Keystrokes</div>
+                                                                </div>
+                                                                <div className="text-center">
+                                                                    <div className="text-lg font-bold text-purple-400">{(win.mouseClicks || 0).toLocaleString()}</div>
+                                                                    <div className="text-[10px] text-gray-500 uppercase font-bold mt-0.5">Mouse Clicks</div>
+                                                                </div>
+                                                                <div className="text-center">
+                                                                    <div className="text-lg font-bold text-green-400">{formatTime(win.timeSpent || 0)}</div>
+                                                                    <div className="text-[10px] text-gray-500 uppercase font-bold mt-0.5">Time Spent</div>
+                                                                </div>
+                                                            </div>
+                                                            
+                                                            {/* URL/Title Details */}
+                                                            {win.urls && win.urls.length > 0 && (
+                                                                <div className="mt-3 pt-3 border-t border-gray-700/50">
+                                                                    <div className="text-xs font-bold text-gray-400 uppercase mb-2 flex items-center gap-2">
+                                                                        <i className="fas fa-link text-blue-400"></i>
+                                                                        URLs Visited ({win.urls.length})
+                                                                    </div>
+                                                                    <div className="space-y-1.5 max-h-48 overflow-y-auto custom-scrollbar">
+                                                                        {win.urls.map((urlEntry: any, urlIdx: number) => (
+                                                                            <div 
+                                                                                key={urlIdx} 
+                                                                                className="bg-gray-800/50 rounded p-2 border border-gray-700/50 hover:border-blue-500/50 transition-colors"
+                                                                            >
+                                                                                <div className="flex items-start justify-between gap-2">
+                                                                                    <div className="flex-1 min-w-0">
+                                                                                        {urlEntry.url ? (
+                                                                                            <>
+                                                                                                <a 
+                                                                                                    href={urlEntry.url} 
+                                                                                                    target="_blank" 
+                                                                                                    rel="noopener noreferrer"
+                                                                                                    className="text-xs text-blue-400 hover:text-blue-300 truncate block"
+                                                                                                    title={urlEntry.url}
+                                                                                                >
+                                                                                                    {urlEntry.url.replace(/^https?:\/\//, '').split('/')[0]}
+                                                                                                </a>
+                                                                                                <div className="text-[10px] text-gray-500 mt-0.5">
+                                                                                                    {urlEntry.url.length > 50 ? urlEntry.url.substring(0, 50) + '...' : urlEntry.url}
+                                                                                                </div>
+                                                                                            </>
+                                                                                        ) : (
+                                                                                            <>
+                                                                                                <div className="text-xs text-gray-300 font-medium truncate block" title={urlEntry.title || 'Unknown Page'}>
+                                                                                                    {urlEntry.title || 'Unknown Page'}
+                                                                                                </div>
+                                                                                                <div className="text-[10px] text-gray-500 mt-0.5 italic">
+                                                                                                    (URL unknown)
+                                                                                                </div>
+                                                                                            </>
+                                                                                        )}
+                                                                                    </div>
+                                                                                    <div className="flex flex-col items-end gap-1">
+                                                                                        <span className="text-[9px] text-gray-600">
+                                                                                            {urlEntry.timestamp ? new Date(urlEntry.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}
+                                                                                        </span>
+                                                                                    </div>
+                                                                                </div>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            
+                                                            {/* Show message if no URLs but it's a browser */}
+                                                            {(!win.urls || win.urls.length === 0) && 
+                                                             (appName.toLowerCase().includes('chrome') || 
+                                                              appName.toLowerCase().includes('brave') || 
+                                                              appName.toLowerCase().includes('firefox') || 
+                                                              appName.toLowerCase().includes('edge') || 
+                                                              appName.toLowerCase().includes('safari')) && (
+                                                                <div className="mt-3 pt-3 border-t border-gray-700/50">
+                                                                    <div className="text-xs text-gray-500 italic text-center py-2">
+                                                                        No URLs tracked for this browser session
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    );
+                })()}
+                
+                {/* Summary Section - Only show if no JSON data (fallback to logs) */}
+                {!jsonTrackingData && (
+                    <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-4 border border-blue-500/30">
+                        <div className="flex items-center gap-2 mb-3">
+                            <i className="fas fa-chart-pie text-blue-400"></i>
+                            <h3 className="text-sm font-bold text-gray-200">Total Activity Summary</h3>
+                        </div>
+                        <div className="grid grid-cols-3 gap-3">
+                            <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                                <div className="text-2xl font-bold text-green-400">
+                                    {stats.avgCompositeScore > 0 ? stats.avgCompositeScore : stats.avgProd}%
+                                </div>
+                                <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">
+                                    {stats.avgCompositeScore > 0 ? 'Composite Score' : 'Productivity'}
+                                </div>
+                                {stats.avgCompositeScore > 0 && (
+                                    <div className="text-[9px] text-gray-500 mt-0.5">TyroDesk Algorithm</div>
+                                )}
+                            </div>
+                            <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                                <div className="text-2xl font-bold text-blue-400">{stats.totalKeys.toLocaleString()}</div>
+                                <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Keystrokes</div>
+                                <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                            </div>
+                            <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
+                                <div className="text-2xl font-bold text-purple-400">{stats.totalClicks.toLocaleString()}</div>
+                                <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Clicks</div>
+                                <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                            </div>
+                        </div>
+                        {allWindows.length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-gray-700/50">
+                                <div className="text-xs text-gray-400">
+                                    <i className="fas fa-window-restore mr-1"></i>
+                                    Tracking <span className="font-bold text-blue-400">{allWindows.length}</span> {allWindows.length === 1 ? 'window' : 'windows'}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* TyroDesk Algorithm Metrics Section - Only show if no JSON data (fallback to logs) */}
+                {!jsonTrackingData && (() => {
+                    const hasTyroDeskData = logs.some(log => log.compositeScore !== undefined || log.appCategory || log.focusScore !== undefined);
                     return hasTyroDeskData;
                 })() && (
                     <div className="bg-gradient-to-br from-purple-900/30 to-pink-900/30 rounded-xl p-4 border border-purple-500/30">
@@ -626,7 +1283,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                             <i className="fas fa-info-circle"></i>
                                         </span>
                                     </div>
-                                    <span className="text-lg font-bold" style={{ color: logs.find(l => l.compositeScore)?.scoreClassification?.color || '#eab308' }}>
+                                    <span className="text-lg font-bold" style={{ color: filteredLogs.find(l => l.compositeScore)?.scoreClassification?.color || '#eab308' }}>
                                         {stats.avgCompositeScore}%
                                     </span>
                                 </div>
@@ -747,12 +1404,12 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 <div className="bg-gray-900 rounded-lg p-4 border border-gray-800">
                     <h3 className="text-xs font-bold text-gray-400 uppercase mb-4">Activity Timeline</h3>
                     <div className="h-24 flex items-end gap-1 overflow-x-auto pb-2 custom-scrollbar">
-                        {logs.length === 0 ? (
+                        {filteredLogs.length === 0 ? (
                             <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs italic">
                                 No activity recorded yet.
                             </div>
                         ) : (
-                            logs.map((log) => {
+                            filteredLogs.map((log) => {
                                 const project = projects.find(p => p.id === log.projectId);
                                 return (
                                     <div key={log.id} className="group relative flex-shrink-0 w-3 bg-gray-800 rounded-sm hover:bg-gray-700 transition-all cursor-pointer" style={{ height: '100%' }}>
@@ -805,7 +1462,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             {(() => {
                                 // Count all individual images (screenshots + webcam photos)
                                 let count = 0;
-                                logs.forEach(log => {
+                                filteredLogs.forEach(log => {
                                     if (log.screenshotUrls && log.screenshotUrls.length > 0) {
                                         count += log.screenshotUrls.length;
                                     } else if (log.screenshotUrl) {
@@ -821,7 +1478,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                         {(() => {
-                            // Flatten logs to create individual evidence items for each screenshot and webcam photo
+                            // Flatten filteredLogs to create individual evidence items for each screenshot and webcam photo
+                            // IMPORTANT: Use filteredLogs, not logs, to ensure only task-specific evidence is shown
                             const evidenceItems: Array<{
                                 id: string;
                                 imageUrl: string;
@@ -830,7 +1488,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                 index?: number;
                             }> = [];
                             
-                            logs.forEach(log => {
+                            filteredLogs.forEach(log => {
                                 // Add all screenshots as separate items
                                 if (log.screenshotUrls && log.screenshotUrls.length > 0) {
                                     log.screenshotUrls.forEach((url, idx) => {
@@ -956,7 +1614,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     </div>
                 </div>
 
-                {/* App Usage List */}
+                {/* App Usage List - Only show if no JSON data (fallback to logs) */}
+                {!jsonTrackingData && (
                 <div>
                     <div className="flex items-center justify-between mb-3">
                         <h3 className="text-xs font-bold text-gray-400 uppercase">Top Applications</h3>
@@ -1103,6 +1762,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                         {appUsage.length === 0 && <div className="text-xs text-gray-600 italic">No app usage data.</div>}
                     </div>
                 </div>
+                )}
             </div>
         </div>
     );

@@ -62,6 +62,7 @@ export interface ActivityLog {
     id: string;
     timestamp: Date;
     projectId: string;
+    taskId?: string; // Optional: specific task ID for better filtering
     keyboardEvents: number;
     mouseEvents: number;
     productivityScore: number; // 0-100
