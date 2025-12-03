@@ -8,6 +8,7 @@ import { ConsentDialog } from './components/ConsentDialog';
 import { Settings as SettingsComponent } from './components/Settings';
 import { CalculationDetails } from './components/CalculationDetails';
 import { IdleDialog } from './components/IdleDialog';
+import { CombinedInsights } from './components/CombinedInsights';
 import { useSurveillance } from './hooks/useSurveillance';
 import { applyBlurWithIntensity } from './utils/imageBlur';
 
@@ -78,6 +79,7 @@ const App: React.FC = () => {
     const [timeEntries, setTimeEntries] = useState<TimeEntry[]>([]);
     const [insightsTaskFilter, setInsightsTaskFilter] = useState<string | undefined>(undefined);
     const [insightsProjectFilter, setInsightsProjectFilter] = useState<string | undefined>(undefined);
+    const [showCombinedInsights, setShowCombinedInsights] = useState(false);
     
     // Consent State
     const [showConsentDialog, setShowConsentDialog] = useState(false);
@@ -1291,6 +1293,13 @@ const App: React.FC = () => {
                     </div>
                     <div className="flex gap-2">
                         <button 
+                            onClick={() => setShowCombinedInsights(true)}
+                            className="w-8 h-8 rounded-full bg-blue-900/30 hover:bg-blue-900/50 text-blue-400 flex items-center justify-center transition-colors"
+                            title="Combined Insights"
+                        >
+                            <i className="fas fa-chart-pie text-xs"></i>
+                        </button>
+                        <button 
                             onClick={() => setView(AppView.SETTINGS)}
                             className="w-8 h-8 rounded-full bg-gray-700 hover:bg-gray-600 text-gray-300 flex items-center justify-center transition-colors"
                             title="Settings"
@@ -1849,6 +1858,9 @@ const App: React.FC = () => {
                 </main>
                 </div>
             </div>
+            {showCombinedInsights && (
+                <CombinedInsights onClose={() => setShowCombinedInsights(false)} />
+            )}
         </div>
     );
 };

@@ -18,10 +18,20 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
     const [jsonTrackingData, setJsonTrackingData] = useState<any | null>(null);
     const [isLoadingJsonData, setIsLoadingJsonData] = useState(false);
     const [isTaskActive, setIsTaskActive] = useState(false);
+    const [isCombinedView, setIsCombinedView] = useState(false);
     
-    // Fetch JSON tracking data when task filter is provided
+    // Fetch JSON tracking data - either single task or combined from all tasks
     useEffect(() => {
-        if (filterTaskId && filterProjectId && window.electronAPI) {
+        if (!window.electronAPI) {
+            setJsonTrackingData(null);
+            setIsTaskActive(false);
+            setIsCombinedView(false);
+            return;
+        }
+
+        // If task filter is provided, fetch single task data
+        if (filterTaskId && filterProjectId) {
+            setIsCombinedView(false);
             setIsLoadingJsonData(true);
             const fetchJsonData = async () => {
                 try {
@@ -57,28 +67,103 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             };
             checkActiveTask();
         } else {
-            setJsonTrackingData(null);
+            // No task filter - fetch combined data from all tasks
+            setIsCombinedView(true);
+            setIsLoadingJsonData(true);
+            const fetchCombinedData = async () => {
+                try {
+                    const combinedData = await window.electronAPI!.getCombinedInsights();
+                    if (combinedData && combinedData.success) {
+                        // Transform combined data to match the format expected by the component
+                        const transformedData = {
+                            metadata: {
+                                taskId: 'all',
+                                projectId: 'all',
+                                taskName: 'All Tasks',
+                                projectName: 'Combined',
+                                createdAt: combinedData.tasks.length > 0 ? combinedData.tasks[0].createdAt : new Date().toISOString(),
+                                lastUpdated: combinedData.lastUpdated || new Date().toISOString()
+                            },
+                            trackingData: {
+                                summary: combinedData.combinedData.summary,
+                                activityLogs: combinedData.combinedData.activityLogs || [],
+                                screenshots: combinedData.combinedData.screenshots || [],
+                                webcamPhotos: combinedData.combinedData.webcamPhotos || [],
+                                activeWindows: combinedData.combinedData.activeWindows || [], // Combined from all tasks
+                                urlHistory: combinedData.combinedData.urlHistory || [] // Combined from all tasks
+                            }
+                        };
+                        setJsonTrackingData(transformedData);
+                        console.log('✅ Loaded combined tracking data from all tasks');
+                    } else {
+                        setJsonTrackingData(null);
+                    }
+                } catch (error) {
+                    console.error('❌ Error loading combined tracking data:', error);
+                    setJsonTrackingData(null);
+                } finally {
+                    setIsLoadingJsonData(false);
+                }
+            };
+            fetchCombinedData();
             setIsTaskActive(false);
         }
     }, [filterTaskId, filterProjectId]);
     
-    // Live updates when task is active - refresh JSON data periodically
+    // Live updates - refresh JSON data periodically
     useEffect(() => {
-        if (!isTaskActive || !filterTaskId || !filterProjectId || !window.electronAPI) return;
+        if (!window.electronAPI) return;
         
-        const refreshInterval = setInterval(async () => {
-            try {
-                const data = await window.electronAPI!.loadTaskTrackingData(filterProjectId, filterTaskId);
-                if (data) {
-                    setJsonTrackingData(data);
+        // Subscribe to combined insights updates for real-time updates
+        if (isCombinedView) {
+            window.electronAPI.subscribeCombinedInsights();
+            
+            const handleCombinedUpdate = (updatedData: any) => {
+                if (updatedData && updatedData.success) {
+                    const transformedData = {
+                        metadata: {
+                            taskId: 'all',
+                            projectId: 'all',
+                            taskName: 'All Tasks',
+                            projectName: 'Combined',
+                            createdAt: updatedData.tasks.length > 0 ? updatedData.tasks[0].createdAt : new Date().toISOString(),
+                            lastUpdated: updatedData.lastUpdated || new Date().toISOString()
+                        },
+                        trackingData: {
+                            summary: updatedData.combinedData.summary,
+                            activityLogs: updatedData.combinedData.activityLogs || [],
+                            screenshots: updatedData.combinedData.screenshots || [],
+                            webcamPhotos: updatedData.combinedData.webcamPhotos || [],
+                            activeWindows: updatedData.combinedData.activeWindows || [], // Combined from all tasks
+                            urlHistory: updatedData.combinedData.urlHistory || [] // Combined from all tasks
+                        }
+                    };
+                    setJsonTrackingData(transformedData);
                 }
-            } catch (error) {
-                console.error('Error refreshing JSON data:', error);
-            }
-        }, 3000); // Refresh every 3 seconds when task is active
-        
-        return () => clearInterval(refreshInterval);
-    }, [isTaskActive, filterTaskId, filterProjectId]);
+            };
+            
+            window.electronAPI.onCombinedInsightsUpdate(handleCombinedUpdate);
+            
+            return () => {
+                window.electronAPI?.unsubscribeCombinedInsights();
+                window.electronAPI?.removeCombinedInsightsListener();
+            };
+        } else if (isTaskActive && filterTaskId && filterProjectId) {
+            // Refresh single task data every 3 seconds when active
+            const refreshInterval = setInterval(async () => {
+                try {
+                    const data = await window.electronAPI!.loadTaskTrackingData(filterProjectId, filterTaskId);
+                    if (data) {
+                        setJsonTrackingData(data);
+                    }
+                } catch (error) {
+                    console.error('Error refreshing JSON data:', error);
+                }
+            }, 3000);
+            
+            return () => clearInterval(refreshInterval);
+        }
+    }, [isTaskActive, filterTaskId, filterProjectId, isCombinedView]);
     
     // Filter logs by task if provided - STRICT filtering by taskId and time ranges
     const filteredLogs = useMemo(() => {
@@ -801,12 +886,21 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                     );
                                 })()}
                             </>
+                        ) : isCombinedView ? (
+                            <>
+                                Combined Insights
+                                <span className="ml-2 text-sm font-normal text-gray-400">
+                                    • All Tasks
+                                </span>
+                            </>
                         ) : (
                             'Insights'
                         )}
                     </h2>
                     <p className="text-xs text-gray-500">
-                        {filterTaskId ? 'Task-specific activity & productivity report' : 'Activity & Productivity Log'}
+                        {filterTaskId ? 'Task-specific activity & productivity report' : 
+                         isCombinedView ? 'Combined activity & productivity report from all tasks' :
+                         'Activity & Productivity Log'}
                     </p>
                 </div>
                 <button onClick={onClose} className="text-gray-400 hover:text-white bg-gray-800 p-2 rounded-lg transition-colors">
@@ -817,7 +911,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
                 
                 {/* JSON Tracking Data Section - Calculated from JSON file, same format as Insights */}
-                {jsonTrackingData && filterTaskId && (() => {
+                {jsonTrackingData && (() => {
                     // Calculate metrics from JSON data
                     const jsonSummary = jsonTrackingData.trackingData?.summary || {};
                     const jsonWindows = jsonTrackingData.trackingData?.activeWindows || [];
@@ -828,39 +922,88 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     const totalClicks = jsonSummary.totalMouseClicks || 0;
                     const activityScore = Math.min(100, Math.round((totalKeys + totalClicks * 10) / 100)); // Normalize
                     
-                    // Calculate app score from active windows
+                    // Calculate app score from active windows or activity logs
                     const appScores: number[] = [];
-                    jsonWindows.forEach((win: any) => {
-                        const appName = win.appName || win.windowKey || '';
-                        // Simple categorization
-                        if (appName.toLowerCase().includes('code') || appName.toLowerCase().includes('studio')) {
-                            appScores.push(100); // VS Code, etc.
-                        } else if (appName.toLowerCase().includes('chrome') || appName.toLowerCase().includes('edge') || appName.toLowerCase().includes('firefox')) {
-                            appScores.push(50); // Browsers
-                        } else {
-                            appScores.push(30); // Other
-                        }
-                    });
+                    const activityLogs = jsonTrackingData.trackingData?.activityLogs || [];
+                    
+                    if (jsonWindows.length > 0) {
+                        // Use active windows if available
+                        jsonWindows.forEach((win: any) => {
+                            const appName = win.appName || win.windowKey || '';
+                            // Simple categorization
+                            if (appName.toLowerCase().includes('code') || appName.toLowerCase().includes('studio')) {
+                                appScores.push(100); // VS Code, etc.
+                            } else if (appName.toLowerCase().includes('chrome') || appName.toLowerCase().includes('edge') || appName.toLowerCase().includes('firefox')) {
+                                appScores.push(50); // Browsers
+                            } else {
+                                appScores.push(30); // Other
+                            }
+                        });
+                    } else if (activityLogs.length > 0) {
+                        // Extract from activity logs for combined data
+                        const uniqueApps = new Set<string>();
+                        activityLogs.forEach((log: any) => {
+                            const appName = (log.activeWindow || '').toLowerCase();
+                            if (appName && !uniqueApps.has(appName)) {
+                                uniqueApps.add(appName);
+                                if (appName.includes('code') || appName.includes('studio')) {
+                                    appScores.push(100);
+                                } else if (appName.includes('chrome') || appName.includes('edge') || appName.includes('firefox')) {
+                                    appScores.push(50);
+                                } else {
+                                    appScores.push(30);
+                                }
+                            }
+                        });
+                    }
                     const avgAppScore = appScores.length > 0 ? Math.round(appScores.reduce((a, b) => a + b, 0) / appScores.length) : 50;
                     
-                    // Calculate URL score from URL history
+                    // Calculate URL score from URL history or activity logs
                     const urlScores: number[] = [];
-                    jsonUrls.forEach((urlEntry: any) => {
-                        const url = urlEntry.url || '';
-                        if (url.includes('github.com') || url.includes('stackoverflow.com')) {
-                            urlScores.push(100);
-                        } else if (url.includes('google.com') || url.includes('youtube.com')) {
-                            urlScores.push(50);
-                        } else if (url.includes('facebook.com') || url.includes('twitter.com')) {
-                            urlScores.push(0);
-                        } else {
-                            urlScores.push(50);
-                        }
-                    });
+                    if (jsonUrls.length > 0) {
+                        jsonUrls.forEach((urlEntry: any) => {
+                            const url = urlEntry.url || '';
+                            if (url.includes('github.com') || url.includes('stackoverflow.com')) {
+                                urlScores.push(100);
+                            } else if (url.includes('google.com') || url.includes('youtube.com')) {
+                                urlScores.push(50);
+                            } else if (url.includes('facebook.com') || url.includes('twitter.com')) {
+                                urlScores.push(0);
+                            } else {
+                                urlScores.push(50);
+                            }
+                        });
+                    } else if (activityLogs.length > 0) {
+                        // Extract from activity logs for combined data
+                        const uniqueUrls = new Set<string>();
+                        activityLogs.forEach((log: any) => {
+                            const url = log.url || '';
+                            if (url && !uniqueUrls.has(url)) {
+                                uniqueUrls.add(url);
+                                if (url.includes('github.com') || url.includes('stackoverflow.com')) {
+                                    urlScores.push(100);
+                                } else if (url.includes('google.com') || url.includes('youtube.com')) {
+                                    urlScores.push(50);
+                                } else if (url.includes('facebook.com') || url.includes('twitter.com')) {
+                                    urlScores.push(0);
+                                } else {
+                                    urlScores.push(50);
+                                }
+                            }
+                        });
+                    }
                     const avgUrlScore = urlScores.length > 0 ? Math.round(urlScores.reduce((a, b) => a + b, 0) / urlScores.length) : 50;
                     
-                    // Calculate focus score (based on number of windows - fewer = better focus)
-                    const windowCount = jsonWindows.length;
+                    // Calculate focus score (based on number of windows or unique apps - fewer = better focus)
+                    let windowCount = jsonWindows.length;
+                    if (windowCount === 0 && activityLogs.length > 0) {
+                        // Count unique apps from activity logs
+                        const uniqueApps = new Set<string>();
+                        activityLogs.forEach((log: any) => {
+                            if (log.activeWindow) uniqueApps.add(log.activeWindow);
+                        });
+                        windowCount = uniqueApps.size;
+                    }
                     const focusScore = windowCount <= 2 ? 100 : windowCount <= 4 ? 80 : windowCount <= 6 ? 60 : 40;
                     
                     // Calculate composite score
@@ -873,19 +1016,161 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     
                     // Calculate category breakdown
                     const categoryBreakdown: Record<string, number> = { productive: 0, neutral: 0, unproductive: 0 };
-                    jsonWindows.forEach((win: any) => {
-                        const appName = (win.appName || win.windowKey || '').toLowerCase();
-                        if (appName.includes('code') || appName.includes('studio')) {
-                            categoryBreakdown.productive++;
-                        } else if (appName.includes('chrome') || appName.includes('edge')) {
-                            categoryBreakdown.neutral++;
-                        } else {
-                            categoryBreakdown.neutral++;
-                        }
-                    });
+                    if (jsonWindows.length > 0) {
+                        jsonWindows.forEach((win: any) => {
+                            const appName = (win.appName || win.windowKey || '').toLowerCase();
+                            if (appName.includes('code') || appName.includes('studio')) {
+                                categoryBreakdown.productive++;
+                            } else if (appName.includes('chrome') || appName.includes('edge')) {
+                                categoryBreakdown.neutral++;
+                            } else {
+                                categoryBreakdown.neutral++;
+                            }
+                        });
+                    } else if (activityLogs.length > 0) {
+                        // Extract from activity logs
+                        const uniqueApps = new Set<string>();
+                        activityLogs.forEach((log: any) => {
+                            const appName = (log.activeWindow || '').toLowerCase();
+                            if (appName && !uniqueApps.has(appName)) {
+                                uniqueApps.add(appName);
+                                if (appName.includes('code') || appName.includes('studio')) {
+                                    categoryBreakdown.productive++;
+                                } else if (appName.includes('chrome') || appName.includes('edge')) {
+                                    categoryBreakdown.neutral++;
+                                } else {
+                                    categoryBreakdown.neutral++;
+                                }
+                            }
+                        });
+                    }
                     
                     // Count context switches (window changes)
-                    const contextSwitches = Math.max(0, jsonWindows.length - 1);
+                    const contextSwitches = Math.max(0, windowCount - 1);
+                    
+                    // Extract active windows and URLs - use combined data if available, otherwise extract from logs
+                    let combinedWindows: any[] = [];
+                    
+                    // First, try to use activeWindows from combined data
+                    if (isCombinedView && jsonTrackingData.trackingData?.activeWindows && 
+                        Array.isArray(jsonTrackingData.trackingData.activeWindows) && 
+                        jsonTrackingData.trackingData.activeWindows.length > 0) {
+                        // Use the combined activeWindows directly
+                        combinedWindows = jsonTrackingData.trackingData.activeWindows.map((win: any) => ({
+                            appName: win.appName || win.windowKey || 'Unknown',
+                            windowKey: win.windowKey || win.appName || 'Unknown',
+                            title: win.title || win.appName || 'Unknown',
+                            keystrokes: win.keystrokes || 0,
+                            mouseClicks: win.mouseClicks || 0,
+                            timeSpent: win.timeSpent || 0,
+                            lastSeen: win.lastSeen || Date.now(),
+                            urls: win.urls || []
+                        }));
+                    } else if (isCombinedView && activityLogs.length > 0) {
+                        // Group activity logs by app/window
+                        const windowMap = new Map<string, {
+                            appName: string;
+                            title: string;
+                            keystrokes: number;
+                            mouseClicks: number;
+                            timeSpent: number;
+                            urls: Array<{ url: string | null; title?: string; timestamp: number; count: number }>;
+                            lastSeen: number;
+                        }>();
+                        
+                        activityLogs.forEach((log: any) => {
+                            const appName = log.activeWindow || 'Unknown';
+                            const url = log.url || log.activeUrl || null;
+                            const title = log.title || log.windowTitle || '';
+                            const timestamp = new Date(log.timestamp).getTime();
+                            
+                            if (!windowMap.has(appName)) {
+                                windowMap.set(appName, {
+                                    appName,
+                                    title: title || appName,
+                                    keystrokes: 0,
+                                    mouseClicks: 0,
+                                    timeSpent: 0,
+                                    urls: [],
+                                    lastSeen: timestamp
+                                });
+                            }
+                            
+                            const window = windowMap.get(appName)!;
+                            window.keystrokes += log.keyboardEvents || log.keystrokes || 0;
+                            window.mouseClicks += log.mouseEvents || log.clicks || 0;
+                            window.lastSeen = Math.max(window.lastSeen, timestamp);
+                            
+                            // Add URL if available
+                            if (url) {
+                                const normalizedUrl = url.replace(/^https?:\/\//, '').split('/')[0];
+                                const existingUrl = window.urls.find(u => u.url && u.url.includes(normalizedUrl));
+                                if (existingUrl) {
+                                    existingUrl.count += 1;
+                                    existingUrl.timestamp = Math.max(existingUrl.timestamp, timestamp);
+                                } else {
+                                    window.urls.push({
+                                        url: url,
+                                        title: title,
+                                        timestamp: timestamp,
+                                        count: 1
+                                    });
+                                }
+                            } else if (title && title !== appName) {
+                                // Use title if no URL
+                                const existingTitle = window.urls.find(u => !u.url && u.title === title);
+                                if (existingTitle) {
+                                    existingTitle.count += 1;
+                                    existingTitle.timestamp = Math.max(existingTitle.timestamp, timestamp);
+                                } else {
+                                    window.urls.push({
+                                        url: null,
+                                        title: title,
+                                        timestamp: timestamp,
+                                        count: 1
+                                    });
+                                }
+                            }
+                        });
+                        
+                        // Calculate time spent (approximate based on log frequency)
+                        // Sort logs by timestamp and calculate intervals
+                        const sortedLogs = [...activityLogs].sort((a, b) => 
+                            new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+                        );
+                        
+                        sortedLogs.forEach((log: any, idx: number) => {
+                            const appName = log.activeWindow || 'Unknown';
+                            const window = windowMap.get(appName);
+                            if (window && idx < sortedLogs.length - 1) {
+                                const currentTime = new Date(log.timestamp).getTime();
+                                const nextTime = new Date(sortedLogs[idx + 1].timestamp).getTime();
+                                const interval = Math.min((nextTime - currentTime) / 1000, 60); // Cap at 60 seconds
+                                window.timeSpent += interval;
+                            }
+                        });
+                        
+                        // Convert to array and sort by time spent
+                        combinedWindows = Array.from(windowMap.values())
+                            .map(win => ({
+                                appName: win.appName,
+                                windowKey: win.appName,
+                                title: win.title,
+                                keystrokes: win.keystrokes,
+                                mouseClicks: win.mouseClicks,
+                                timeSpent: win.timeSpent,
+                                urls: win.urls.sort((a, b) => b.count - a.count),
+                                lastSeen: win.lastSeen
+                            }))
+                            .sort((a, b) => b.timeSpent - a.timeSpent);
+                    }
+                    
+                    // Use combined windows if available, otherwise use jsonWindows
+                    // For combined view, prefer combinedWindows extracted from combined data
+                    // For single task view, use jsonWindows
+                    const displayWindows = isCombinedView 
+                        ? (combinedWindows.length > 0 ? combinedWindows : jsonWindows)
+                        : jsonWindows;
                     
                     return (
                         <>
@@ -894,10 +1179,10 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                 <div className="flex items-center gap-2 mb-3">
                                     <i className="fas fa-chart-pie text-blue-400"></i>
                                     <h3 className="text-sm font-bold text-gray-200">Total Activity Summary</h3>
-                                    {isTaskActive && (
+                                    {(isTaskActive || isCombinedView) && (
                                         <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] rounded-full flex items-center gap-1">
                                             <i className="fas fa-circle text-[6px] animate-pulse"></i>
-                                            Live
+                                            {isCombinedView ? 'Live (All Tasks)' : 'Live'}
                                         </span>
                                     )}
                                 </div>
@@ -922,11 +1207,12 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                         <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
                                     </div>
                                 </div>
-                                {jsonWindows.length > 0 && (
+                                {displayWindows.length > 0 && (
                                     <div className="mt-3 pt-3 border-t border-gray-700/50">
                                         <div className="text-xs text-gray-400">
                                             <i className="fas fa-window-restore mr-1"></i>
-                                            Tracking <span className="font-bold text-blue-400">{jsonWindows.length}</span> {jsonWindows.length === 1 ? 'window' : 'windows'}
+                                            Tracking <span className="font-bold text-blue-400">{displayWindows.length}</span> {displayWindows.length === 1 ? 'window' : 'windows'}
+                                            {isCombinedView && <span className="ml-1 text-gray-500">(across all tasks)</span>}
                                         </div>
                                     </div>
                                 )}
@@ -1065,41 +1351,41 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             </div>
 
                             {/* Active Windows with URL Details - Expandable format like App Usage */}
-                            {jsonWindows.length > 0 && (
+                            {displayWindows.length > 0 && (
                                 <div>
                                     <div className="flex items-center justify-between mb-3">
                                         <h3 className="text-xs font-bold text-gray-400 uppercase">Active Windows & URLs</h3>
-                                        {isTaskActive && (
+                                        {(isTaskActive || isCombinedView) && (
                                             <span className="text-[10px] text-green-400 flex items-center gap-1">
                                                 <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
-                                                Live
+                                                {isCombinedView ? 'Live (All Tasks)' : 'Live'}
                                             </span>
                                         )}
                                     </div>
                                     <div className="space-y-2">
-                                        {jsonWindows.map((win: any, idx: number) => {
+                                        {displayWindows.map((win: any, idx: number) => {
                                             const appName = win.appName || win.windowKey || 'Unknown';
                                             const isExpanded = expandedApps.has(appName);
-                                            const totalTime = jsonWindows.reduce((sum: number, w: any) => sum + (w.timeSpent || 0), 0);
+                                            const totalTime = displayWindows.reduce((sum: number, w: any) => sum + (w.timeSpent || 0), 0);
                                             const percentage = totalTime > 0 ? Math.round((win.timeSpent || 0) / totalTime * 100) : 0;
                                             
                                             return (
                                                 <div key={idx} className="bg-gray-800/50 rounded border border-gray-800 overflow-hidden">
                                                     {/* Main Item - Clickable */}
                                                     <div 
-                                                        className={`flex items-center justify-between text-sm p-2 cursor-pointer hover:bg-gray-800/70 transition-colors ${isTaskActive && idx === 0 ? 'bg-blue-500/10 border-l-2 border-blue-500' : ''}`}
+                                                        className={`flex items-center justify-between text-sm p-2 cursor-pointer hover:bg-gray-800/70 transition-colors ${(isTaskActive || isCombinedView) && idx === 0 ? 'bg-blue-500/10 border-l-2 border-blue-500' : ''}`}
                                                         onClick={() => toggleExpand(appName)}
                                                     >
                                                         <div className="flex items-center gap-3">
-                                                            <div className={`w-8 h-8 rounded flex items-center justify-center ${isTaskActive && idx === 0 ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-700 text-gray-400'}`}>
-                                                                <i className={`fas ${appName.includes('Code') || appName.includes('Cursor') ? 'fa-code' : appName.includes('Chrome') ? 'fa-globe' : appName.includes('Brave') ? 'fa-shield-alt' : appName.includes('Edge') ? 'fa-edge' : appName.includes('Firefox') ? 'fa-firefox' : 'fa-desktop'}`}></i>
+                                                            <div className={`w-8 h-8 rounded flex items-center justify-center ${(isTaskActive || isCombinedView) && idx === 0 ? 'bg-blue-500/20 text-blue-400' : 'bg-gray-700 text-gray-400'}`}>
+                                                                <i className={`fas ${appName.toLowerCase().includes('code') || appName.toLowerCase().includes('cursor') ? 'fa-code' : appName.toLowerCase().includes('chrome') ? 'fa-globe' : appName.toLowerCase().includes('brave') ? 'fa-shield-alt' : appName.toLowerCase().includes('edge') ? 'fa-edge' : appName.toLowerCase().includes('firefox') ? 'fa-firefox' : 'fa-desktop'}`}></i>
                                                             </div>
                                                             <div className="flex flex-col gap-0.5 min-w-0 flex-1">
                                                                 <div className="flex items-center gap-2">
                                                                     <span className="font-medium text-gray-300 truncate">{appName}</span>
-                                                                    {isTaskActive && idx === 0 && (
+                                                                    {(isTaskActive || isCombinedView) && idx === 0 && (
                                                                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 animate-pulse flex-shrink-0">
-                                                                            Active
+                                                                            {isCombinedView ? 'Most Used' : 'Active'}
                                                                         </span>
                                                                     )}
                                                                 </div>
@@ -1182,6 +1468,11 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                                                                         )}
                                                                                     </div>
                                                                                     <div className="flex flex-col items-end gap-1">
+                                                                                        {urlEntry.count > 1 && (
+                                                                                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-bold">
+                                                                                                {urlEntry.count}x
+                                                                                            </span>
+                                                                                        )}
                                                                                         <span className="text-[9px] text-gray-600">
                                                                                             {urlEntry.timestamp ? new Date(urlEntry.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}
                                                                                         </span>

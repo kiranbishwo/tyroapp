@@ -28,6 +28,13 @@ declare global {
             getProjectTasksTracking: (projectId: string) => Promise<any[]>;
             getTrackingDataPath: () => Promise<{ projectRoot: string; trackingDataPath: string; exists: boolean }>;
             verifyTrackingData: (projectId?: string) => Promise<any>;
+            
+            // Combined insights
+            getCombinedInsights: () => Promise<any>;
+            subscribeCombinedInsights: () => Promise<void>;
+            unsubscribeCombinedInsights: () => Promise<void>;
+            onCombinedInsightsUpdate: (callback: (data: any) => void) => void;
+            removeCombinedInsightsListener: () => void;
             onActivityUpdate: (callback: (data: any) => void) => void;
             removeActivityListener: () => void;
             onAllWindowsUpdate: (callback: (data: any) => void) => void;

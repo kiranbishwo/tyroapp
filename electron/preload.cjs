@@ -32,6 +32,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getProjectTasksTracking: (projectId) => ipcRenderer.invoke('get-project-tasks-tracking', projectId),
   getTrackingDataPath: () => ipcRenderer.invoke('get-tracking-data-path'),
   verifyTrackingData: (projectId) => ipcRenderer.invoke('verify-tracking-data', projectId),
+  // Combined insights
+  getCombinedInsights: () => ipcRenderer.invoke('get-combined-insights'),
+  subscribeCombinedInsights: () => ipcRenderer.invoke('subscribe-combined-insights'),
+  unsubscribeCombinedInsights: () => ipcRenderer.invoke('unsubscribe-combined-insights'),
+  onCombinedInsightsUpdate: (callback) => {
+    ipcRenderer.on('combined-insights-update', (_, data) => callback(data));
+  },
+  removeCombinedInsightsListener: () => {
+    ipcRenderer.removeAllListeners('combined-insights-update');
+  },
   // Listen for activity updates
   onActivityUpdate: (callback) => {
     ipcRenderer.on('activity-update', (_, data) => callback(data));

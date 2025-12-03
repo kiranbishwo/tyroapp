@@ -1415,7 +1415,9 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
 const extractFilePathFromTitle = (title, appName) => {
   if (!title || !appName) return null;
   
-  const lowerApp = appName.toLowerCase();
+  // Ensure appName is a string
+  const appNameStr = typeof appName === 'string' ? appName : String(appName || '');
+  const lowerApp = appNameStr.toLowerCase();
   
   // Check if it's a code editor
   const isCodeEditor = lowerApp.includes('cursor') || 
@@ -1458,8 +1460,12 @@ const extractFilePathFromTitle = (title, appName) => {
 const extractUrlFromTitle = (title, appName) => {
   if (!title || !appName) return null;
   
-  const lowerTitle = title.toLowerCase();
-  const lowerApp = appName.toLowerCase();
+  // Ensure appName is a string
+  const appNameStr = typeof appName === 'string' ? appName : String(appName || '');
+  const titleStr = typeof title === 'string' ? title : String(title || '');
+  
+  const lowerTitle = titleStr.toLowerCase();
+  const lowerApp = appNameStr.toLowerCase();
   
   // First, try to extract file path from code editors
   const filePath = extractFilePathFromTitle(title, appName);
@@ -3300,6 +3306,8 @@ app.whenReady().then(async () => {
   await initStore();
   createWindow();
   createTray();
+  // Start tracking data watcher for combined insights
+  startTrackingDataWatcher();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -3612,6 +3620,389 @@ ipcMain.handle('get-project-tasks-tracking', async (event, projectId) => {
   }
 });
 
+// ==================== Combined Insights IPC Handlers ====================
+
+// File watchers for tracking data directory
+let trackingDataWatchers = new Map();
+let combinedInsightsListeners = new Set();
+
+// Function to combine all tracking JSON files
+const combineAllTrackingData = () => {
+  try {
+    const projectRoot = path.join(__dirname, '..');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    
+    if (!fs.existsSync(trackingDataPath)) {
+      return {
+        success: true,
+        totalTasks: 0,
+        totalProjects: 0,
+        combinedData: {
+          activityLogs: [],
+          screenshots: [],
+          webcamPhotos: [],
+          activeWindows: [],
+          urlHistory: [],
+          summary: {
+            totalKeystrokes: 0,
+            totalMouseClicks: 0,
+            totalTime: 0,
+            averageProductivityScore: 0
+          }
+        },
+        tasks: [],
+        projects: {}
+      };
+    }
+    
+    const combined = {
+      activityLogs: [],
+      screenshots: [],
+      webcamPhotos: [],
+      activeWindows: [], // Will be combined from all tasks
+      urlHistory: [], // Will be combined from all tasks
+      summary: {
+        totalKeystrokes: 0,
+        totalMouseClicks: 0,
+        totalTime: 0,
+        averageProductivityScore: 0
+      }
+    };
+    
+    // Map to combine activeWindows by windowKey (app + title combination)
+    const combinedWindowsMap = new Map();
+    const combinedUrlHistory = [];
+    
+    const tasks = [];
+    const projects = {};
+    let totalProductivityScores = 0;
+    let totalProductivityCount = 0;
+    
+    // Get all project directories
+    const projectDirs = fs.readdirSync(trackingDataPath).filter(item => {
+      const itemPath = path.join(trackingDataPath, item);
+      return fs.statSync(itemPath).isDirectory();
+    });
+    
+    for (const projId of projectDirs) {
+      const projectDir = path.join(trackingDataPath, projId);
+      if (!fs.existsSync(projectDir)) continue;
+      
+      const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.json'));
+      
+      if (!projects[projId]) {
+        projects[projId] = {
+          projectId: projId,
+          projectName: null,
+          taskCount: 0,
+          totalKeystrokes: 0,
+          totalMouseClicks: 0
+        };
+      }
+      
+      for (const file of files) {
+        const filePath = path.join(projectDir, file);
+        const taskId = file.replace('.json', '');
+        
+        try {
+          const fileContent = fs.readFileSync(filePath, 'utf8');
+          const data = JSON.parse(fileContent);
+          
+          if (!data.metadata || !data.trackingData) continue;
+          
+          // Get project name from first task
+          if (!projects[projId].projectName && data.metadata.projectName) {
+            projects[projId].projectName = data.metadata.projectName;
+          }
+          
+          // Combine activity logs
+          if (data.trackingData.activityLogs && Array.isArray(data.trackingData.activityLogs)) {
+            combined.activityLogs.push(...data.trackingData.activityLogs);
+          }
+          
+          // Combine screenshots
+          if (data.trackingData.screenshots && Array.isArray(data.trackingData.screenshots)) {
+            combined.screenshots.push(...data.trackingData.screenshots);
+          }
+          
+          // Combine webcam photos
+          if (data.trackingData.webcamPhotos && Array.isArray(data.trackingData.webcamPhotos)) {
+            combined.webcamPhotos.push(...data.trackingData.webcamPhotos);
+          }
+          
+          // Combine activeWindows - merge windows with same windowKey
+          if (data.trackingData.activeWindows && Array.isArray(data.trackingData.activeWindows)) {
+            data.trackingData.activeWindows.forEach((win) => {
+              const windowKey = win.windowKey || win.appName || 'Unknown';
+              
+              if (combinedWindowsMap.has(windowKey)) {
+                // Merge with existing window
+                const existing = combinedWindowsMap.get(windowKey);
+                existing.keystrokes = (existing.keystrokes || 0) + (win.keystrokes || 0);
+                existing.mouseClicks = (existing.mouseClicks || 0) + (win.mouseClicks || 0);
+                existing.timeSpent = (existing.timeSpent || 0) + (win.timeSpent || 0);
+                existing.lastSeen = Math.max(existing.lastSeen || 0, win.lastSeen || 0);
+                
+                // Merge URLs if available
+                if (win.urls && Array.isArray(win.urls)) {
+                  if (!existing.urls) existing.urls = [];
+                  win.urls.forEach((urlEntry) => {
+                    const existingUrl = existing.urls.find((u) => {
+                      if (urlEntry.url && u.url) {
+                        return u.url === urlEntry.url;
+                      } else if (urlEntry.title && u.title) {
+                        return u.title === urlEntry.title;
+                      }
+                      return false;
+                    });
+                    
+                    if (existingUrl) {
+                      existingUrl.count = (existingUrl.count || 1) + (urlEntry.count || 1);
+                      existingUrl.timestamp = Math.max(existingUrl.timestamp || 0, urlEntry.timestamp || 0);
+                    } else {
+                      existing.urls.push({
+                        url: urlEntry.url || null,
+                        title: urlEntry.title || null,
+                        timestamp: urlEntry.timestamp || Date.now(),
+                        count: urlEntry.count || 1
+                      });
+                    }
+                  });
+                }
+              } else {
+                // New window - add to map
+                combinedWindowsMap.set(windowKey, {
+                  windowKey: windowKey,
+                  appName: win.appName || win.windowKey || 'Unknown',
+                  title: win.title || win.appName || 'Unknown',
+                  keystrokes: win.keystrokes || 0,
+                  mouseClicks: win.mouseClicks || 0,
+                  timeSpent: win.timeSpent || 0,
+                  lastSeen: win.lastSeen || Date.now(),
+                  urls: win.urls ? win.urls.map((u) => ({
+                    url: u.url || null,
+                    title: u.title || null,
+                    timestamp: u.timestamp || Date.now(),
+                    count: u.count || 1
+                  })) : []
+                });
+              }
+            });
+          }
+          
+          // Combine urlHistory - deduplicate by URL
+          if (data.trackingData.urlHistory && Array.isArray(data.trackingData.urlHistory)) {
+            data.trackingData.urlHistory.forEach((urlEntry) => {
+              const urlKey = urlEntry.url || urlEntry.title || '';
+              const existing = combinedUrlHistory.find((u) => {
+                if (urlEntry.url && u.url) {
+                  return u.url === urlEntry.url;
+                } else if (urlEntry.title && u.title) {
+                  return u.title === urlEntry.title;
+                }
+                return false;
+              });
+              
+              if (!existing) {
+                combinedUrlHistory.push({
+                  url: urlEntry.url || null,
+                  title: urlEntry.title || 'Unknown',
+                  timestamp: urlEntry.timestamp || Date.now()
+                });
+              }
+            });
+          }
+          
+          // Aggregate summary
+          if (data.trackingData.summary) {
+            combined.summary.totalKeystrokes += data.trackingData.summary.totalKeystrokes || 0;
+            combined.summary.totalMouseClicks += data.trackingData.summary.totalMouseClicks || 0;
+            
+            // Calculate average productivity score
+            if (data.trackingData.activityLogs && data.trackingData.activityLogs.length > 0) {
+              const taskScores = data.trackingData.activityLogs
+                .map(log => log.productivityScore || log.compositeScore || 0)
+                .filter(score => score > 0);
+              
+              if (taskScores.length > 0) {
+                const taskAvg = taskScores.reduce((sum, s) => sum + s, 0) / taskScores.length;
+                totalProductivityScores += taskAvg;
+                totalProductivityCount++;
+              }
+            }
+          }
+          
+          // Add to projects summary
+          projects[projId].taskCount++;
+          projects[projId].totalKeystrokes += data.trackingData.summary?.totalKeystrokes || 0;
+          projects[projId].totalMouseClicks += data.trackingData.summary?.totalMouseClicks || 0;
+          
+          // Add task info
+          tasks.push({
+            taskId: taskId,
+            projectId: projId,
+            taskName: data.metadata.taskName || 'Unknown Task',
+            projectName: data.metadata.projectName || 'Unknown Project',
+            createdAt: data.metadata.createdAt,
+            lastUpdated: data.metadata.lastUpdated,
+            summary: data.trackingData.summary,
+            activityLogCount: data.trackingData.activityLogs?.length || 0,
+            screenshotCount: data.trackingData.screenshots?.length || 0,
+            webcamPhotoCount: data.trackingData.webcamPhotos?.length || 0
+          });
+        } catch (error) {
+          console.error(`[COMBINED-INSIGHTS] Error reading file ${file}:`, error.message);
+        }
+      }
+    }
+    
+    // Calculate average productivity score
+    if (totalProductivityCount > 0) {
+      combined.summary.averageProductivityScore = Math.round(totalProductivityScores / totalProductivityCount);
+    }
+    
+    // Calculate total time from activity logs
+    if (combined.activityLogs.length > 0) {
+      const sortedLogs = combined.activityLogs.sort((a, b) => 
+        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+      );
+      const firstLog = sortedLogs[0];
+      const lastLog = sortedLogs[sortedLogs.length - 1];
+      const startTime = new Date(firstLog.timestamp).getTime();
+      const endTime = new Date(lastLog.timestamp).getTime();
+      combined.summary.totalTime = Math.floor((endTime - startTime) / 1000); // in seconds
+    }
+    
+    // Convert combinedWindowsMap to array and sort by timeSpent
+    combined.activeWindows = Array.from(combinedWindowsMap.values())
+      .sort((a, b) => (b.timeSpent || 0) - (a.timeSpent || 0));
+    
+    // Sort urlHistory by timestamp (newest first)
+    combined.urlHistory = combinedUrlHistory.sort((a, b) => 
+      (b.timestamp || 0) - (a.timestamp || 0)
+    );
+    
+    // Sort tasks by lastUpdated (newest first)
+    tasks.sort((a, b) => {
+      const aTime = a.lastUpdated ? new Date(a.lastUpdated).getTime() : 0;
+      const bTime = b.lastUpdated ? new Date(b.lastUpdated).getTime() : 0;
+      return bTime - aTime;
+    });
+    
+    return {
+      success: true,
+      totalTasks: tasks.length,
+      totalProjects: Object.keys(projects).length,
+      combinedData: combined,
+      tasks: tasks,
+      projects: projects,
+      lastUpdated: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('[COMBINED-INSIGHTS] Error combining tracking data:', error);
+    return {
+      success: false,
+      error: error.message,
+      totalTasks: 0,
+      totalProjects: 0,
+      combinedData: {
+        activityLogs: [],
+        screenshots: [],
+        webcamPhotos: [],
+        activeWindows: [],
+        urlHistory: [],
+        summary: {
+          totalKeystrokes: 0,
+          totalMouseClicks: 0,
+          totalTime: 0,
+          averageProductivityScore: 0
+        }
+      },
+      tasks: [],
+      projects: {}
+    };
+  }
+};
+
+// Get combined insights from all tracking files
+ipcMain.handle('get-combined-insights', async () => {
+  return combineAllTrackingData();
+});
+
+// Start watching tracking data directory for changes
+const startTrackingDataWatcher = () => {
+  try {
+    const projectRoot = path.join(__dirname, '..');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    
+    if (!fs.existsSync(trackingDataPath)) {
+      // Create directory if it doesn't exist
+      fs.mkdirSync(trackingDataPath, { recursive: true });
+    }
+    
+    // Watch the entire tracking-data directory recursively
+    const watcher = fs.watch(trackingDataPath, { recursive: true }, (eventType, filename) => {
+      if (filename && filename.endsWith('.json')) {
+        if (isDev) {
+          console.log(`[COMBINED-INSIGHTS] File ${eventType}: ${filename}`);
+        }
+        
+        // Debounce updates (wait 500ms after last change)
+        if (trackingDataWatchers.has('debounceTimer')) {
+          clearTimeout(trackingDataWatchers.get('debounceTimer'));
+        }
+        
+        const debounceTimer = setTimeout(() => {
+          const combinedData = combineAllTrackingData();
+          
+          // Notify all listeners
+          combinedInsightsListeners.forEach(listener => {
+            if (listener && !listener.isDestroyed()) {
+              listener.send('combined-insights-update', combinedData);
+            }
+          });
+        }, 500);
+        
+        trackingDataWatchers.set('debounceTimer', debounceTimer);
+      }
+    });
+    
+    trackingDataWatchers.set('mainWatcher', watcher);
+    
+    if (isDev) {
+      console.log('[COMBINED-INSIGHTS] Started watching tracking-data directory');
+    }
+  } catch (error) {
+    console.error('[COMBINED-INSIGHTS] Error starting file watcher:', error);
+  }
+};
+
+// Register listener for combined insights updates
+ipcMain.handle('subscribe-combined-insights', (event) => {
+  combinedInsightsListeners.add(event.sender);
+  
+  // Send initial data
+  const combinedData = combineAllTrackingData();
+  event.sender.send('combined-insights-update', combinedData);
+  
+  // Start watcher if not already started
+  if (!trackingDataWatchers.has('mainWatcher')) {
+    startTrackingDataWatcher();
+  }
+  
+  // Cleanup when renderer is destroyed
+  event.sender.on('destroyed', () => {
+    combinedInsightsListeners.delete(event.sender);
+  });
+});
+
+// Unsubscribe from combined insights updates
+ipcMain.handle('unsubscribe-combined-insights', (event) => {
+  combinedInsightsListeners.delete(event.sender);
+});
+
+// ==================== End Combined Insights IPC Handlers ====================
+
 // ==================== End Task Tracking IPC Handlers ====================
 
 // Cleanup on quit
@@ -3683,6 +4074,16 @@ app.on('will-quit', () => {
   // Clear all pending save timers
   saveTimers.forEach(timer => clearTimeout(timer));
   saveTimers.clear();
+  
+  // Cleanup combined insights watchers
+  if (trackingDataWatchers.has('debounceTimer')) {
+    clearTimeout(trackingDataWatchers.get('debounceTimer'));
+  }
+  if (trackingDataWatchers.has('mainWatcher')) {
+    trackingDataWatchers.get('mainWatcher').close();
+  }
+  trackingDataWatchers.clear();
+  combinedInsightsListeners.clear();
   
   // Cleanup tracking
   try {
