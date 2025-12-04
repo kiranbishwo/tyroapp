@@ -1363,8 +1363,8 @@ function createWindow() {
   }
 
   mainWindow = new BrowserWindow({
-    width: 400,
-    height: 800,
+    width: 1024,
+    height: 768,
     frame: false, // Remove default title bar
     titleBarStyle: 'hidden',
     backgroundColor: '#000000',
@@ -1376,7 +1376,7 @@ function createWindow() {
       webSecurity: true
     },
     resizable: true,
-    minWidth: 350,
+    minWidth: 768,
     minHeight: 600,
     show: false // Don't show until ready
   });

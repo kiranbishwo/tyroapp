@@ -136,29 +136,29 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
 
     return (
         <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
-            <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl flex flex-col overflow-hidden border-x border-gray-800 mx-auto h-screen">
+            <div className="w-full max-w-6xl bg-gray-900 shadow-2xl flex flex-col overflow-hidden border-x border-gray-800 mx-auto h-screen">
                 {/* Header */}
-                <header className="bg-gray-800 p-4 flex items-center justify-between shadow-md">
-                    <h2 className="text-xl font-bold text-white">Settings</h2>
+                <header className="bg-gray-800 p-3 sm:p-4 flex items-center justify-between shadow-md">
+                    <h2 className="text-lg sm:text-xl font-bold text-white">Settings</h2>
                     <button
                         onClick={onClose}
-                        className="w-8 h-8 rounded-full bg-gray-700 hover:bg-gray-600 text-white flex items-center justify-center transition-colors"
+                        className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gray-700 hover:bg-gray-600 text-white flex items-center justify-center transition-colors"
                     >
-                        <i className="fas fa-times text-sm"></i>
+                        <i className="fas fa-times text-xs sm:text-sm"></i>
                     </button>
                 </header>
 
                 {/* Content */}
-                <main className="flex-1 overflow-y-auto p-4 custom-scrollbar space-y-6">
+                <main className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 custom-scrollbar space-y-4 sm:space-y-6">
                     {/* Tracking Settings */}
                     <section>
-                        <h3 className="text-white font-semibold text-sm mb-3">Tracking Settings</h3>
-                        <div className="space-y-3">
+                        <h3 className="text-white font-semibold text-xs sm:text-sm mb-2 sm:mb-3">Tracking Settings</h3>
+                        <div className="space-y-2 sm:space-y-3">
                             {/* Enable Screenshots */}
-                            <div className="bg-gray-800 rounded-lg p-3 flex items-center justify-between">
-                                <div className="flex-1">
-                                    <label className="text-white text-sm font-medium">Enable Screenshots</label>
-                                    <p className="text-gray-400 text-xs mt-1">Capture screenshots during activity tracking</p>
+                            <div className="bg-gray-800 rounded-lg p-2.5 sm:p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0">
+                                <div className="flex-1 min-w-0">
+                                    <label className="text-white text-xs sm:text-sm font-medium">Enable Screenshots</label>
+                                    <p className="text-gray-400 text-[10px] sm:text-xs mt-1">Capture screenshots during activity tracking</p>
                                 </div>
                                 <label className="relative inline-flex items-center cursor-pointer">
                                     <input
@@ -172,10 +172,10 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
                             </div>
 
                             {/* Enable URL Tracking */}
-                            <div className="bg-gray-800 rounded-lg p-3 flex items-center justify-between">
-                                <div className="flex-1">
-                                    <label className="text-white text-sm font-medium">Enable URL Tracking</label>
-                                    <p className="text-gray-400 text-xs mt-1">Track website URLs when browsing</p>
+                            <div className="bg-gray-800 rounded-lg p-2.5 sm:p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0">
+                                <div className="flex-1 min-w-0">
+                                    <label className="text-white text-xs sm:text-sm font-medium">Enable URL Tracking</label>
+                                    <p className="text-gray-400 text-[10px] sm:text-xs mt-1">Track website URLs when browsing</p>
                                 </div>
                                 <label className="relative inline-flex items-center cursor-pointer">
                                     <input
@@ -189,10 +189,10 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
                             </div>
 
                             {/* Enable Screenshot Blur */}
-                            <div className="bg-gray-800 rounded-lg p-3 flex items-center justify-between">
-                                <div className="flex-1">
-                                    <label className="text-white text-sm font-medium">Blur Screenshots</label>
-                                    <p className="text-gray-400 text-xs mt-1">Apply blur to screenshots for privacy</p>
+                            <div className="bg-gray-800 rounded-lg p-2.5 sm:p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0">
+                                <div className="flex-1 min-w-0">
+                                    <label className="text-white text-xs sm:text-sm font-medium">Blur Screenshots</label>
+                                    <p className="text-gray-400 text-[10px] sm:text-xs mt-1">Apply blur to screenshots for privacy</p>
                                 </div>
                                 <label className="relative inline-flex items-center cursor-pointer">
                                     <input

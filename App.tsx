@@ -97,6 +97,11 @@ const App: React.FC = () => {
     // Track accumulated time per task (taskId -> total seconds)
     const [taskAccumulatedTime, setTaskAccumulatedTime] = useState<Record<string, number>>({});
     
+    // Status State
+    type UserStatus = 'idle' | 'working' | 'break' | 'meeting' | 'away';
+    const [userStatus, setUserStatus] = useState<UserStatus>('idle');
+    const [showStatusMenu, setShowStatusMenu] = useState(false);
+    
     // Today's tasks (for restoration and continuation)
     const [todayTasks, setTodayTasks] = useState<Array<{
         projectId: string;
@@ -122,7 +127,7 @@ const App: React.FC = () => {
     const currentTaskName = currentTask?.name;
     const currentProjectName = currentProject?.name;
 
-    // Surveillance Hook - Only active if user has consented
+    // Surveillance Hook - Only active if user has consented AND status is working
     const { 
         cameraStream, 
         activityLogs, 
@@ -132,7 +137,7 @@ const App: React.FC = () => {
         idleInfo,
         onIdleDecision
     } = useSurveillance({ 
-        isTimerRunning: isTimerRunning && userConsent === true, // Block tracking without consent
+        isTimerRunning: isTimerRunning && userConsent === true && userStatus === 'working', // Block tracking without consent or if status is not working
         currentProjectId: selectedProjectId,
         currentTaskId: selectedTaskId || undefined,
         currentTaskName: currentTaskName,
@@ -430,7 +435,7 @@ const App: React.FC = () => {
     
     // Dev mode: Periodic capture every 1 minute (60 seconds)
     useEffect(() => {
-        if (isDevMode && isTimerRunning) {
+        if (isDevMode && isTimerRunning && userStatus === 'working') {
             console.log('Dev mode: Starting periodic capture every 1 minute');
             
             // Create initial log if none exists (for immediate capture)
@@ -525,13 +530,13 @@ const App: React.FC = () => {
                 devCaptureIntervalRef.current = null;
             }
         }
-    }, [isDevMode, isTimerRunning, activityLogs.length, selectedProjectId]);
+    }, [isDevMode, isTimerRunning, userStatus, activityLogs.length, selectedProjectId]);
     
     // Track if capture is in progress to prevent duplicate captures
     const captureInProgressRef = useRef<boolean>(false);
     
     useEffect(() => {
-        if (activityLogs.length > 0 && isTimerRunning && selectedTaskId) {
+        if (activityLogs.length > 0 && isTimerRunning && selectedTaskId && userStatus === 'working') {
             // Find the latest log that belongs to the CURRENT task
             // This ensures media is only attached to logs for the active task
             const latestLogForCurrentTask = activityLogs.find(log => 
@@ -1026,7 +1031,7 @@ const App: React.FC = () => {
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activityLogs, isTimerRunning, selectedTaskId, selectedProjectId, settings?.enableScreenshotBlur, settings?.enableScreenshots, cameraStream]); // Use activityLogs directly to detect new logs
+    }, [activityLogs, isTimerRunning, userStatus, selectedTaskId, selectedProjectId, settings?.enableScreenshotBlur, settings?.enableScreenshots, cameraStream]); // Use activityLogs directly to detect new logs
 
     const formatTime = (totalSeconds: number) => {
         const h = Math.floor(totalSeconds / 3600);
@@ -1102,6 +1107,9 @@ const App: React.FC = () => {
             // Keep elapsedSeconds showing the accumulated total (don't reset to 0)
             // It will be recalculated when timer restarts
             
+            // Set status to 'idle' when timer stops
+            setUserStatus('idle');
+            
             // No longer saving active task state - all data comes from task JSON files
         } else {
             // Validate task is selected before starting
@@ -1148,31 +1156,51 @@ const App: React.FC = () => {
             const newStartTime = Date.now();
             setStartTime(newStartTime);
             setIsTimerRunning(true);
+            // Set status to 'working' when task starts
+            setUserStatus('working');
             // Camera will be started only when needed for capture, not always
             
             // No longer saving active task state - all data comes from task JSON files
         }
     };
 
+    // Watch userStatus changes - pause timer if status changes to non-working
+    const previousStatusRef = useRef<UserStatus>(userStatus);
+    useEffect(() => {
+        // Only pause if timer is running, status changed from 'working' to non-working (break/meeting/away)
+        // Don't pause if status is 'idle' (that's set automatically when timer stops)
+        if (isTimerRunning && previousStatusRef.current === 'working' && userStatus !== 'working' && userStatus !== 'idle') {
+            // Status changed from working to non-working while timer is running - pause the task
+            console.log(`Status changed from ${previousStatusRef.current} to ${userStatus} - pausing task`);
+            toggleTimer();
+        }
+        // Update previous status
+        previousStatusRef.current = userStatus;
+    }, [userStatus]); // Only watch userStatus changes
+
     const handleFaceConfirmed = async (photoData: string) => {
         if (!user) return;
         
         if (user.isCheckedIn) {
-            // Check Out - stop task if running
+            // Check Out - stop task if running, pause tracking, set to idle
             if (isTimerRunning) {
                 await toggleTimer();
                 // Wait a moment for the task to stop and save
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
             
+            // Stop tracking and set status to idle
+            stopCamera();
+            setUserStatus('idle');
+            
             setUser({ ...user, isCheckedIn: false, checkInTime: undefined });
-            stopCamera(); // Turn off camera
             setView(AppView.LOGIN);
         } else {
             // Check In
             setUser({ ...user, isCheckedIn: true, checkInTime: new Date() });
             // Don't keep camera running - we'll open it only when needed for captures
             stopCamera();
+            // Status remains 'idle' until user starts a task
             setView(AppView.DASHBOARD);
         }
     };
@@ -1216,7 +1244,7 @@ const App: React.FC = () => {
                 <TitleBar />
                 <div className="flex-1 flex items-center justify-center p-4">
                     {hiddenElements}
-                    <div className="w-full max-w-[400px] bg-gray-900 rounded-2xl shadow-2xl p-8 border border-gray-800">
+                    <div className="w-full max-w-md bg-gray-900 rounded-2xl shadow-2xl p-8 border border-gray-800 mx-auto">
                     <div className="text-center mb-8">
                         <div className="w-16 h-16 bg-blue-600 rounded-xl mx-auto flex items-center justify-center mb-4 shadow-lg shadow-blue-500/30">
                             <i className="fas fa-bolt text-2xl text-white"></i>
@@ -1256,9 +1284,9 @@ const App: React.FC = () => {
         return (
             <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
                 <TitleBar />
-                <div className="flex-1 flex justify-center">
+                <div className="flex-1 flex justify-center p-2 sm:p-4">
                     {hiddenElements}
-                    <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden relative border-x border-gray-800">
+                    <div className="w-full max-w-7xl bg-gray-900 shadow-2xl overflow-hidden relative border-x border-gray-800 mx-auto">
                     <FaceAttendance 
                         mode={user?.isCheckedIn ? 'CHECK_OUT' : 'CHECK_IN'}
                         existingStream={cameraStream}
@@ -1287,7 +1315,7 @@ const App: React.FC = () => {
                 <TitleBar />
                 <div className="flex-1 flex justify-center">
                     {hiddenElements}
-                    <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden flex flex-col border-x border-gray-800">
+                    <div className="w-full max-w-7xl bg-gray-900 shadow-2xl overflow-hidden flex flex-col border-x border-gray-800 mx-auto">
                     <InsightsDashboard 
                         logs={activityLogs}
                         projects={projects}
@@ -1321,7 +1349,7 @@ const App: React.FC = () => {
                 <TitleBar />
                 <div className="flex-1 flex justify-center">
                     {hiddenElements}
-                    <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl overflow-hidden flex flex-col border-x border-gray-800">
+                    <div className="w-full max-w-7xl bg-gray-900 shadow-2xl overflow-hidden flex flex-col border-x border-gray-800 mx-auto">
                     <ScreenLogger 
                         onClose={() => setView(AppView.DASHBOARD)}
                         onCapture={(shot) => console.log(shot)}
@@ -1373,47 +1401,162 @@ const App: React.FC = () => {
             <TitleBar />
             <div className="flex-1 flex justify-center">
                 {hiddenElements}
-                <div className="w-full max-w-[400px] bg-gray-900 shadow-2xl flex flex-col overflow-hidden border-x border-gray-800 relative">
+                <div className="w-full max-w-7xl bg-gray-900 shadow-2xl flex flex-col overflow-hidden border-x border-gray-800 relative mx-auto">
                 
                 {/* Header */}
-                <header className="bg-gray-800 p-4 flex justify-between items-center shadow-md z-10">
-                    <div className="flex items-center gap-3">
-                        <div className="relative">
-                            <img src={user?.avatar} alt="User" className="w-8 h-8 rounded-full border border-gray-600" />
-                            <div className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-gray-800 ${isTimerRunning ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
+                <header className="bg-gray-800 px-3 sm:px-4 md:px-6 py-3 md:py-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-0 shadow-md z-10">
+                    <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto">
+                        <div className="relative flex-shrink-0">
+                            <img src={user?.avatar} alt="User" className="w-7 h-7 sm:w-8 sm:h-8 rounded-full border border-gray-600" />
+                            <div className={`absolute bottom-0 right-0 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full border-2 border-gray-800 ${isTimerRunning ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
                         </div>
-                        <div className="flex flex-col">
-                            <span className="text-sm font-semibold text-gray-200 leading-tight">{user?.name}</span>
-                            <span className="text-[10px] text-gray-500 uppercase font-bold">{isTimerRunning ? 'Tracking' : 'Idle'}</span>
+                        <div className="flex flex-col min-w-0 flex-1 sm:flex-initial">
+                            <span className="text-xs sm:text-sm font-semibold text-gray-200 leading-tight truncate">{user?.name}</span>
+                            <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
+                                <span className="text-[9px] sm:text-[10px] text-gray-500 uppercase font-bold">{isTimerRunning ? 'Tracking' : 'Idle'}</span>
+                                <span className="text-[7px] sm:text-[8px] text-gray-600">•</span>
+                                <span className={`text-[9px] sm:text-[10px] uppercase font-bold ${
+                                    userStatus === 'working' ? 'text-green-400' :
+                                    userStatus === 'break' ? 'text-yellow-400' :
+                                    userStatus === 'meeting' ? 'text-blue-400' :
+                                    userStatus === 'away' ? 'text-purple-400' :
+                                    'text-gray-400'
+                                }`}>
+                                    {userStatus}
+                                </span>
+                            </div>
                         </div>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-1.5 sm:gap-2 w-full sm:w-auto justify-end">
+                        {/* Status Button - First */}
+                        <div className="relative">
+                            <button
+                                onClick={() => setShowStatusMenu(!showStatusMenu)}
+                                className={`px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg text-[10px] sm:text-xs font-medium transition-all flex items-center gap-1 sm:gap-2 ${
+                                    userStatus === 'working' ? 'bg-green-500/20 hover:bg-green-500/30 text-green-400 border border-green-500/30' :
+                                    userStatus === 'break' ? 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 border border-yellow-500/30' :
+                                    userStatus === 'meeting' ? 'bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/30' :
+                                    userStatus === 'away' ? 'bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 border border-purple-500/30' :
+                                    'bg-gray-500/20 hover:bg-gray-500/30 text-gray-400 border border-gray-500/30'
+                                }`}
+                                title={`Status: ${userStatus.charAt(0).toUpperCase() + userStatus.slice(1)}`}
+                            >
+                                <i className={`fas ${
+                                    userStatus === 'working' ? 'fa-briefcase' :
+                                    userStatus === 'break' ? 'fa-coffee' :
+                                    userStatus === 'meeting' ? 'fa-users' :
+                                    userStatus === 'away' ? 'fa-moon' :
+                                    'fa-pause-circle'
+                                } text-[9px] sm:text-[10px]`}></i>
+                                <span className="capitalize hidden sm:inline">{userStatus}</span>
+                                <i className="fas fa-chevron-down text-[7px] sm:text-[8px]"></i>
+                            </button>
+                            
+                            {/* Status Dropdown Menu */}
+                            {showStatusMenu && (
+                                <>
+                                    <div 
+                                        className="fixed inset-0 z-40" 
+                                        onClick={() => setShowStatusMenu(false)}
+                                    ></div>
+                                    <div className="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-lg shadow-xl border border-gray-700 z-50 overflow-hidden">
+                                        <div className="p-1">
+                                            {/* Idle status - disabled, shown for reference */}
+                                            <div className="w-full px-3 py-2 rounded-md text-xs font-medium flex items-center gap-2 text-left opacity-50 cursor-not-allowed bg-gray-500/10 text-gray-500 border border-gray-700/50">
+                                                <i className="fas fa-pause-circle text-[10px] w-4"></i>
+                                                <span className="capitalize">Idle</span>
+                                                {userStatus === 'idle' && (
+                                                    <i className="fas fa-check text-[8px] ml-auto"></i>
+                                                )}
+                                                <span className="text-[8px] text-gray-600 ml-auto">(Auto)</span>
+                                            </div>
+                                            
+                                            {/* Working status - disabled, only active when timer is running */}
+                                            <div className={`w-full px-3 py-2 rounded-md text-xs font-medium flex items-center gap-2 text-left ${
+                                                isTimerRunning && userStatus === 'working'
+                                                    ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                                                    : 'opacity-50 cursor-not-allowed bg-gray-500/10 text-gray-500 border border-gray-700/50'
+                                            }`}>
+                                                <i className="fas fa-briefcase text-[10px] w-4"></i>
+                                                <span className="capitalize">Working</span>
+                                                {isTimerRunning && userStatus === 'working' && (
+                                                    <i className="fas fa-check text-[8px] ml-auto"></i>
+                                                )}
+                                                <span className="text-[8px] text-gray-600 ml-auto">(Auto)</span>
+                                            </div>
+                                            
+                                            {/* Selectable statuses - only break, meeting, away */}
+                                            {(['break', 'meeting', 'away'] as UserStatus[]).map((status) => (
+                                                <button
+                                                    key={status}
+                                                    onClick={async () => {
+                                                        // If changing to non-working status and timer is running, pause it first
+                                                        if (isTimerRunning) {
+                                                            await toggleTimer();
+                                                            // Wait a moment for the task to stop and save
+                                                            await new Promise(resolve => setTimeout(resolve, 300));
+                                                        }
+                                                        setUserStatus(status);
+                                                        setShowStatusMenu(false);
+                                                    }}
+                                                    className={`w-full px-3 py-2 rounded-md text-xs font-medium transition-all flex items-center gap-2 text-left ${
+                                                        userStatus === status
+                                                            ? status === 'break' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                              status === 'meeting' ? 'bg-blue-500/20 text-blue-400' :
+                                                              'bg-purple-500/20 text-purple-400'
+                                                            : 'text-gray-300 hover:bg-gray-700'
+                                                    }`}
+                                                >
+                                                    <i className={`fas ${
+                                                        status === 'break' ? 'fa-coffee' :
+                                                        status === 'meeting' ? 'fa-users' :
+                                                        'fa-moon'
+                                                    } text-[10px] w-4`}></i>
+                                                    <span className="capitalize">{status}</span>
+                                                    {userStatus === status && (
+                                                        <i className="fas fa-check text-[8px] ml-auto"></i>
+                                                    )}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                        
+                        {/* Combined Insights Button - Second */}
                         <button 
                             onClick={() => setShowCombinedInsights(true)}
-                            className="w-8 h-8 rounded-full bg-blue-900/30 hover:bg-blue-900/50 text-blue-400 flex items-center justify-center transition-colors"
+                            className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-blue-900/30 hover:bg-blue-900/50 text-blue-400 flex items-center justify-center transition-colors"
                             title="Combined Insights"
                         >
-                            <i className="fas fa-chart-pie text-xs"></i>
+                            <i className="fas fa-chart-pie text-[10px] sm:text-xs"></i>
                         </button>
-                        <button 
-                            onClick={() => setView(AppView.SETTINGS)}
-                            className="w-8 h-8 rounded-full bg-gray-700 hover:bg-gray-600 text-gray-300 flex items-center justify-center transition-colors"
-                            title="Settings"
-                        >
-                            <i className="fas fa-cog text-xs"></i>
-                        </button>
+                        
+                        {/* Productivity Insights Button - Third */}
                         <button 
                             onClick={() => {
                                 setInsightsTaskFilter(undefined); // Clear filter to show all
                                 setInsightsProjectFilter(undefined);
                                 setView(AppView.INSIGHTS);
                             }}
-                            className="w-8 h-8 rounded-full bg-blue-900/30 hover:bg-blue-900/50 text-blue-400 flex items-center justify-center transition-colors relative"
+                            className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-blue-900/30 hover:bg-blue-900/50 text-blue-400 flex items-center justify-center transition-colors relative"
                             title="Productivity Insights"
                         >
-                             <i className="fas fa-chart-bar text-xs"></i>
-                             {activityLogs.length > 0 && <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full"></span>}
+                             <i className="fas fa-chart-bar text-[10px] sm:text-xs"></i>
+                             {activityLogs.length > 0 && <span className="absolute top-0 right-0 w-1.5 h-1.5 sm:w-2 sm:h-2 bg-red-500 rounded-full"></span>}
                         </button>
+                        
+                        {/* Settings Button - Fourth */}
+                        <button 
+                            onClick={() => setView(AppView.SETTINGS)}
+                            className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gray-700 hover:bg-gray-600 text-gray-300 flex items-center justify-center transition-colors"
+                            title="Settings"
+                        >
+                            <i className="fas fa-cog text-[10px] sm:text-xs"></i>
+                        </button>
+                        
+                        {/* Logout/Check Out Button - Last */}
                         <button 
                             onClick={async () => {
                                 // If timer is running, stop the task first
@@ -1424,25 +1567,25 @@ const App: React.FC = () => {
                                 }
                                 setView(AppView.CHECK_IN_OUT);
                             }}
-                            className="w-8 h-8 rounded-full bg-red-900/30 hover:bg-red-900/50 text-red-400 flex items-center justify-center transition-colors"
+                            className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-red-900/30 hover:bg-red-900/50 text-red-400 flex items-center justify-center transition-colors"
                             title="Check Out"
                         >
-                            <i className="fas fa-power-off text-xs"></i>
+                            <i className="fas fa-power-off text-[10px] sm:text-xs"></i>
                         </button>
                     </div>
                 </header>
 
                 {/* Main Content */}
-                <main className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                <main className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 custom-scrollbar">
                     
                     {/* Timer Widget */}
-                    <div className="bg-gradient-to-br from-gray-800 to-gray-850 rounded-xl p-4 shadow-lg mb-6 border border-gray-700/50 relative overflow-hidden">
+                    <div className="bg-gradient-to-br from-gray-800 to-gray-850 rounded-xl p-4 sm:p-5 md:p-6 shadow-lg mb-4 sm:mb-6 border border-gray-700/50 relative overflow-hidden max-w-6xl mx-auto">
                         {/* Glow effect when running */}
                         {isTimerRunning && <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-blue-500 animate-gradient"></div>}
                         
                         {!isTimerRunning && !selectedProjectId && (
                             /* Step 1: Project Selection with Resume Option */
-                            <div>
+                            <div className="max-w-5xl mx-auto w-full">
                                 {/* Resume Last Task Section */}
                                 {(() => {
                                     // Get the most recent time entry with a task
@@ -1561,7 +1704,7 @@ const App: React.FC = () => {
                                             </h3>
                                             <p className="text-gray-500 text-xs">Select a task to continue where you left off</p>
                                         </div>
-                                        <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[400px] overflow-y-auto custom-scrollbar">
                                             {todayTasks.map((task) => {
                                                 const project = projects.find(p => p.id === task.projectId);
                                                 const hours = Math.floor(task.totalTime / 3600);
@@ -1597,7 +1740,7 @@ const App: React.FC = () => {
                                                                 }
                                                             }
                                                         }}
-                                                        className="w-full p-3 rounded-lg border border-gray-700 hover:border-gray-600 bg-gray-900/50 hover:bg-gray-900 transition-all text-left group"
+                                                        className="p-4 rounded-lg border border-gray-700 hover:border-gray-600 bg-gray-900/50 hover:bg-gray-900 transition-all text-left group"
                                                         style={{
                                                             borderColor: selectedTaskId === task.taskId ? (project?.color || '#60A5FA') : undefined,
                                                             backgroundColor: selectedTaskId === task.taskId ? `${project?.color || '#60A5FA'}15` : undefined
@@ -1639,8 +1782,8 @@ const App: React.FC = () => {
                                 )}
 
                                 <div className="mb-4">
-                                    <h3 className="text-white text-sm font-semibold mb-3">Select Project</h3>
-                                    <div className="grid grid-cols-2 gap-2">
+                                    <h3 className="text-white text-xs sm:text-sm font-semibold mb-2 sm:mb-3">Select Project</h3>
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 sm:gap-3">
                                         {projects.map(project => (
                                             <button
                                                 key={project.id}
@@ -1673,7 +1816,7 @@ const App: React.FC = () => {
 
                         {!isTimerRunning && selectedProjectId && showTaskSelection && (
                             /* Step 2: Task Selection */
-                            <div>
+                            <div className="max-w-5xl mx-auto w-full">
                                 <div className="mb-4">
                                     <div className="flex items-center justify-between mb-3">
                                         <div className="flex items-center gap-2">
@@ -1739,18 +1882,18 @@ const App: React.FC = () => {
 
                         {/* Timer Display (when task is selected or timer is running) */}
                         {(isTimerRunning || (selectedTaskId && !showTaskSelection)) && (
-                            <div>
-                                <div className="mb-4">
+                            <div className="max-w-4xl mx-auto w-full">
+                                <div className="mb-3 sm:mb-4">
                                     <div className="flex items-center gap-2 mb-2">
                                         <span 
-                                            className="w-2 h-2 rounded-full" 
+                                            className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full flex-shrink-0" 
                                             style={{ background: projects.find(p => p.id === selectedProjectId)?.color || '#60A5FA' }}
                                         ></span>
-                                        <span className="text-gray-400 text-xs">
+                                        <span className="text-gray-400 text-[10px] sm:text-xs truncate">
                                             {projects.find(p => p.id === selectedProjectId)?.name}
                                         </span>
                                     </div>
-                                    <p className="text-white text-base font-medium mb-1">
+                                    <p className="text-white text-sm sm:text-base font-medium mb-1 truncate">
                                         {(() => {
                                             const task = MOCK_TASKS.find(t => t.id === selectedTaskId);
                                             return task?.name || description || 'No task selected';
@@ -1781,7 +1924,7 @@ const App: React.FC = () => {
                                     })()}
                                 </div>
                                 
-                                <div className="flex justify-between items-center mb-4">
+                                <div className="flex justify-between items-center mb-3 sm:mb-4 gap-2">
                                     <button
                                         onClick={() => {
                                             if (!isTimerRunning) {
@@ -1791,12 +1934,12 @@ const App: React.FC = () => {
                                                 setShowTaskSelection(false);
                                             }
                                         }}
-                                        className="text-gray-400 hover:text-white text-xs transition-colors"
+                                        className="text-gray-400 hover:text-white text-[10px] sm:text-xs transition-colors flex-shrink-0"
                                         disabled={isTimerRunning}
                                     >
-                                        {!isTimerRunning && <><i className="fas fa-arrow-left mr-1"></i> Change</>}
+                                        {!isTimerRunning && <><i className="fas fa-arrow-left mr-1"></i> <span className="hidden sm:inline">Change</span></>}
                                     </button>
-                                    <div className="text-3xl font-mono text-white tracking-widest font-light">
+                                    <div className="text-2xl sm:text-3xl md:text-4xl font-mono text-white tracking-widest font-light text-center flex-1">
                                         {(() => {
                                             if (isTimerRunning) {
                                                 // When running, show live timer (accumulated + current session)
@@ -1829,20 +1972,20 @@ const App: React.FC = () => {
                                 
                                 <button 
                                     onClick={toggleTimer}
-                                    className={`w-full py-3 rounded-lg font-bold text-white shadow-lg transition-all active:scale-95 flex justify-center items-center gap-2 ${
+                                    className={`w-full py-2.5 sm:py-3 rounded-lg font-bold text-white shadow-lg transition-all active:scale-95 flex justify-center items-center gap-2 text-sm sm:text-base ${
                                         isTimerRunning 
                                         ? 'bg-red-500 hover:bg-red-600 shadow-red-500/20' 
                                         : 'bg-blue-600 hover:bg-blue-500 shadow-blue-500/20'
                                     }`}
                                 >
                                     {isTimerRunning ? (
-                                        <><i className="fas fa-stop"></i> STOP</>
+                                        <><i className="fas fa-stop text-xs sm:text-sm"></i> <span>STOP</span></>
                                     ) : (
-                                        <><i className="fas fa-play"></i> {(() => {
+                                        <><i className="fas fa-play text-xs sm:text-sm"></i> <span>{(() => {
                                             if (!selectedTaskId) return 'START';
                                             const accumulated = taskAccumulatedTime[selectedTaskId] || 0;
                                             return accumulated > 0 ? 'RESUME' : 'START';
-                                        })()}</>
+                                        })()}</span></>
                                     )}
                                 </button>
                             </div>
@@ -1851,12 +1994,12 @@ const App: React.FC = () => {
 
                     {/* Time Entries List */}
                     <div>
-                        <h3 className="text-gray-400 text-xs font-bold uppercase tracking-wider mb-3">Today</h3>
-                        <div className="space-y-3 pb-4">
+                        <h3 className="text-gray-400 text-[10px] sm:text-xs font-bold uppercase tracking-wider mb-3 sm:mb-4">Today</h3>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4 pb-4">
                             {timeEntries.length === 0 && (
-                                <div className="text-center py-8 text-gray-600 bg-gray-900/50 rounded-lg border border-gray-800 border-dashed">
-                                    <i className="far fa-clock text-2xl mb-2 block opacity-50"></i>
-                                    <span className="text-xs">No entries yet. Start tracking!</span>
+                                <div className="col-span-full text-center py-12 text-gray-600 bg-gray-900/50 rounded-lg border border-gray-800 border-dashed">
+                                    <i className="far fa-clock text-3xl mb-3 block opacity-50"></i>
+                                    <span className="text-sm">No entries yet. Start tracking!</span>
                                 </div>
                             )}
                             {(() => {
@@ -1923,56 +2066,56 @@ const App: React.FC = () => {
                                     return (
                                         <div 
                                             key={group.taskId || group.description || index} 
-                                            className={`bg-gray-800 rounded-lg p-3 border-l-4 border-gray-700 group hover:bg-gray-750 transition-colors ${
+                                            className={`bg-gray-800 rounded-lg p-3 sm:p-4 border-l-4 border-gray-700 group hover:bg-gray-750 transition-colors ${
                                                 isCurrentlyRunning ? 'ring-2 ring-blue-500/50' : ''
                                             }`}
                                             style={{ borderLeftColor: project?.color }}
                                         >
-                                            <div className="flex justify-between items-start gap-3">
-                                                <div className="flex-1 overflow-hidden min-w-0">
+                                            <div className="flex flex-col sm:flex-row justify-between items-start gap-2 sm:gap-3">
+                                                <div className="flex-1 overflow-hidden min-w-0 w-full sm:w-auto">
                                                     <div className="flex items-center gap-2">
-                                                        <p className="text-white text-sm font-medium truncate">
+                                                        <p className="text-white text-xs sm:text-sm font-medium truncate">
                                                             {task?.name || group.description}
                                                         </p>
                                                         {isCurrentlyRunning && (
-                                                            <span className="flex-shrink-0 w-2 h-2 bg-green-500 rounded-full animate-pulse" title="Running"></span>
+                                                            <span className="flex-shrink-0 w-1.5 h-1.5 sm:w-2 sm:h-2 bg-green-500 rounded-full animate-pulse" title="Running"></span>
                                                         )}
                                                     </div>
-                                                    <p className="text-gray-500 text-xs flex items-center gap-1 mt-1">
-                                                        <span className="w-1.5 h-1.5 rounded-full" style={{ background: project?.color }}></span>
-                                                        {project?.name}
+                                                    <p className="text-gray-500 text-[10px] sm:text-xs flex items-center gap-1 mt-1 flex-wrap">
+                                                        <span className="w-1 h-1 sm:w-1.5 sm:h-1.5 rounded-full flex-shrink-0" style={{ background: project?.color }}></span>
+                                                        <span className="truncate">{project?.name}</span>
                                                         {task && task.name !== group.description && (
-                                                            <span className="text-gray-600">• {task.name}</span>
+                                                            <span className="text-gray-600 hidden sm:inline">• {task.name}</span>
                                                         )}
                                                         {group.entries.length > 1 && (
                                                             <span className="text-gray-600">• {group.entries.length} sessions</span>
                                                         )}
                                                     </p>
                                                 </div>
-                                                <div className="flex flex-col items-end gap-2">
-                                                    <div className="text-right whitespace-nowrap">
-                                                        <div className={`font-mono text-sm ${isCurrentlyRunning ? 'text-green-400' : 'text-white'}`}>
+                                                <div className="flex flex-row sm:flex-col items-center sm:items-end gap-2 sm:gap-2 w-full sm:w-auto justify-between sm:justify-end">
+                                                    <div className="text-left sm:text-right whitespace-nowrap">
+                                                        <div className={`font-mono text-xs sm:text-sm ${isCurrentlyRunning ? 'text-green-400' : 'text-white'}`}>
                                                             {formatTime(displayTime)}
                                                         </div>
                                                         {group.lastEndTime && !isCurrentlyRunning && (
-                                                            <div className="text-gray-600 text-[10px]">
+                                                            <div className="text-gray-600 text-[9px] sm:text-[10px]">
                                                                 {group.lastStartTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} - {group.lastEndTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                                                             </div>
                                                         )}
                                                         {!group.lastEndTime && !isCurrentlyRunning && (
-                                                            <div className="text-gray-600 text-[10px]">
+                                                            <div className="text-gray-600 text-[9px] sm:text-[10px]">
                                                                 Started {group.lastStartTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                                                             </div>
                                                         )}
                                                         {isCurrentlyRunning && (
-                                                            <div className="text-green-400 text-[10px] flex items-center gap-1">
-                                                                <i className="fas fa-circle text-[6px]"></i>
+                                                            <div className="text-green-400 text-[9px] sm:text-[10px] flex items-center gap-1">
+                                                                <i className="fas fa-circle text-[5px] sm:text-[6px]"></i>
                                                                 <span>Started {group.lastStartTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
                                                             </div>
                                                         )}
                                                     </div>
                                                     {group.taskId && (
-                                                        <div className="flex gap-2">
+                                                        <div className="flex gap-1.5 sm:gap-2">
                                                             <button
                                                                 onClick={() => {
                                                                     // Open insights with task filter
@@ -2002,14 +2145,14 @@ const App: React.FC = () => {
                                                                     setInsightsProjectFilter(group.projectId);
                                                                     setView(AppView.INSIGHTS);
                                                                 }}
-                                                                className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300"
+                                                                className="px-2 sm:px-2.5 py-1 sm:py-1.5 rounded-lg text-[10px] sm:text-xs font-medium transition-all flex items-center gap-1 sm:gap-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300"
                                                                 title="View Report"
                                                             >
-                                                                <i className="fas fa-chart-line text-[10px]"></i>
-                                                                <span>Report</span>
+                                                                <i className="fas fa-chart-line text-[9px] sm:text-[10px]"></i>
+                                                                <span className="hidden sm:inline">Report</span>
                                                             </button>
                                                             <button
-                                                                onClick={() => {
+                                                                onClick={async () => {
                                                                     if (!isTimerRunning) {
                                                                         setSelectedProjectId(group.projectId);
                                                                         setSelectedTaskId(group.taskId!);
@@ -2017,6 +2160,8 @@ const App: React.FC = () => {
                                                                         setShowTaskSelection(false);
                                                                         // Auto-start timer
                                                                         if (userConsent === true) {
+                                                                            // Set status to working when starting task
+                                                                            setUserStatus('working');
                                                                             // Load accumulated time
                                                                             const accumulated = taskAccumulatedTime[group.taskId] || 0;
                                                                             setElapsedSeconds(accumulated);
@@ -2026,13 +2171,13 @@ const App: React.FC = () => {
                                                                     }
                                                                 }}
                                                                 disabled={isTimerRunning}
-                                                                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
+                                                                className={`px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg text-[10px] sm:text-xs font-medium transition-all flex items-center gap-1 sm:gap-1.5 ${
                                                                     isCurrentlySelected
                                                                         ? 'bg-blue-600 hover:bg-blue-500 text-white'
                                                                         : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
                                                                 } ${isTimerRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                             >
-                                                                <i className={`fas ${displayTime > 0 ? 'fa-redo' : 'fa-play'} text-[10px]`}></i>
+                                                                <i className={`fas ${displayTime > 0 ? 'fa-redo' : 'fa-play'} text-[9px] sm:text-[10px]`}></i>
                                                                 <span>{displayTime > 0 ? 'Resume' : 'Start'}</span>
                                                             </button>
                                                         </div>

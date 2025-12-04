@@ -871,18 +871,18 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
     return (
         <div className="flex flex-col h-full bg-gray-950 text-white animate-fade-in overflow-hidden">
             {/* Header */}
-            <div className="p-4 bg-gray-900 border-b border-gray-800 flex justify-between items-center shadow-lg z-10">
-                <div>
-                    <h2 className="text-lg font-bold flex items-center">
-                        <i className="fas fa-chart-line text-blue-500 mr-2"></i>
+            <div className="p-3 sm:p-4 bg-gray-900 border-b border-gray-800 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 sm:gap-0 shadow-lg z-10">
+                <div className="flex-1 min-w-0">
+                    <h2 className="text-sm sm:text-base md:text-lg font-bold flex items-center gap-2 flex-wrap">
+                        <i className="fas fa-chart-line text-blue-500 text-sm sm:text-base"></i>
                         {filterTaskId && tasks ? (
                             <>
-                                Task Report
+                                <span>Task Report</span>
                                 {(() => {
                                     const task = tasks.find(t => t.id === filterTaskId);
                                     const project = filterProjectId ? projects.find(p => p.id === filterProjectId) : null;
                                     return task && (
-                                        <span className="ml-2 text-sm font-normal text-gray-400">
+                                        <span className="text-xs sm:text-sm font-normal text-gray-400 truncate">
                                             • {project?.name} / {task.name}
                                         </span>
                                     );
@@ -890,8 +890,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             </>
                         ) : isCombinedView ? (
                             <>
-                                Combined Insights
-                                <span className="ml-2 text-sm font-normal text-gray-400">
+                                <span>Combined Insights</span>
+                                <span className="text-xs sm:text-sm font-normal text-gray-400">
                                     • All Tasks
                                 </span>
                             </>
@@ -899,18 +899,18 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             'Insights'
                         )}
                     </h2>
-                    <p className="text-xs text-gray-500">
+                    <p className="text-[10px] sm:text-xs text-gray-500 mt-1">
                         {filterTaskId ? 'Task-specific activity & productivity report (today\'s data)' : 
                          isCombinedView ? 'Combined activity & productivity report from today\'s tasks' :
                          'Activity & Productivity Log (today\'s data)'}
                     </p>
                 </div>
-                <button onClick={onClose} className="text-gray-400 hover:text-white bg-gray-800 p-2 rounded-lg transition-colors">
-                    <i className="fas fa-times"></i>
+                <button onClick={onClose} className="text-gray-400 hover:text-white bg-gray-800 p-2 rounded-lg transition-colors flex-shrink-0">
+                    <i className="fas fa-times text-sm sm:text-base"></i>
                 </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-3 sm:p-4 md:p-6 space-y-4 sm:space-y-6">
                 
                 {/* JSON Tracking Data Section - Calculated from JSON file, same format as Insights */}
                 {jsonTrackingData && (() => {
@@ -1202,36 +1202,37 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     return (
                         <>
                             {/* Summary Section - Total Stats Across All Windows */}
-                            <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-4 border border-blue-500/30">
-                                <div className="flex items-center gap-2 mb-3">
-                                    <i className="fas fa-chart-pie text-blue-400"></i>
-                                    <h3 className="text-sm font-bold text-gray-200">Total Activity Summary</h3>
+                            <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-3 sm:p-4 border border-blue-500/30">
+                                <div className="flex items-center gap-2 mb-2 sm:mb-3 flex-wrap">
+                                    <i className="fas fa-chart-pie text-blue-400 text-sm sm:text-base"></i>
+                                    <h3 className="text-xs sm:text-sm font-bold text-gray-200">Total Activity Summary</h3>
                                     {(isTaskActive || isCombinedView) && (
-                                        <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[10px] rounded-full flex items-center gap-1">
-                                            <i className="fas fa-circle text-[6px] animate-pulse"></i>
-                                            {isCombinedView ? 'Live (All Tasks)' : 'Live'}
+                                        <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-[9px] sm:text-[10px] rounded-full flex items-center gap-1 flex-shrink-0">
+                                            <i className="fas fa-circle text-[5px] sm:text-[6px] animate-pulse"></i>
+                                            <span className="hidden sm:inline">{isCombinedView ? 'Live (All Tasks)' : 'Live'}</span>
+                                            <span className="sm:hidden">{isCombinedView ? 'All' : 'Live'}</span>
                                         </span>
                                     )}
                                 </div>
-                                <div className="grid grid-cols-3 gap-3">
-                                    <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                                        <div className="text-2xl font-bold text-green-400">
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
+                                    <div className="bg-gray-900/50 p-2 sm:p-3 rounded-lg border border-gray-700 text-center">
+                                        <div className="text-xl sm:text-2xl font-bold text-green-400">
                                             {compositeScore}%
                                         </div>
-                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">
+                                        <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">
                                             Composite Score
                                         </div>
-                                        <div className="text-[9px] text-gray-500 mt-0.5">TyroDesk Algorithm</div>
+                                        <div className="text-[8px] sm:text-[9px] text-gray-500 mt-0.5">TyroDesk Algorithm</div>
                                     </div>
-                                    <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                                        <div className="text-2xl font-bold text-blue-400">{totalKeys.toLocaleString()}</div>
-                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Keystrokes</div>
-                                        <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                                    <div className="bg-gray-900/50 p-2 sm:p-3 rounded-lg border border-gray-700 text-center">
+                                        <div className="text-xl sm:text-2xl font-bold text-blue-400">{totalKeys.toLocaleString()}</div>
+                                        <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">Total Keystrokes</div>
+                                        <div className="text-[8px] sm:text-[9px] text-gray-500 mt-0.5">Across all windows</div>
                                     </div>
-                                    <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                                        <div className="text-2xl font-bold text-purple-400">{totalClicks.toLocaleString()}</div>
-                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Clicks</div>
-                                        <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                                    <div className="bg-gray-900/50 p-2 sm:p-3 rounded-lg border border-gray-700 text-center">
+                                        <div className="text-xl sm:text-2xl font-bold text-purple-400">{totalClicks.toLocaleString()}</div>
+                                        <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">Total Clicks</div>
+                                        <div className="text-[8px] sm:text-[9px] text-gray-500 mt-0.5">Across all windows</div>
                                     </div>
                                 </div>
                                 {displayWindows.length > 0 && (
@@ -1246,29 +1247,29 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             </div>
 
                             {/* TyroDesk Algorithm Metrics Section */}
-                            <div className="bg-gradient-to-br from-purple-900/30 to-pink-900/30 rounded-xl p-4 border border-purple-500/30">
-                                <div className="flex items-center gap-2 mb-4">
-                                    <i className="fas fa-brain text-purple-400"></i>
-                                    <h3 className="text-sm font-bold text-gray-200">TyroDesk Productivity Analysis</h3>
+                            <div className="bg-gradient-to-br from-purple-900/30 to-pink-900/30 rounded-xl p-3 sm:p-4 border border-purple-500/30">
+                                <div className="flex items-center gap-2 mb-3 sm:mb-4">
+                                    <i className="fas fa-brain text-purple-400 text-sm sm:text-base"></i>
+                                    <h3 className="text-xs sm:text-sm font-bold text-gray-200">TyroDesk Productivity Analysis</h3>
                                 </div>
                                 
                                 {/* Composite Score with Breakdown */}
-                                <div className="mb-4">
-                                    <div className="flex items-center justify-between mb-2">
+                                <div className="mb-3 sm:mb-4">
+                                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0 mb-2">
                                         <div className="flex items-center gap-2">
-                                            <span className="text-xs font-bold text-gray-400 uppercase">Composite Score Breakdown</span>
+                                            <span className="text-[10px] sm:text-xs font-bold text-gray-400 uppercase">Composite Score Breakdown</span>
                                             <span 
-                                                className="text-[8px] text-gray-500 cursor-help" 
+                                                className="text-[7px] sm:text-[8px] text-gray-500 cursor-help" 
                                                 title="Weighted combination: Activity (25%) + App (25%) + URL (20%) + Focus (30%)"
                                             >
                                                 <i className="fas fa-info-circle"></i>
                                             </span>
                                         </div>
-                                        <span className="text-lg font-bold text-green-400">
+                                        <span className="text-base sm:text-lg font-bold text-green-400">
                                             {compositeScore}%
                                         </span>
                                     </div>
-                                    <div className="grid grid-cols-4 gap-2">
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                                         <div 
                                             className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-blue-500 transition-colors cursor-help" 
                                             title="Activity Score (25% weight): Based on keystrokes + mouse clicks. Higher = more active computer use."
@@ -1349,26 +1350,26 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                 )}
                                 
                                 {/* Focus Metrics */}
-                                <div className="grid grid-cols-2 gap-3">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
                                     <div 
-                                        className="bg-gray-900/50 p-3 rounded border border-gray-700 text-center hover:border-purple-500 transition-colors cursor-help"
+                                        className="bg-gray-900/50 p-2 sm:p-3 rounded border border-gray-700 text-center hover:border-purple-500 transition-colors cursor-help"
                                         title="Focus Score: Measures how focused you were. 100% = excellent focus (minimal app switching). Higher = better productivity."
                                     >
-                                        <div className="text-xl font-bold text-purple-400">{focusScore}%</div>
-                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Avg Focus Score</div>
-                                        <div className="text-[8px] text-gray-600 mt-1">
+                                        <div className="text-lg sm:text-xl font-bold text-purple-400">{focusScore}%</div>
+                                        <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">Avg Focus Score</div>
+                                        <div className="text-[7px] sm:text-[8px] text-gray-600 mt-1">
                                             {focusScore >= 80 ? '⭐ Excellent!' : 
                                              focusScore >= 60 ? '✅ Good' : 
                                              focusScore >= 40 ? '⚠️ Moderate' : '❌ Low'}
                                         </div>
                                     </div>
                                     <div 
-                                        className="bg-gray-900/50 p-3 rounded border border-gray-700 text-center hover:border-orange-500 transition-colors cursor-help"
+                                        className="bg-gray-900/50 p-2 sm:p-3 rounded border border-gray-700 text-center hover:border-orange-500 transition-colors cursor-help"
                                         title="Context Switches: Number of times you switched between different apps. Lower = better. Each switch costs ~23 min to regain focus."
                                     >
-                                        <div className="text-xl font-bold text-orange-400">{contextSwitches}</div>
-                                        <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Context Switches</div>
-                                        <div className="text-[8px] text-gray-600 mt-1">
+                                        <div className="text-lg sm:text-xl font-bold text-orange-400">{contextSwitches}</div>
+                                        <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">Context Switches</div>
+                                        <div className="text-[7px] sm:text-[8px] text-gray-600 mt-1">
                                             {contextSwitches === 0 ? '⭐ Perfect!' : 
                                              contextSwitches <= 3 ? '✅ Good' : 
                                              contextSwitches <= 6 ? '⚠️ Moderate' : '❌ High'}
@@ -1538,32 +1539,32 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 
                 {/* Summary Section - Only show if no JSON data (fallback to logs) */}
                 {!jsonTrackingData && (
-                    <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-4 border border-blue-500/30">
-                        <div className="flex items-center gap-2 mb-3">
-                            <i className="fas fa-chart-pie text-blue-400"></i>
-                            <h3 className="text-sm font-bold text-gray-200">Total Activity Summary</h3>
+                    <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-3 sm:p-4 border border-blue-500/30">
+                        <div className="flex items-center gap-2 mb-2 sm:mb-3">
+                            <i className="fas fa-chart-pie text-blue-400 text-sm sm:text-base"></i>
+                            <h3 className="text-xs sm:text-sm font-bold text-gray-200">Total Activity Summary</h3>
                         </div>
-                        <div className="grid grid-cols-3 gap-3">
-                            <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                                <div className="text-2xl font-bold text-green-400">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
+                            <div className="bg-gray-900/50 p-2 sm:p-3 rounded-lg border border-gray-700 text-center">
+                                <div className="text-xl sm:text-2xl font-bold text-green-400">
                                     {stats.avgCompositeScore > 0 ? stats.avgCompositeScore : stats.avgProd}%
                                 </div>
-                                <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">
+                                <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">
                                     {stats.avgCompositeScore > 0 ? 'Composite Score' : 'Productivity'}
                                 </div>
                                 {stats.avgCompositeScore > 0 && (
-                                    <div className="text-[9px] text-gray-500 mt-0.5">TyroDesk Algorithm</div>
+                                    <div className="text-[8px] sm:text-[9px] text-gray-500 mt-0.5">TyroDesk Algorithm</div>
                                 )}
                             </div>
-                            <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                                <div className="text-2xl font-bold text-blue-400">{stats.totalKeys.toLocaleString()}</div>
-                                <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Keystrokes</div>
-                                <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                            <div className="bg-gray-900/50 p-2 sm:p-3 rounded-lg border border-gray-700 text-center">
+                                <div className="text-xl sm:text-2xl font-bold text-blue-400">{stats.totalKeys.toLocaleString()}</div>
+                                <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">Total Keystrokes</div>
+                                <div className="text-[8px] sm:text-[9px] text-gray-500 mt-0.5">Across all windows</div>
                             </div>
-                            <div className="bg-gray-900/50 p-3 rounded-lg border border-gray-700 text-center">
-                                <div className="text-2xl font-bold text-purple-400">{stats.totalClicks.toLocaleString()}</div>
-                                <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Total Clicks</div>
-                                <div className="text-[9px] text-gray-500 mt-0.5">Across all windows</div>
+                            <div className="bg-gray-900/50 p-2 sm:p-3 rounded-lg border border-gray-700 text-center">
+                                <div className="text-xl sm:text-2xl font-bold text-purple-400">{stats.totalClicks.toLocaleString()}</div>
+                                <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">Total Clicks</div>
+                                <div className="text-[8px] sm:text-[9px] text-gray-500 mt-0.5">Across all windows</div>
                             </div>
                         </div>
                         {allWindows.length > 0 && (
@@ -1582,30 +1583,30 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     const hasTyroDeskData = logs.some(log => log.compositeScore !== undefined || log.appCategory || log.focusScore !== undefined);
                     return hasTyroDeskData;
                 })() && (
-                    <div className="bg-gradient-to-br from-purple-900/30 to-pink-900/30 rounded-xl p-4 border border-purple-500/30">
-                        <div className="flex items-center gap-2 mb-4">
-                            <i className="fas fa-brain text-purple-400"></i>
-                            <h3 className="text-sm font-bold text-gray-200">TyroDesk Productivity Analysis</h3>
+                    <div className="bg-gradient-to-br from-purple-900/30 to-pink-900/30 rounded-xl p-3 sm:p-4 border border-purple-500/30">
+                        <div className="flex items-center gap-2 mb-3 sm:mb-4">
+                            <i className="fas fa-brain text-purple-400 text-sm sm:text-base"></i>
+                            <h3 className="text-xs sm:text-sm font-bold text-gray-200">TyroDesk Productivity Analysis</h3>
                         </div>
                         
                         {/* Composite Score with Breakdown */}
                         {stats.avgCompositeScore > 0 && stats.avgBreakdown && (
-                            <div className="mb-4">
-                                <div className="flex items-center justify-between mb-2">
+                            <div className="mb-3 sm:mb-4">
+                                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0 mb-2">
                                     <div className="flex items-center gap-2">
-                                        <span className="text-xs font-bold text-gray-400 uppercase">Composite Score Breakdown</span>
+                                        <span className="text-[10px] sm:text-xs font-bold text-gray-400 uppercase">Composite Score Breakdown</span>
                                         <span 
-                                            className="text-[8px] text-gray-500 cursor-help" 
+                                            className="text-[7px] sm:text-[8px] text-gray-500 cursor-help" 
                                             title="Weighted combination: Activity (25%) + App (25%) + URL (20%) + Focus (30%)"
                                         >
                                             <i className="fas fa-info-circle"></i>
                                         </span>
                                     </div>
-                                    <span className="text-lg font-bold" style={{ color: filteredLogs.find(l => l.compositeScore)?.scoreClassification?.color || '#eab308' }}>
+                                    <span className="text-base sm:text-lg font-bold" style={{ color: filteredLogs.find(l => l.compositeScore)?.scoreClassification?.color || '#eab308' }}>
                                         {stats.avgCompositeScore}%
                                     </span>
                                 </div>
-                                <div className="grid grid-cols-4 gap-2">
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                                     <div 
                                         className="bg-gray-900/50 p-2 rounded border border-gray-700 text-center hover:border-blue-500 transition-colors cursor-help" 
                                         title="Activity Score (25% weight): Based on keystrokes + mouse clicks. Higher = more active computer use."
@@ -1688,26 +1689,26 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                         
                         {/* Focus Metrics */}
                         {stats.avgFocusScore > 0 && (
-                            <div className="grid grid-cols-2 gap-3">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
                                 <div 
-                                    className="bg-gray-900/50 p-3 rounded border border-gray-700 text-center hover:border-purple-500 transition-colors cursor-help"
+                                    className="bg-gray-900/50 p-2 sm:p-3 rounded border border-gray-700 text-center hover:border-purple-500 transition-colors cursor-help"
                                     title="Focus Score: Measures how focused you were. 100% = excellent focus (minimal app switching). Higher = better productivity."
                                 >
-                                    <div className="text-xl font-bold text-purple-400">{stats.avgFocusScore}%</div>
-                                    <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Avg Focus Score</div>
-                                    <div className="text-[8px] text-gray-600 mt-1">
+                                    <div className="text-lg sm:text-xl font-bold text-purple-400">{stats.avgFocusScore}%</div>
+                                    <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">Avg Focus Score</div>
+                                    <div className="text-[7px] sm:text-[8px] text-gray-600 mt-1">
                                         {stats.avgFocusScore >= 80 ? '⭐ Excellent!' : 
                                          stats.avgFocusScore >= 60 ? '✅ Good' : 
                                          stats.avgFocusScore >= 40 ? '⚠️ Moderate' : '❌ Low'}
                                     </div>
                                 </div>
                                 <div 
-                                    className="bg-gray-900/50 p-3 rounded border border-gray-700 text-center hover:border-orange-500 transition-colors cursor-help"
+                                    className="bg-gray-900/50 p-2 sm:p-3 rounded border border-gray-700 text-center hover:border-orange-500 transition-colors cursor-help"
                                     title="Context Switches: Number of times you switched between different apps. Lower = better. Each switch costs ~23 min to regain focus."
                                 >
-                                    <div className="text-xl font-bold text-orange-400">{stats.totalContextSwitches}</div>
-                                    <div className="text-[10px] uppercase text-gray-400 font-bold mt-1">Context Switches</div>
-                                    <div className="text-[8px] text-gray-600 mt-1">
+                                    <div className="text-lg sm:text-xl font-bold text-orange-400">{stats.totalContextSwitches}</div>
+                                    <div className="text-[9px] sm:text-[10px] uppercase text-gray-400 font-bold mt-1">Context Switches</div>
+                                    <div className="text-[7px] sm:text-[8px] text-gray-600 mt-1">
                                         {stats.totalContextSwitches === 0 ? '⭐ Perfect!' : 
                                          stats.totalContextSwitches <= 3 ? '✅ Good' : 
                                          stats.totalContextSwitches <= 6 ? '⚠️ Moderate' : '❌ High'}
@@ -1719,9 +1720,9 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 )}
 
                 {/* Activity Timeline Bar Chart */}
-                <div className="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                    <h3 className="text-xs font-bold text-gray-400 uppercase mb-4">Activity Timeline</h3>
-                    <div className="h-24 flex items-end gap-1 overflow-x-auto pb-2 custom-scrollbar">
+                <div className="bg-gray-900 rounded-lg p-3 sm:p-4 border border-gray-800">
+                    <h3 className="text-[10px] sm:text-xs font-bold text-gray-400 uppercase mb-3 sm:mb-4">Activity Timeline</h3>
+                    <div className="h-20 sm:h-24 flex items-end gap-1 overflow-x-auto pb-2 custom-scrollbar">
                         {(() => {
                             // Combine logs from filteredLogs and JSON tracking data
                             const allLogs: Array<{
@@ -1834,9 +1835,9 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
 
                 {/* Recent Screenshots / Cam Snaps Grid */}
                 <div>
-                    <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-xs font-bold text-gray-400 uppercase">Evidence Log</h3>
-                        <span className="text-[10px] text-gray-500">
+                    <div className="flex items-center justify-between mb-2 sm:mb-3">
+                        <h3 className="text-[10px] sm:text-xs font-bold text-gray-400 uppercase">Evidence Log</h3>
+                        <span className="text-[9px] sm:text-[10px] text-gray-500">
                             {(() => {
                                 // Count all individual images (screenshots + webcam photos)
                                 let count = 0;
@@ -1865,7 +1866,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             })()} images
                         </span>
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 sm:gap-3">
                         {(() => {
                             // Flatten filteredLogs to create individual evidence items for each screenshot and webcam photo
                             // IMPORTANT: Use filteredLogs, not logs, to ensure only task-specific evidence is shown

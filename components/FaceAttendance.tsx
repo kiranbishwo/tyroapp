@@ -233,19 +233,19 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
     };
 
     return (
-        <div className="flex flex-col items-center justify-center h-full p-6 bg-gray-900 text-white animate-fade-in relative">
-            <button onClick={onCancel} className="absolute top-4 left-4 text-gray-500 hover:text-white">
-                <i className="fas fa-arrow-left"></i> Back
+        <div className="flex flex-col items-center justify-center h-full p-4 sm:p-6 md:p-8 bg-gray-900 text-white animate-fade-in relative max-w-4xl mx-auto w-full">
+            <button onClick={onCancel} className="absolute top-3 sm:top-4 left-3 sm:left-4 text-gray-500 hover:text-white text-xs sm:text-sm">
+                <i className="fas fa-arrow-left"></i> <span className="hidden sm:inline">Back</span>
             </button>
 
-            <h2 className="text-xl font-bold mb-2">
+            <h2 className="text-xl sm:text-2xl md:text-3xl font-bold mb-2 sm:mb-3 text-center">
                 {mode === 'CHECK_IN' ? 'Good Morning!' : 'See you later!'}
             </h2>
-            <p className="text-gray-400 text-sm mb-6 text-center">
+            <p className="text-gray-400 text-sm sm:text-base mb-4 sm:mb-6 md:mb-8 text-center px-4 max-w-2xl">
                 Please verify your identity to {mode === 'CHECK_IN' ? 'start' : 'end'} your shift.
             </p>
 
-            <div className="relative w-64 h-64 bg-gray-800 rounded-full overflow-hidden border-4 border-blue-500 shadow-lg shadow-blue-500/20 mb-8">
+            <div className="relative w-56 h-56 sm:w-72 sm:h-72 md:w-80 md:h-80 bg-gray-800 rounded-full overflow-hidden border-4 border-blue-500 shadow-lg shadow-blue-500/20 mb-6 sm:mb-8 md:mb-10">
                 {!captured ? (
                     <>
                         <video 
@@ -295,12 +295,12 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
 
             <canvas ref={canvasRef} className="hidden" />
 
-            <div className="flex flex-col gap-3 w-full max-w-xs">
+            <div className="flex flex-col gap-2 sm:gap-3 w-full max-w-md px-4 sm:px-0">
                 {!captured ? (
                      <button 
                         onClick={takePhoto}
                         disabled={cameraLoading || !!cameraError || !existingStream}
-                        className={`w-full font-semibold py-3 px-6 rounded-lg transition-all ${
+                        className={`w-full font-semibold py-3 sm:py-4 px-6 sm:px-8 rounded-lg transition-all text-base sm:text-lg ${
                             cameraLoading || !!cameraError || !existingStream
                                 ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
                                 : 'bg-blue-600 hover:bg-blue-500 text-white'
@@ -308,33 +308,33 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
                      >
                         {cameraLoading ? (
                             <>
-                                <i className="fas fa-circle-notch fa-spin mr-2"></i> Loading Camera...
+                                <i className="fas fa-circle-notch fa-spin mr-2"></i> <span>Loading Camera...</span>
                             </>
                         ) : cameraError ? (
                             <>
-                                <i className="fas fa-exclamation-triangle mr-2"></i> Camera Error
+                                <i className="fas fa-exclamation-triangle mr-2"></i> <span>Camera Error</span>
                             </>
                         ) : (
                             <>
-                                <i className="fas fa-camera mr-2"></i> Capture Face
+                                <i className="fas fa-camera mr-2"></i> <span>Capture Face</span>
                             </>
                         )}
                      </button>
                 ) : analyzing ? (
-                     <button disabled className="w-full bg-gray-700 text-gray-300 font-semibold py-3 px-6 rounded-lg cursor-wait">
-                        <i className="fas fa-circle-notch fa-spin mr-2"></i> Verifying...
+                     <button disabled className="w-full bg-gray-700 text-gray-300 font-semibold py-3 sm:py-4 px-6 sm:px-8 rounded-lg cursor-wait text-base sm:text-lg">
+                        <i className="fas fa-circle-notch fa-spin mr-2"></i> <span>Verifying...</span>
                      </button>
                 ) : (
-                    <div className="flex gap-3">
+                    <div className="flex gap-2 sm:gap-3">
                         <button 
                             onClick={retake}
-                            className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-3 rounded-lg"
+                            className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-3 sm:py-4 rounded-lg text-base sm:text-lg"
                         >
                             Retake
                         </button>
                         <button 
                             onClick={confirmAction}
-                            className="flex-1 bg-green-600 hover:bg-green-500 text-white font-semibold py-3 rounded-lg"
+                            className="flex-1 bg-green-600 hover:bg-green-500 text-white font-semibold py-3 sm:py-4 rounded-lg text-base sm:text-lg"
                         >
                             Confirm {mode === 'CHECK_IN' ? 'In' : 'Out'}
                         </button>
