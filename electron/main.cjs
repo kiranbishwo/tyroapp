@@ -384,11 +384,17 @@ const normalizeUrl = (url) => {
 // ==================== JSON File Storage Functions ====================
 
 // Get path for task tracking data file - ONE FILE PER TASK (not per session)
-// Files are saved in project directory: {projectRoot}/tracking-data/{projectId}/{taskId}.json
-const getTaskDataPath = (projectId, taskId) => {
+// Files are saved in project directory: {projectRoot}/tracking-data/{workspaceId}/{date}/{projectId}/{taskId}.json
+const getTaskDataPath = (projectId, taskId, workspaceId = 'default') => {
   // Get project root directory (one level up from electron folder)
   const projectRoot = path.join(__dirname, '..');
-  const dataDir = path.join(projectRoot, 'tracking-data', projectId || 'unknown');
+  
+  // Get today's date in YYYY-MM-DD format
+  const today = new Date();
+  const dateStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
+  
+  // New structure: workspace_id/YYYY-MM-DD/project_id/taskid.json
+  const dataDir = path.join(projectRoot, 'tracking-data', workspaceId, dateStr, projectId || 'unknown');
   
   // Create directory if it doesn't exist
   if (!fs.existsSync(dataDir)) {
@@ -400,6 +406,164 @@ const getTaskDataPath = (projectId, taskId) => {
   
   // ONE FILE PER TASK - use taskId as filename
   return path.join(dataDir, `${taskId}.json`);
+};
+
+// Helper function to recursively find all task JSON files in new structure
+// Supports: workspace_id/date/project_id/taskid.json
+// Also supports backward compatibility with old structure: project_id/taskid.json
+const findAllTaskFiles = (trackingDataPath) => {
+  const taskFiles = [];
+  
+  if (!fs.existsSync(trackingDataPath)) {
+    return taskFiles;
+  }
+  
+  try {
+    // Get all items in tracking-data directory
+    const items = fs.readdirSync(trackingDataPath);
+    
+    for (const item of items) {
+      const itemPath = path.join(trackingDataPath, item);
+      const stat = fs.statSync(itemPath);
+      
+      if (stat.isDirectory()) {
+        // Check if this is old structure (project_id directly) or new structure (workspace_id)
+        const subItems = fs.readdirSync(itemPath);
+        let isOldStructure = false;
+        
+        // Check if any subitem is a JSON file (old structure: project_id/taskid.json)
+        for (const subItem of subItems) {
+          const subItemPath = path.join(itemPath, subItem);
+          if (fs.statSync(subItemPath).isFile() && subItem.endsWith('.json')) {
+            isOldStructure = true;
+            taskFiles.push({
+              filePath: subItemPath,
+              projectId: item,
+              taskId: subItem.replace('.json', ''),
+              workspaceId: null,
+              date: null
+            });
+          }
+        }
+        
+        // If not old structure, it's new structure: workspace_id/date/project_id/taskid.json
+        if (!isOldStructure) {
+          for (const dateItem of subItems) {
+            const datePath = path.join(itemPath, dateItem);
+            if (fs.statSync(datePath).isDirectory()) {
+              // This is a date directory
+              const dateSubItems = fs.readdirSync(datePath);
+              for (const projItem of dateSubItems) {
+                const projPath = path.join(datePath, projItem);
+                if (fs.statSync(projPath).isDirectory()) {
+                  // This is a project directory
+                  const projFiles = fs.readdirSync(projPath).filter(f => f.endsWith('.json'));
+                  for (const taskFile of projFiles) {
+                    taskFiles.push({
+                      filePath: path.join(projPath, taskFile),
+                      projectId: projItem,
+                      taskId: taskFile.replace('.json', ''),
+                      workspaceId: item,
+                      date: dateItem
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[FIND-TASKS] Error finding task files:', error);
+  }
+  
+  return taskFiles;
+};
+
+// Migration function to move files from old structure to new structure
+// Old: tracking-data/project_id/taskid.json
+// New: tracking-data/workspace_id/YYYY-MM-DD/project_id/taskid.json
+const migrateTrackingDataStructure = (workspaceId = 'default') => {
+  try {
+    const projectRoot = path.join(__dirname, '..');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    
+    if (!fs.existsSync(trackingDataPath)) {
+      console.log('[MIGRATION] No tracking-data directory found, nothing to migrate');
+      return { success: true, migrated: 0, errors: 0 };
+    }
+    
+    let migrated = 0;
+    let errors = 0;
+    
+    // Get all items in tracking-data directory
+    const items = fs.readdirSync(trackingDataPath);
+    
+    for (const item of items) {
+      const itemPath = path.join(trackingDataPath, item);
+      const stat = fs.statSync(itemPath);
+      
+      // Check if this is old structure (direct project_id directory with JSON files)
+      if (stat.isDirectory()) {
+        const subItems = fs.readdirSync(itemPath);
+        const jsonFiles = subItems.filter(f => f.endsWith('.json') && fs.statSync(path.join(itemPath, f)).isFile());
+        
+        // If we find JSON files directly, this is old structure
+        if (jsonFiles.length > 0) {
+          const projectId = item;
+          
+          for (const jsonFile of jsonFiles) {
+            const oldFilePath = path.join(itemPath, jsonFile);
+            const taskId = jsonFile.replace('.json', '');
+            
+            try {
+              // Read file to get metadata and extract date
+              const fileContent = fs.readFileSync(oldFilePath, 'utf8');
+              const data = JSON.parse(fileContent);
+              
+              // Extract date from metadata.createdAt or use today's date
+              let dateStr;
+              if (data.metadata && data.metadata.createdAt) {
+                const createdDate = new Date(data.metadata.createdAt);
+                dateStr = createdDate.toISOString().split('T')[0]; // YYYY-MM-DD
+              } else {
+                // Fallback to today's date
+                dateStr = new Date().toISOString().split('T')[0];
+              }
+              
+              // Create new path: workspace_id/YYYY-MM-DD/project_id/taskid.json
+              const newDir = path.join(trackingDataPath, workspaceId, dateStr, projectId);
+              const newFilePath = path.join(newDir, jsonFile);
+              
+              // Create directory if it doesn't exist
+              if (!fs.existsSync(newDir)) {
+                fs.mkdirSync(newDir, { recursive: true });
+              }
+              
+              // Only move if new file doesn't exist (avoid overwriting)
+              if (!fs.existsSync(newFilePath)) {
+                fs.copyFileSync(oldFilePath, newFilePath);
+                migrated++;
+                console.log(`[MIGRATION] Migrated ${jsonFile} from ${projectId}/ to ${workspaceId}/${dateStr}/${projectId}/`);
+              } else {
+                console.log(`[MIGRATION] Skipped ${jsonFile} - already exists in new location`);
+              }
+            } catch (error) {
+              console.error(`[MIGRATION] Error migrating ${jsonFile}:`, error.message);
+              errors++;
+            }
+          }
+        }
+      }
+    }
+    
+    console.log(`[MIGRATION] Migration complete: ${migrated} files migrated, ${errors} errors`);
+    return { success: true, migrated, errors };
+  } catch (error) {
+    console.error('[MIGRATION] Migration error:', error);
+    return { success: false, error: error.message, migrated: 0, errors: 0 };
+  }
 };
 
 // Save task tracking data to JSON file (immediate save)
@@ -775,6 +939,11 @@ const saveTaskTrackingDataToFile = (projectId, taskId, taskName = null, projectN
     // activeWindowsArray already has all the data with timeSpent calculated above
     const activeWindowsWithTime = activeWindowsArray;
     
+    // Calculate total time from all windows' timeSpent (sum of all time capsules)
+    const totalTimeSpent = activeWindowsWithTime.reduce((sum, win) => {
+      return sum + (win.timeSpent || 0);
+    }, 0);
+
     const dataToSave = {
       version: '1.0.0',
       metadata: {
@@ -793,6 +962,7 @@ const saveTaskTrackingDataToFile = (projectId, taskId, taskName = null, projectN
         urlHistory: taskData.urlHistory || [],
         activeWindows: activeWindowsWithTime,
         summary: {
+          totalTime: totalTimeSpent, // Total time spent (sum of all windows' timeSpent from time capsules)
           totalKeystrokes: totalKeystrokes, // Cumulative total across all sessions
           totalMouseClicks: totalMouseClicks, // Cumulative total across all sessions
           currentSessionKeystrokes: taskData.keystrokes, // Current session only
@@ -848,6 +1018,16 @@ const saveTaskTrackingDataToFile = (projectId, taskId, taskName = null, projectN
     
     console.log(`[TASK-SAVE] ✅ File verified: ${stats.size} bytes written, JSON valid`);
     
+    // Trigger Combined Insights update after successful save (only for immediate saves to avoid too many updates)
+    // Use setTimeout to ensure function is available (defined later in file)
+    if (immediate && typeof triggerCombinedInsightsUpdate === 'function') {
+      setTimeout(() => {
+        if (typeof triggerCombinedInsightsUpdate === 'function') {
+          triggerCombinedInsightsUpdate();
+        }
+      }, 0);
+    }
+    
     return true;
   } catch (error) {
     console.error(`[TASK-SAVE] Error saving task tracking data:`, error);
@@ -885,25 +1065,41 @@ const scheduleTaskSave = (projectId, taskId, taskName = null, projectName = null
 };
 
 // Load task tracking data from JSON file - ONE FILE PER TASK
+// Checks both new structure (workspace_id/date/project_id/taskid.json) and old structure (project_id/taskid.json) for backward compatibility
 const loadTaskTrackingDataFromFile = (projectId, taskId) => {
   try {
+    // Try new structure first
     const filePath = getTaskDataPath(projectId, taskId);
     
-    if (!fs.existsSync(filePath)) {
-      if (isDev) {
-        console.log(`[TASK-LOAD] File not found for task ${taskId}, will create new: ${filePath}`);
-      }
-      return null;
+    if (fs.existsSync(filePath)) {
+      const fileContent = fs.readFileSync(filePath, 'utf8');
+      const savedData = JSON.parse(fileContent);
+      
+      console.log(`[TASK-LOAD] ✅ Loaded existing file for task ${taskId}: ${filePath}`);
+      console.log(`[TASK-LOAD] 📊 Existing data: ${savedData.trackingData?.activityLogs?.length || 0} logs, ${savedData.trackingData?.screenshots?.length || 0} screenshots`);
+      console.log(`[TASK-LOAD] 📊 Existing totals: ${savedData.trackingData?.summary?.totalKeystrokes || 0} keystrokes, ${savedData.trackingData?.summary?.totalMouseClicks || 0} clicks`);
+      
+      return savedData;
     }
     
-    const fileContent = fs.readFileSync(filePath, 'utf8');
-    const savedData = JSON.parse(fileContent);
+    // Try old structure for backward compatibility
+    const projectRoot = path.join(__dirname, '..');
+    const oldFilePath = path.join(projectRoot, 'tracking-data', projectId || 'unknown', `${taskId}.json`);
     
-    console.log(`[TASK-LOAD] ✅ Loaded existing file for task ${taskId}: ${filePath}`);
-    console.log(`[TASK-LOAD] 📊 Existing data: ${savedData.trackingData?.activityLogs?.length || 0} logs, ${savedData.trackingData?.screenshots?.length || 0} screenshots`);
-    console.log(`[TASK-LOAD] 📊 Existing totals: ${savedData.trackingData?.summary?.totalKeystrokes || 0} keystrokes, ${savedData.trackingData?.summary?.totalMouseClicks || 0} clicks`);
+    if (fs.existsSync(oldFilePath)) {
+      const fileContent = fs.readFileSync(oldFilePath, 'utf8');
+      const savedData = JSON.parse(fileContent);
+      
+      console.log(`[TASK-LOAD] ✅ Loaded existing file from old structure for task ${taskId}: ${oldFilePath}`);
+      console.log(`[TASK-LOAD] 📊 Existing data: ${savedData.trackingData?.activityLogs?.length || 0} logs, ${savedData.trackingData?.screenshots?.length || 0} screenshots`);
+      
+      return savedData;
+    }
     
-    return savedData;
+    if (isDev) {
+      console.log(`[TASK-LOAD] File not found for task ${taskId}, will create new: ${filePath}`);
+    }
+    return null;
   } catch (error) {
     console.error(`[TASK-LOAD] ❌ Error loading task tracking data:`, error);
     return null;
@@ -1001,8 +1197,23 @@ const initializeTaskTracking = async (projectId, taskId, taskName = null, projec
         const retrySuccess = saveTaskTrackingDataToFile(projectId, taskId, taskName, projectName, true);
         if (retrySuccess) {
           console.log(`[TASK-INIT] ✅ Retry save successful`);
+          // Trigger Combined Insights update after successful save
+          // Use setTimeout to ensure function is available (defined later in file)
+          setTimeout(() => {
+            if (typeof triggerCombinedInsightsUpdate === 'function') {
+              triggerCombinedInsightsUpdate();
+            }
+          }, 0);
         }
       }, 100);
+    } else {
+      // Trigger Combined Insights update after successful save
+      // Use setTimeout to ensure function is available (defined later in file)
+      setTimeout(() => {
+        if (typeof triggerCombinedInsightsUpdate === 'function') {
+          triggerCombinedInsightsUpdate();
+        }
+      }, 0);
     }
   }
   
@@ -3302,10 +3513,18 @@ function createTray() {
 
 // This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {
+  // Migrate existing files to new folder structure on startup
+  if (isDev) {
+    console.log('[APP] Running migration to new folder structure...');
+  }
+  migrateTrackingDataStructure('default');
+  
   // Pre-initialize store to avoid delays in IPC handlers
   await initStore();
   createWindow();
   createTray();
+  // Migrate existing files to new folder structure on startup
+  migrateTrackingDataStructure('default');
   // Start tracking data watcher for combined insights
   startTrackingDataWatcher();
 
@@ -3437,7 +3656,8 @@ ipcMain.handle('save-task-tracking-data', async (event, projectId, taskId, taskN
 });
 
 // Load task tracking data from file - ONE FILE PER TASK
-ipcMain.handle('load-task-tracking-data', async (event, projectId, taskId) => {
+// dateFilter: 'today' | 'all' - filters data by date (default: 'today')
+ipcMain.handle('load-task-tracking-data', async (event, projectId, taskId, dateFilter = 'today') => {
   if (!projectId || !taskId) {
     return null;
   }
@@ -3448,11 +3668,175 @@ ipcMain.handle('load-task-tracking-data', async (event, projectId, taskId) => {
     return null;
   }
   
-  // Return the full data structure
+  // Filter by today if requested
+  if (dateFilter === 'today' && loadedData.trackingData) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStart = today.getTime();
+    const todayEnd = todayStart + (24 * 60 * 60 * 1000) - 1;
+    
+    // Filter activity logs
+    if (loadedData.trackingData.activityLogs && Array.isArray(loadedData.trackingData.activityLogs)) {
+      loadedData.trackingData.activityLogs = loadedData.trackingData.activityLogs.filter(log => {
+        const logTime = log.timestamp ? new Date(log.timestamp).getTime() : 
+                       (log.createdAt ? new Date(log.createdAt).getTime() : 0);
+        return logTime >= todayStart && logTime <= todayEnd;
+      });
+    }
+    
+    // Filter screenshots
+    if (loadedData.trackingData.screenshots && Array.isArray(loadedData.trackingData.screenshots)) {
+      loadedData.trackingData.screenshots = loadedData.trackingData.screenshots.filter(screenshot => {
+        const screenshotTime = screenshot.timestamp ? new Date(screenshot.timestamp).getTime() :
+                             (screenshot.createdAt ? new Date(screenshot.createdAt).getTime() : 0);
+        return screenshotTime >= todayStart && screenshotTime <= todayEnd;
+      });
+    }
+    
+    // Filter webcam photos
+    if (loadedData.trackingData.webcamPhotos && Array.isArray(loadedData.trackingData.webcamPhotos)) {
+      loadedData.trackingData.webcamPhotos = loadedData.trackingData.webcamPhotos.filter(photo => {
+        const photoTime = photo.timestamp ? new Date(photo.timestamp).getTime() :
+                        (photo.createdAt ? new Date(photo.createdAt).getTime() : 0);
+        return photoTime >= todayStart && photoTime <= todayEnd;
+      });
+    }
+    
+    // Filter activeWindows by lastSeen
+    if (loadedData.trackingData.activeWindows && Array.isArray(loadedData.trackingData.activeWindows)) {
+      loadedData.trackingData.activeWindows = loadedData.trackingData.activeWindows.filter(win => {
+        const lastSeen = win.lastSeen || win.timestamp || 0;
+        return lastSeen >= todayStart && lastSeen <= todayEnd;
+      }).map(win => {
+        // Also filter URLs within windows
+        if (win.urls && Array.isArray(win.urls)) {
+          win.urls = win.urls.filter(urlEntry => {
+            const urlTime = urlEntry.timestamp || 0;
+            return urlTime >= todayStart && urlTime <= todayEnd;
+          });
+        }
+        return win;
+      });
+    }
+    
+    // Filter urlHistory
+    if (loadedData.trackingData.urlHistory && Array.isArray(loadedData.trackingData.urlHistory)) {
+      loadedData.trackingData.urlHistory = loadedData.trackingData.urlHistory.filter(urlEntry => {
+        const urlTime = urlEntry.timestamp || 0;
+        return urlTime >= todayStart && urlTime <= todayEnd;
+      });
+    }
+    
+    // Recalculate summary from filtered logs and activeWindows
+    // Always recalculate to ensure accuracy after filtering
+    const filteredLogs = loadedData.trackingData.activityLogs || [];
+    let totalKeystrokes = filteredLogs.reduce((sum, log) => sum + (log.keyboardEvents || log.keystrokes || 0), 0);
+    let totalMouseClicks = filteredLogs.reduce((sum, log) => sum + (log.mouseEvents || log.clicks || 0), 0);
+    
+    // Also sum from activeWindows (they contain cumulative keystrokes/clicks per window)
+    const filteredWindows = loadedData.trackingData.activeWindows || [];
+    const windowsKeystrokes = filteredWindows.reduce((sum, win) => sum + (win.keystrokes || 0), 0);
+    const windowsClicks = filteredWindows.reduce((sum, win) => sum + (win.mouseClicks || 0), 0);
+    
+    // Use the maximum of logs or windows (windows might have more accurate cumulative data)
+    // If both are 0, keep 0; otherwise use the maximum
+    totalKeystrokes = Math.max(totalKeystrokes, windowsKeystrokes);
+    totalMouseClicks = Math.max(totalMouseClicks, windowsClicks);
+    
+    // Initialize or update summary - always ensure it exists
+    if (!loadedData.trackingData.summary) {
+      loadedData.trackingData.summary = {
+        totalKeystrokes: 0,
+        totalMouseClicks: 0,
+        totalTime: 0,
+        averageProductivityScore: 0
+      };
+    }
+    
+    // Always update summary values (even if 0, to ensure they're set)
+    loadedData.trackingData.summary.totalKeystrokes = totalKeystrokes;
+    loadedData.trackingData.summary.totalMouseClicks = totalMouseClicks;
+    
+    // Log for debugging (only in dev mode)
+    if (isDev) {
+      console.log(`[LOAD-TASK-DATA] Recalculated summary for task ${taskId}: ${totalKeystrokes} keystrokes, ${totalMouseClicks} clicks (from ${filteredLogs.length} logs, ${filteredWindows.length} windows)`);
+    }
+    
+    // Calculate total time from filtered logs
+    if (filteredLogs.length > 0) {
+      const sortedLogs = filteredLogs.sort((a, b) => {
+        const aTime = a.timestamp ? new Date(a.timestamp).getTime() : 
+                     (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+        const bTime = b.timestamp ? new Date(b.timestamp).getTime() : 
+                     (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+        return aTime - bTime;
+      });
+      const firstLog = sortedLogs[0];
+      const lastLog = sortedLogs[sortedLogs.length - 1];
+      const startTime = firstLog.timestamp ? new Date(firstLog.timestamp).getTime() : 
+                       (firstLog.createdAt ? new Date(firstLog.createdAt).getTime() : 0);
+      const endTime = lastLog.timestamp ? new Date(lastLog.timestamp).getTime() : 
+                     (lastLog.createdAt ? new Date(lastLog.createdAt).getTime() : 0);
+      loadedData.trackingData.summary.totalTime = Math.floor((endTime - startTime) / 1000);
+    } else {
+      // No logs - calculate from activeWindows time capsules if available
+      let totalTimeFromWindows = 0;
+      filteredWindows.forEach(win => {
+        if (win.timeCapsules && Array.isArray(win.timeCapsules)) {
+          const windowTime = win.timeCapsules.reduce((sum, capsule) => sum + (capsule.duration || 0), 0);
+          totalTimeFromWindows += windowTime;
+        } else if (win.timeSpent) {
+          totalTimeFromWindows += win.timeSpent;
+        }
+      });
+      loadedData.trackingData.summary.totalTime = totalTimeFromWindows;
+    }
+  }
+  
+  // Return the full data structure (filtered if dateFilter is 'today')
   return {
     metadata: loadedData.metadata,
     trackingData: loadedData.trackingData
   };
+});
+
+// Get last active task state for restoration - only uses task JSON files
+ipcMain.handle('get-last-active-task-state', async () => {
+  // Find last active task from JSON files only
+  const lastTask = findLastActiveTaskFromFiles();
+  if (lastTask) {
+    const taskData = loadTaskTrackingDataFromFile(lastTask.projectId, lastTask.taskId);
+    if (taskData) {
+      // Calculate elapsed time from activity logs if available
+      let elapsedSeconds = 0;
+      const activityLogs = taskData.trackingData?.activityLogs || [];
+      if (activityLogs.length > 0) {
+        // Calculate time from first to last log
+        const firstLog = activityLogs[0];
+        const lastLog = activityLogs[activityLogs.length - 1];
+        const firstTime = new Date(firstLog.timestamp || firstLog.createdAt).getTime();
+        const lastTime = new Date(lastLog.timestamp || lastLog.createdAt).getTime();
+        elapsedSeconds = Math.floor((lastTime - firstTime) / 1000);
+      } else if (taskData.trackingData?.summary?.totalTime) {
+        // Use summary totalTime if available
+        elapsedSeconds = taskData.trackingData.summary.totalTime;
+      }
+      
+      return {
+        projectId: lastTask.projectId,
+        taskId: lastTask.taskId,
+        isTimerRunning: false, // Can't determine from file alone - user needs to manually start timer
+        startTime: null,
+        elapsedSeconds: elapsedSeconds,
+        taskData: {
+          metadata: taskData.metadata,
+          trackingData: taskData.trackingData
+        }
+      };
+    }
+  }
+  
+  return null;
 });
 
 // Get the file path where JSON files are saved
@@ -3489,77 +3873,77 @@ ipcMain.handle('verify-tracking-data', async (event, projectId = null) => {
       projects: {}
     };
     
-    // Get all project directories
-    const projectDirs = projectId 
-      ? [projectId] 
-      : fs.readdirSync(trackingDataPath).filter(item => {
-          const itemPath = path.join(trackingDataPath, item);
-          return fs.statSync(itemPath).isDirectory();
-        });
+    // Find all task files using new structure (supports both old and new)
+    const taskFiles = findAllTaskFiles(trackingDataPath);
     
-    for (const projId of projectDirs) {
-      const projectDir = path.join(trackingDataPath, projId);
-      if (!fs.existsSync(projectDir)) continue;
+    // Filter by projectId if specified
+    const filteredTaskFiles = projectId 
+      ? taskFiles.filter(tf => tf.projectId === projectId)
+      : taskFiles;
+    
+    // Group files by project
+    for (const taskFile of filteredTaskFiles) {
+      const { filePath, projectId: projId, taskId } = taskFile;
+      const fileName = path.basename(filePath);
       
-      const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.json'));
-      results.projects[projId] = {
-        projectId: projId,
-        files: [],
-        totalFiles: files.length,
-        totalSize: 0
-      };
+      if (!results.projects[projId]) {
+        results.projects[projId] = {
+          projectId: projId,
+          files: [],
+          totalFiles: 0,
+          totalSize: 0
+        };
+      }
       
-      for (const file of files) {
-        const filePath = path.join(projectDir, file);
-        results.totalFiles++;
+      results.totalFiles++;
+      results.projects[projId].totalFiles++;
+      
+      try {
+        const stats = fs.statSync(filePath);
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+        const data = JSON.parse(fileContent);
         
-        try {
-          const stats = fs.statSync(filePath);
-          const fileContent = fs.readFileSync(filePath, 'utf8');
-          const data = JSON.parse(fileContent);
+        // Verify structure
+        const isValid = data.metadata && 
+                       data.trackingData && 
+                       data.metadata.sessionUUID &&
+                       data.metadata.taskId;
+        
+        if (isValid) {
+          results.validFiles++;
+          results.totalSize += stats.size;
+          results.projects[projId].totalSize += stats.size;
           
-          // Verify structure
-          const isValid = data.metadata && 
-                         data.trackingData && 
-                         data.metadata.sessionUUID &&
-                         data.metadata.taskId;
-          
-          if (isValid) {
-            results.validFiles++;
-            results.totalSize += stats.size;
-            results.projects[projId].totalSize += stats.size;
-            
-            results.projects[projId].files.push({
-              filename: file,
-              uuid: data.metadata.sessionUUID,
-              taskId: data.metadata.taskId,
-              taskName: data.metadata.taskName,
-              createdAt: data.metadata.createdAt,
-              lastUpdated: data.metadata.lastUpdated,
-              size: stats.size,
-              keystrokes: data.trackingData.summary?.totalKeystrokes || 0,
-              mouseClicks: data.trackingData.summary?.totalMouseClicks || 0,
-              activityLogs: data.trackingData.activityLogs?.length || 0,
-              screenshots: data.trackingData.screenshots?.length || 0,
-              webcamPhotos: data.trackingData.webcamPhotos?.length || 0,
-              valid: true
-            });
-          } else {
-            results.invalidFiles++;
-            results.projects[projId].files.push({
-              filename: file,
-              valid: false,
-              error: 'Invalid structure'
-            });
-          }
-        } catch (error) {
+          results.projects[projId].files.push({
+            filename: fileName,
+            uuid: data.metadata.sessionUUID,
+            taskId: data.metadata.taskId,
+            taskName: data.metadata.taskName,
+            createdAt: data.metadata.createdAt,
+            lastUpdated: data.metadata.lastUpdated,
+            size: stats.size,
+            keystrokes: data.trackingData.summary?.totalKeystrokes || 0,
+            mouseClicks: data.trackingData.summary?.totalMouseClicks || 0,
+            activityLogs: data.trackingData.activityLogs?.length || 0,
+            screenshots: data.trackingData.screenshots?.length || 0,
+            webcamPhotos: data.trackingData.webcamPhotos?.length || 0,
+            valid: true
+          });
+        } else {
           results.invalidFiles++;
           results.projects[projId].files.push({
-            filename: file,
+            filename: fileName,
             valid: false,
-            error: error.message
+            error: 'Invalid structure'
           });
         }
+      } catch (error) {
+        results.invalidFiles++;
+        results.projects[projId].files.push({
+          filename: fileName,
+          valid: false,
+          error: error.message
+        });
       }
     }
     
@@ -3577,22 +3961,188 @@ ipcMain.handle('verify-tracking-data', async (event, projectId = null) => {
   }
 });
 
+// Get all tasks from today (for restoration and continuation)
+ipcMain.handle('get-today-tasks', async () => {
+  try {
+    const projectRoot = path.join(__dirname, '..');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    
+    if (!fs.existsSync(trackingDataPath)) {
+      return [];
+    }
+    
+    // Get today's date in YYYY-MM-DD format
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+    
+    // Find all task files using new structure (supports both old and new)
+    const taskFiles = findAllTaskFiles(trackingDataPath);
+    const todayTasks = [];
+    
+    for (const taskFile of taskFiles) {
+      try {
+        const fileContent = fs.readFileSync(taskFile.filePath, 'utf8');
+        const data = JSON.parse(fileContent);
+        
+        if (!data.metadata) continue;
+        
+        // Check if task was created or updated today
+        const createdAt = data.metadata.createdAt ? new Date(data.metadata.createdAt).toISOString().split('T')[0] : null;
+        const lastUpdated = data.metadata.lastUpdated ? new Date(data.metadata.lastUpdated).toISOString().split('T')[0] : null;
+        
+        // Include if created today OR last updated today
+        if (createdAt === todayStr || lastUpdated === todayStr) {
+          // Calculate total time from activeWindows (most accurate - uses time capsules)
+          // Filter windows by today's date first
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          const todayStart = today.getTime();
+          const todayEnd = todayStart + (24 * 60 * 60 * 1000) - 1;
+          
+          const activeWindows = data.trackingData?.activeWindows || [];
+          let totalTime = 0;
+          
+          // Calculate total time from time capsules filtered by today (most accurate)
+          // Sum timeSpent from all windows that were active today
+          const todayWindows = activeWindows.filter(win => {
+            const lastSeen = win.lastSeen || win.timestamp || 0;
+            return lastSeen >= todayStart && lastSeen <= todayEnd;
+          });
+          
+          // Calculate total time from time capsules (most accurate)
+          todayWindows.forEach(win => {
+            if (win.timeCapsules && Array.isArray(win.timeCapsules)) {
+              // Sum durations from all time capsules that fall within today
+              win.timeCapsules.forEach(capsule => {
+                const capsuleStart = capsule.startTime || 0;
+                const capsuleEnd = capsule.endTime || 0;
+                // Only count capsules that overlap with today
+                if (capsuleStart <= todayEnd && capsuleEnd >= todayStart) {
+                  // Calculate overlap with today
+                  const overlapStart = Math.max(capsuleStart, todayStart);
+                  const overlapEnd = Math.min(capsuleEnd, todayEnd);
+                  const overlapDuration = Math.max(0, Math.floor((overlapEnd - overlapStart) / 1000));
+                  totalTime += overlapDuration;
+                }
+              });
+            } else if (win.timeSpent) {
+              // Fallback to timeSpent if no capsules (for backward compatibility)
+              // But only count if window was active today
+              const lastSeen = win.lastSeen || win.timestamp || 0;
+              if (lastSeen >= todayStart && lastSeen <= todayEnd) {
+                totalTime += win.timeSpent;
+              }
+            }
+          });
+          
+          // Last fallback: calculate from activity logs (less accurate)
+          if (totalTime === 0) {
+            const activityLogs = data.trackingData?.activityLogs || [];
+            if (activityLogs.length > 0) {
+              // Filter logs by today
+              const todayLogs = activityLogs.filter(log => {
+                const logTime = log.timestamp ? new Date(log.timestamp).getTime() : 
+                               (log.createdAt ? new Date(log.createdAt).getTime() : 0);
+                return logTime >= todayStart && logTime <= todayEnd;
+              });
+              
+              if (todayLogs.length > 0) {
+                const firstLog = todayLogs[0];
+                const lastLog = todayLogs[todayLogs.length - 1];
+                const firstTime = firstLog.timestamp ? new Date(firstLog.timestamp).getTime() : 
+                                 (firstLog.createdAt ? new Date(firstLog.createdAt).getTime() : 0);
+                const lastTime = lastLog.timestamp ? new Date(lastLog.timestamp).getTime() : 
+                               (lastLog.createdAt ? new Date(lastLog.createdAt).getTime() : 0);
+                totalTime = Math.floor((lastTime - firstTime) / 1000);
+              }
+            }
+          }
+          
+          // Filter activity logs, screenshots, and webcam photos by today
+          const activityLogs = data.trackingData?.activityLogs || [];
+          const todayLogs = activityLogs.filter(log => {
+            const logTime = log.timestamp ? new Date(log.timestamp).getTime() : 
+                           (log.createdAt ? new Date(log.createdAt).getTime() : 0);
+            return logTime >= todayStart && logTime <= todayEnd;
+          });
+          
+          const screenshots = data.trackingData?.screenshots || [];
+          const todayScreenshots = screenshots.filter(screenshot => {
+            const screenshotTime = screenshot.timestamp ? new Date(screenshot.timestamp).getTime() :
+                                 (screenshot.createdAt ? new Date(screenshot.createdAt).getTime() : 0);
+            return screenshotTime >= todayStart && screenshotTime <= todayEnd;
+          });
+          
+          const webcamPhotos = data.trackingData?.webcamPhotos || [];
+          const todayWebcamPhotos = webcamPhotos.filter(photo => {
+            const photoTime = photo.timestamp ? new Date(photo.timestamp).getTime() :
+                            (photo.createdAt ? new Date(photo.createdAt).getTime() : 0);
+            return photoTime >= todayStart && photoTime <= todayEnd;
+          });
+          
+          // Only include task if it has today's activity
+          if (totalTime > 0 || todayLogs.length > 0 || todayScreenshots.length > 0 || todayWebcamPhotos.length > 0) {
+            if (isDev) {
+              console.log(`[GET-TODAY-TASKS] Task ${taskFile.taskId}: totalTime=${totalTime}s (${Math.floor(totalTime/60)}m), logs=${todayLogs.length}, windows=${todayWindows.length}`);
+            }
+            todayTasks.push({
+              projectId: taskFile.projectId,
+              taskId: taskFile.taskId,
+              taskName: data.metadata.taskName || 'Unknown Task',
+              projectName: data.metadata.projectName || 'Unknown Project',
+              createdAt: data.metadata.createdAt,
+              lastUpdated: data.metadata.lastUpdated,
+              totalTime: totalTime,
+              keystrokes: data.trackingData?.summary?.totalKeystrokes || 0,
+              mouseClicks: data.trackingData?.summary?.totalMouseClicks || 0,
+              activityLogCount: todayLogs.length, // Use filtered count
+              screenshotCount: todayScreenshots.length, // Use filtered count
+              webcamPhotoCount: todayWebcamPhotos.length, // Use filtered count
+              summary: data.trackingData?.summary
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`[GET-TODAY-TASKS] Error reading file ${taskFile.filePath}:`, error);
+      }
+    }
+    
+    // Sort by lastUpdated (most recent first)
+    todayTasks.sort((a, b) => {
+      const aTime = a.lastUpdated ? new Date(a.lastUpdated).getTime() : 0;
+      const bTime = b.lastUpdated ? new Date(b.lastUpdated).getTime() : 0;
+      return bTime - aTime;
+    });
+    
+    return todayTasks;
+  } catch (error) {
+    console.error('[GET-TODAY-TASKS] Error getting today\'s tasks:', error);
+    return [];
+  }
+});
+
 // Get all tasks for a project - ONE FILE PER TASK (taskId-based)
 ipcMain.handle('get-project-tasks-tracking', async (event, projectId) => {
   try {
     const projectRoot = path.join(__dirname, '..');
-    const projectDir = path.join(projectRoot, 'tracking-data', projectId || 'unknown');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
     
-    if (!fs.existsSync(projectDir)) {
+    if (!fs.existsSync(trackingDataPath)) {
       return [];
     }
     
-    const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.json'));
+    // Find all task files using new structure (supports both old and new)
+    const taskFiles = findAllTaskFiles(trackingDataPath);
+    
+    // Filter by projectId if specified
+    const filteredTaskFiles = projectId 
+      ? taskFiles.filter(tf => tf.projectId === projectId)
+      : taskFiles;
+    
     const tasks = [];
     
-    for (const file of files) {
-      const filePath = path.join(projectDir, file);
-      const taskId = file.replace('.json', ''); // Filename is the taskId
+    for (const taskFile of filteredTaskFiles) {
+      const { filePath, taskId } = taskFile;
       
       try {
         const fileContent = fs.readFileSync(filePath, 'utf8');
@@ -3600,7 +4150,7 @@ ipcMain.handle('get-project-tasks-tracking', async (event, projectId) => {
         
         tasks.push({
           taskId: taskId,
-          projectId: projectId,
+          projectId: taskFile.projectId,
           taskName: data.metadata?.taskName || 'Unknown Task',
           projectName: data.metadata?.projectName || 'Unknown Project',
           createdAt: data.metadata?.createdAt,
@@ -3609,7 +4159,7 @@ ipcMain.handle('get-project-tasks-tracking', async (event, projectId) => {
           filePath: filePath
         });
       } catch (error) {
-        console.error(`Error loading task file ${file}:`, error);
+        console.error(`Error loading task file ${filePath}:`, error);
       }
     }
     
@@ -3627,7 +4177,8 @@ let trackingDataWatchers = new Map();
 let combinedInsightsListeners = new Set();
 
 // Function to combine all tracking JSON files
-const combineAllTrackingData = () => {
+// dateFilter: 'today' | 'all' - filters data by date (default: 'today')
+const combineAllTrackingData = (dateFilter = 'today') => {
   try {
     const projectRoot = path.join(__dirname, '..');
     const trackingDataPath = path.join(projectRoot, 'tracking-data');
@@ -3655,6 +4206,12 @@ const combineAllTrackingData = () => {
       };
     }
     
+    // Calculate today's date range (start of today to end of today)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStart = today.getTime();
+    const todayEnd = todayStart + (24 * 60 * 60 * 1000) - 1; // End of today
+    
     const combined = {
       activityLogs: [],
       screenshots: [],
@@ -3678,17 +4235,13 @@ const combineAllTrackingData = () => {
     let totalProductivityScores = 0;
     let totalProductivityCount = 0;
     
-    // Get all project directories
-    const projectDirs = fs.readdirSync(trackingDataPath).filter(item => {
-      const itemPath = path.join(trackingDataPath, item);
-      return fs.statSync(itemPath).isDirectory();
-    });
+    // Find all task files using new structure (supports both old and new)
+    const taskFiles = findAllTaskFiles(trackingDataPath);
     
-    for (const projId of projectDirs) {
-      const projectDir = path.join(trackingDataPath, projId);
-      if (!fs.existsSync(projectDir)) continue;
+    for (const taskFile of taskFiles) {
+      const { filePath, projectId: projId, taskId } = taskFile;
       
-      const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.json'));
+      if (!fs.existsSync(filePath)) continue;
       
       if (!projects[projId]) {
         projects[projId] = {
@@ -3700,39 +4253,76 @@ const combineAllTrackingData = () => {
         };
       }
       
-      for (const file of files) {
-        const filePath = path.join(projectDir, file);
-        const taskId = file.replace('.json', '');
+      try {
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+        const data = JSON.parse(fileContent);
         
-        try {
-          const fileContent = fs.readFileSync(filePath, 'utf8');
-          const data = JSON.parse(fileContent);
+        if (!data.metadata || !data.trackingData) continue;
+        
+        // Filter by date: only include tasks that were created or updated today
+        if (dateFilter === 'today') {
+          const createdAt = data.metadata.createdAt ? new Date(data.metadata.createdAt).getTime() : 0;
+          const lastUpdated = data.metadata.lastUpdated ? new Date(data.metadata.lastUpdated).getTime() : 0;
           
-          if (!data.metadata || !data.trackingData) continue;
-          
-          // Get project name from first task
-          if (!projects[projId].projectName && data.metadata.projectName) {
-            projects[projId].projectName = data.metadata.projectName;
+          // Skip if task was neither created nor updated today
+          if ((createdAt < todayStart || createdAt > todayEnd) && 
+              (lastUpdated < todayStart || lastUpdated > todayEnd)) {
+            continue; // Skip this task file entirely
           }
+        }
+        
+        // Get project name from first task
+        if (!projects[projId].projectName && data.metadata.projectName) {
+          projects[projId].projectName = data.metadata.projectName;
+        }
           
-          // Combine activity logs
+          // Combine activity logs - filter by today if needed
           if (data.trackingData.activityLogs && Array.isArray(data.trackingData.activityLogs)) {
-            combined.activityLogs.push(...data.trackingData.activityLogs);
+            const filteredLogs = dateFilter === 'today' 
+              ? data.trackingData.activityLogs.filter(log => {
+                  const logTime = log.timestamp ? new Date(log.timestamp).getTime() : 
+                                 (log.createdAt ? new Date(log.createdAt).getTime() : 0);
+                  return logTime >= todayStart && logTime <= todayEnd;
+                })
+              : data.trackingData.activityLogs;
+            combined.activityLogs.push(...filteredLogs);
           }
           
-          // Combine screenshots
+          // Combine screenshots - filter by today if needed
           if (data.trackingData.screenshots && Array.isArray(data.trackingData.screenshots)) {
-            combined.screenshots.push(...data.trackingData.screenshots);
+            const filteredScreenshots = dateFilter === 'today'
+              ? data.trackingData.screenshots.filter(screenshot => {
+                  const screenshotTime = screenshot.timestamp ? new Date(screenshot.timestamp).getTime() :
+                                       (screenshot.createdAt ? new Date(screenshot.createdAt).getTime() : 0);
+                  return screenshotTime >= todayStart && screenshotTime <= todayEnd;
+                })
+              : data.trackingData.screenshots;
+            combined.screenshots.push(...filteredScreenshots);
           }
           
-          // Combine webcam photos
+          // Combine webcam photos - filter by today if needed
           if (data.trackingData.webcamPhotos && Array.isArray(data.trackingData.webcamPhotos)) {
-            combined.webcamPhotos.push(...data.trackingData.webcamPhotos);
+            const filteredWebcamPhotos = dateFilter === 'today'
+              ? data.trackingData.webcamPhotos.filter(photo => {
+                  const photoTime = photo.timestamp ? new Date(photo.timestamp).getTime() :
+                                  (photo.createdAt ? new Date(photo.createdAt).getTime() : 0);
+                  return photoTime >= todayStart && photoTime <= todayEnd;
+                })
+              : data.trackingData.webcamPhotos;
+            combined.webcamPhotos.push(...filteredWebcamPhotos);
           }
           
-          // Combine activeWindows - merge windows with same windowKey
+          // Combine activeWindows - merge windows with same windowKey, filter by today if needed
           if (data.trackingData.activeWindows && Array.isArray(data.trackingData.activeWindows)) {
-            data.trackingData.activeWindows.forEach((win) => {
+            const filteredWindows = dateFilter === 'today'
+              ? data.trackingData.activeWindows.filter(win => {
+                  // Check if window was active today (lastSeen is today)
+                  const lastSeen = win.lastSeen || win.timestamp || 0;
+                  return lastSeen >= todayStart && lastSeen <= todayEnd;
+                })
+              : data.trackingData.activeWindows;
+            
+            filteredWindows.forEach((win) => {
               const windowKey = win.windowKey || win.appName || 'Unknown';
               
               if (combinedWindowsMap.has(windowKey)) {
@@ -3743,10 +4333,17 @@ const combineAllTrackingData = () => {
                 existing.timeSpent = (existing.timeSpent || 0) + (win.timeSpent || 0);
                 existing.lastSeen = Math.max(existing.lastSeen || 0, win.lastSeen || 0);
                 
-                // Merge URLs if available
+                // Merge URLs if available - filter by today if needed
                 if (win.urls && Array.isArray(win.urls)) {
                   if (!existing.urls) existing.urls = [];
-                  win.urls.forEach((urlEntry) => {
+                  const filteredUrls = dateFilter === 'today'
+                    ? win.urls.filter(urlEntry => {
+                        const urlTime = urlEntry.timestamp || 0;
+                        return urlTime >= todayStart && urlTime <= todayEnd;
+                      })
+                    : win.urls;
+                  
+                  filteredUrls.forEach((urlEntry) => {
                     const existingUrl = existing.urls.find((u) => {
                       if (urlEntry.url && u.url) {
                         return u.url === urlEntry.url;
@@ -3771,6 +4368,14 @@ const combineAllTrackingData = () => {
                 }
               } else {
                 // New window - add to map
+                // Filter URLs by today if needed
+                const filteredUrls = win.urls && dateFilter === 'today'
+                  ? win.urls.filter(urlEntry => {
+                      const urlTime = urlEntry.timestamp || 0;
+                      return urlTime >= todayStart && urlTime <= todayEnd;
+                    })
+                  : (win.urls || []);
+                
                 combinedWindowsMap.set(windowKey, {
                   windowKey: windowKey,
                   appName: win.appName || win.windowKey || 'Unknown',
@@ -3779,20 +4384,27 @@ const combineAllTrackingData = () => {
                   mouseClicks: win.mouseClicks || 0,
                   timeSpent: win.timeSpent || 0,
                   lastSeen: win.lastSeen || Date.now(),
-                  urls: win.urls ? win.urls.map((u) => ({
+                  urls: filteredUrls.map((u) => ({
                     url: u.url || null,
                     title: u.title || null,
                     timestamp: u.timestamp || Date.now(),
                     count: u.count || 1
-                  })) : []
+                  }))
                 });
               }
             });
           }
           
-          // Combine urlHistory - deduplicate by URL
+          // Combine urlHistory - deduplicate by URL, filter by today if needed
           if (data.trackingData.urlHistory && Array.isArray(data.trackingData.urlHistory)) {
-            data.trackingData.urlHistory.forEach((urlEntry) => {
+            const filteredUrlHistory = dateFilter === 'today'
+              ? data.trackingData.urlHistory.filter(urlEntry => {
+                  const urlTime = urlEntry.timestamp || 0;
+                  return urlTime >= todayStart && urlTime <= todayEnd;
+                })
+              : data.trackingData.urlHistory;
+            
+            filteredUrlHistory.forEach((urlEntry) => {
               const urlKey = urlEntry.url || urlEntry.title || '';
               const existing = combinedUrlHistory.find((u) => {
                 if (urlEntry.url && u.url) {
@@ -3813,47 +4425,175 @@ const combineAllTrackingData = () => {
             });
           }
           
-          // Aggregate summary
+          // Aggregate summary - use summary totals or calculate from activeWindows
           if (data.trackingData.summary) {
-            combined.summary.totalKeystrokes += data.trackingData.summary.totalKeystrokes || 0;
-            combined.summary.totalMouseClicks += data.trackingData.summary.totalMouseClicks || 0;
-            
-            // Calculate average productivity score
-            if (data.trackingData.activityLogs && data.trackingData.activityLogs.length > 0) {
-              const taskScores = data.trackingData.activityLogs
-                .map(log => log.productivityScore || log.compositeScore || 0)
-                .filter(score => score > 0);
+            // For today filter: Since tasks are already filtered to today, use summary totals
+            // OR calculate from activeWindows (which have accurate per-window totals)
+            if (dateFilter === 'today') {
+              // Calculate from activeWindows (most accurate - sums keystrokes/clicks from all windows)
+              // This ensures we get the actual cumulative totals, not per-log values
+              let taskKeystrokes = 0;
+              let taskClicks = 0;
               
-              if (taskScores.length > 0) {
-                const taskAvg = taskScores.reduce((sum, s) => sum + s, 0) / taskScores.length;
-                totalProductivityScores += taskAvg;
-                totalProductivityCount++;
+              if (data.trackingData.activeWindows && Array.isArray(data.trackingData.activeWindows)) {
+                // Sum keystrokes and clicks from all windows that were active today
+                const filteredWindows = data.trackingData.activeWindows.filter(win => {
+                  const lastSeen = win.lastSeen || win.timestamp || 0;
+                  return lastSeen >= todayStart && lastSeen <= todayEnd;
+                });
+                
+                taskKeystrokes = filteredWindows.reduce((sum, win) => sum + (win.keystrokes || 0), 0);
+                taskClicks = filteredWindows.reduce((sum, win) => sum + (win.mouseClicks || 0), 0);
+              }
+              
+              // Fallback to summary totals if activeWindows calculation gives 0
+              // (This handles cases where windows data might not be available)
+              if (taskKeystrokes === 0 && taskClicks === 0) {
+                taskKeystrokes = data.trackingData.summary.totalKeystrokes || 0;
+                taskClicks = data.trackingData.summary.totalMouseClicks || 0;
+              }
+              
+              combined.summary.totalKeystrokes += taskKeystrokes;
+              combined.summary.totalMouseClicks += taskClicks;
+              
+              // Calculate average productivity score from today's logs
+              const filteredLogs = data.trackingData.activityLogs 
+                ? data.trackingData.activityLogs.filter(log => {
+                    const logTime = log.timestamp ? new Date(log.timestamp).getTime() : 
+                                   (log.createdAt ? new Date(log.createdAt).getTime() : 0);
+                    return logTime >= todayStart && logTime <= todayEnd;
+                  })
+                : [];
+              
+              if (filteredLogs.length > 0) {
+                const taskScores = filteredLogs
+                  .map(log => log.productivityScore || log.compositeScore || 0)
+                  .filter(score => score > 0);
+                
+                if (taskScores.length > 0) {
+                  const taskAvg = taskScores.reduce((sum, s) => sum + s, 0) / taskScores.length;
+                  totalProductivityScores += taskAvg;
+                  totalProductivityCount++;
+                }
+              }
+            } else {
+              // For 'all', use summary as-is
+              combined.summary.totalKeystrokes += data.trackingData.summary.totalKeystrokes || 0;
+              combined.summary.totalMouseClicks += data.trackingData.summary.totalMouseClicks || 0;
+              
+              // Calculate average productivity score
+              if (data.trackingData.activityLogs && data.trackingData.activityLogs.length > 0) {
+                const taskScores = data.trackingData.activityLogs
+                  .map(log => log.productivityScore || log.compositeScore || 0)
+                  .filter(score => score > 0);
+                
+                if (taskScores.length > 0) {
+                  const taskAvg = taskScores.reduce((sum, s) => sum + s, 0) / taskScores.length;
+                  totalProductivityScores += taskAvg;
+                  totalProductivityCount++;
+                }
               }
             }
           }
           
-          // Add to projects summary
-          projects[projId].taskCount++;
-          projects[projId].totalKeystrokes += data.trackingData.summary?.totalKeystrokes || 0;
-          projects[projId].totalMouseClicks += data.trackingData.summary?.totalMouseClicks || 0;
+          // Add to projects summary - use same calculation as combined summary
+          if (dateFilter === 'today') {
+            // Calculate from activeWindows (same logic as combined summary)
+            let taskKeystrokes = 0;
+            let taskClicks = 0;
+            
+            if (data.trackingData.activeWindows && Array.isArray(data.trackingData.activeWindows)) {
+              const filteredWindows = data.trackingData.activeWindows.filter(win => {
+                const lastSeen = win.lastSeen || win.timestamp || 0;
+                return lastSeen >= todayStart && lastSeen <= todayEnd;
+              });
+              
+              taskKeystrokes = filteredWindows.reduce((sum, win) => sum + (win.keystrokes || 0), 0);
+              taskClicks = filteredWindows.reduce((sum, win) => sum + (win.mouseClicks || 0), 0);
+            }
+            
+            // Fallback to summary totals if activeWindows calculation gives 0
+            if (taskKeystrokes === 0 && taskClicks === 0) {
+              taskKeystrokes = data.trackingData.summary?.totalKeystrokes || 0;
+              taskClicks = data.trackingData.summary?.totalMouseClicks || 0;
+            }
+            
+            // Only count if task has today's activity
+            const filteredLogs = data.trackingData.activityLogs 
+              ? data.trackingData.activityLogs.filter(log => {
+                  const logTime = log.timestamp ? new Date(log.timestamp).getTime() : 
+                                 (log.createdAt ? new Date(log.createdAt).getTime() : 0);
+                  return logTime >= todayStart && logTime <= todayEnd;
+                })
+              : [];
+            
+            if (filteredLogs.length > 0 || taskKeystrokes > 0 || taskClicks > 0) {
+              projects[projId].taskCount++;
+              projects[projId].totalKeystrokes += taskKeystrokes;
+              projects[projId].totalMouseClicks += taskClicks;
+            }
+          } else {
+            projects[projId].taskCount++;
+            projects[projId].totalKeystrokes += data.trackingData.summary?.totalKeystrokes || 0;
+            projects[projId].totalMouseClicks += data.trackingData.summary?.totalMouseClicks || 0;
+          }
           
-          // Add task info
-          tasks.push({
-            taskId: taskId,
-            projectId: projId,
-            taskName: data.metadata.taskName || 'Unknown Task',
-            projectName: data.metadata.projectName || 'Unknown Project',
-            createdAt: data.metadata.createdAt,
-            lastUpdated: data.metadata.lastUpdated,
-            summary: data.trackingData.summary,
-            activityLogCount: data.trackingData.activityLogs?.length || 0,
-            screenshotCount: data.trackingData.screenshots?.length || 0,
-            webcamPhotoCount: data.trackingData.webcamPhotos?.length || 0
-          });
+          // Add task info - only include if has today's activity when filtering
+          if (dateFilter === 'today') {
+            const filteredLogs = data.trackingData.activityLogs 
+              ? data.trackingData.activityLogs.filter(log => {
+                  const logTime = log.timestamp ? new Date(log.timestamp).getTime() : 
+                                 (log.createdAt ? new Date(log.createdAt).getTime() : 0);
+                  return logTime >= todayStart && logTime <= todayEnd;
+                })
+              : [];
+            const filteredScreenshots = data.trackingData.screenshots
+              ? data.trackingData.screenshots.filter(screenshot => {
+                  const screenshotTime = screenshot.timestamp ? new Date(screenshot.timestamp).getTime() :
+                                       (screenshot.createdAt ? new Date(screenshot.createdAt).getTime() : 0);
+                  return screenshotTime >= todayStart && screenshotTime <= todayEnd;
+                })
+              : [];
+            const filteredWebcamPhotos = data.trackingData.webcamPhotos
+              ? data.trackingData.webcamPhotos.filter(photo => {
+                  const photoTime = photo.timestamp ? new Date(photo.timestamp).getTime() :
+                                  (photo.createdAt ? new Date(photo.createdAt).getTime() : 0);
+                  return photoTime >= todayStart && photoTime <= todayEnd;
+                })
+              : [];
+            
+            // Only add task if it has today's activity
+            if (filteredLogs.length > 0 || filteredScreenshots.length > 0 || filteredWebcamPhotos.length > 0) {
+              tasks.push({
+                taskId: taskId,
+                projectId: projId,
+                taskName: data.metadata.taskName || 'Unknown Task',
+                projectName: data.metadata.projectName || 'Unknown Project',
+                createdAt: data.metadata.createdAt,
+                lastUpdated: data.metadata.lastUpdated,
+                summary: data.trackingData.summary,
+                activityLogCount: filteredLogs.length,
+                screenshotCount: filteredScreenshots.length,
+                webcamPhotoCount: filteredWebcamPhotos.length
+              });
+            }
+          } else {
+            tasks.push({
+              taskId: taskId,
+              projectId: projId,
+              taskName: data.metadata.taskName || 'Unknown Task',
+              projectName: data.metadata.projectName || 'Unknown Project',
+              createdAt: data.metadata.createdAt,
+              lastUpdated: data.metadata.lastUpdated,
+              summary: data.trackingData.summary,
+              activityLogCount: data.trackingData.activityLogs?.length || 0,
+              screenshotCount: data.trackingData.screenshots?.length || 0,
+              webcamPhotoCount: data.trackingData.webcamPhotos?.length || 0
+            });
+          }
         } catch (error) {
-          console.error(`[COMBINED-INSIGHTS] Error reading file ${file}:`, error.message);
+          console.error(`[COMBINED-INSIGHTS] Error reading file ${filePath}:`, error.message);
         }
-      }
     }
     
     // Calculate average productivity score
@@ -3861,15 +4601,21 @@ const combineAllTrackingData = () => {
       combined.summary.averageProductivityScore = Math.round(totalProductivityScores / totalProductivityCount);
     }
     
-    // Calculate total time from activity logs
+    // Calculate total time from activity logs (already filtered by date if needed)
     if (combined.activityLogs.length > 0) {
-      const sortedLogs = combined.activityLogs.sort((a, b) => 
-        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-      );
+      const sortedLogs = combined.activityLogs.sort((a, b) => {
+        const aTime = a.timestamp ? new Date(a.timestamp).getTime() : 
+                     (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+        const bTime = b.timestamp ? new Date(b.timestamp).getTime() : 
+                     (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+        return aTime - bTime;
+      });
       const firstLog = sortedLogs[0];
       const lastLog = sortedLogs[sortedLogs.length - 1];
-      const startTime = new Date(firstLog.timestamp).getTime();
-      const endTime = new Date(lastLog.timestamp).getTime();
+      const startTime = firstLog.timestamp ? new Date(firstLog.timestamp).getTime() : 
+                       (firstLog.createdAt ? new Date(firstLog.createdAt).getTime() : 0);
+      const endTime = lastLog.timestamp ? new Date(lastLog.timestamp).getTime() : 
+                     (lastLog.createdAt ? new Date(lastLog.createdAt).getTime() : 0);
       combined.summary.totalTime = Math.floor((endTime - startTime) / 1000); // in seconds
     }
     
@@ -3924,9 +4670,30 @@ const combineAllTrackingData = () => {
   }
 };
 
+// Helper function to manually trigger Combined Insights update
+// This is called when tasks start tracking or data is saved
+// NOTE: Must be defined after combineAllTrackingData and combinedInsightsListeners
+const triggerCombinedInsightsUpdate = () => {
+  if (combinedInsightsListeners && combinedInsightsListeners.size > 0) {
+    const combinedData = combineAllTrackingData('today');
+    
+    // Notify all listeners immediately (no debounce for manual triggers)
+    combinedInsightsListeners.forEach(listener => {
+      if (listener && !listener.isDestroyed()) {
+        listener.send('combined-insights-update', combinedData);
+      }
+    });
+    
+    if (isDev) {
+      console.log(`[COMBINED-INSIGHTS] Manually triggered update for ${combinedInsightsListeners.size} listener(s)`);
+    }
+  }
+};
+
 // Get combined insights from all tracking files
-ipcMain.handle('get-combined-insights', async () => {
-  return combineAllTrackingData();
+// dateFilter: 'today' | 'all' - filters data by date (default: 'today')
+ipcMain.handle('get-combined-insights', async (event, dateFilter = 'today') => {
+  return combineAllTrackingData(dateFilter);
 });
 
 // Start watching tracking data directory for changes
@@ -3953,7 +4720,7 @@ const startTrackingDataWatcher = () => {
         }
         
         const debounceTimer = setTimeout(() => {
-          const combinedData = combineAllTrackingData();
+          const combinedData = combineAllTrackingData('today'); // Always use today filter for real-time updates
           
           // Notify all listeners
           combinedInsightsListeners.forEach(listener => {
@@ -3978,11 +4745,11 @@ const startTrackingDataWatcher = () => {
 };
 
 // Register listener for combined insights updates
-ipcMain.handle('subscribe-combined-insights', (event) => {
+ipcMain.handle('subscribe-combined-insights', (event, dateFilter = 'today') => {
   combinedInsightsListeners.add(event.sender);
   
-  // Send initial data
-  const combinedData = combineAllTrackingData();
+  // Send initial data (default to today's data)
+  const combinedData = combineAllTrackingData(dateFilter);
   event.sender.send('combined-insights-update', combinedData);
   
   // Start watcher if not already started
@@ -4004,6 +4771,63 @@ ipcMain.handle('unsubscribe-combined-insights', (event) => {
 // ==================== End Combined Insights IPC Handlers ====================
 
 // ==================== End Task Tracking IPC Handlers ====================
+
+// Get last active task state - now only uses task JSON files (no .active-task-state.json)
+const getLastActiveTaskState = () => {
+  // Always use findLastActiveTaskFromFiles to get the most recently active task
+  // This ensures we only rely on task tracking JSON files
+  return findLastActiveTaskFromFiles();
+};
+
+// Find the most recently active task from JSON files
+const findLastActiveTaskFromFiles = () => {
+  try {
+    const projectRoot = path.join(__dirname, '..');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    
+    if (!fs.existsSync(trackingDataPath)) {
+      return null;
+    }
+    
+    const taskFiles = findAllTaskFiles(trackingDataPath);
+    let lastActiveTask = null;
+    let lastUpdateTime = 0;
+    
+    for (const taskFile of taskFiles) {
+      try {
+        const fileContent = fs.readFileSync(taskFile.filePath, 'utf8');
+        const data = JSON.parse(fileContent);
+        
+        if (data.metadata && data.metadata.lastUpdated) {
+          const updateTime = new Date(data.metadata.lastUpdated).getTime();
+          
+          // Check if this task has recent activity (within last 24 hours)
+          const hoursSinceUpdate = (Date.now() - updateTime) / (1000 * 60 * 60);
+          
+          if (hoursSinceUpdate <= 24 && updateTime > lastUpdateTime) {
+            lastUpdateTime = updateTime;
+            lastActiveTask = {
+              projectId: taskFile.projectId,
+              taskId: taskFile.taskId,
+              taskName: data.metadata.taskName || null,
+              projectName: data.metadata.projectName || null,
+              lastUpdated: data.metadata.lastUpdated,
+              hasActivity: (data.trackingData?.activityLogs?.length || 0) > 0
+            };
+          }
+        }
+      } catch (error) {
+        // Skip invalid files
+        continue;
+      }
+    }
+    
+    return lastActiveTask;
+  } catch (error) {
+    console.error('[FIND-LAST-TASK] Error finding last active task:', error);
+    return null;
+  }
+};
 
 // Cleanup on quit
 app.on('will-quit', () => {
@@ -4070,6 +4894,8 @@ app.on('will-quit', () => {
       console.log(`[APP-QUIT] Immediately saved task ${currentTaskId} data before quitting`);
     }
   }
+  
+  // No longer saving active task state - all data comes from task JSON files
   
   // Clear all pending save timers
   saveTimers.forEach(timer => clearTimeout(timer));

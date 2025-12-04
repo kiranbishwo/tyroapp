@@ -78,7 +78,8 @@ export const CombinedInsights: React.FC<CombinedInsightsProps> = ({ onClose }) =
         const fetchData = async () => {
             try {
                 setIsLoading(true);
-                const combinedData = await window.electronAPI.getCombinedInsights();
+                // Fetch only today's data
+                const combinedData = await window.electronAPI.getCombinedInsights('today');
                 setData(combinedData);
                 setError(null);
             } catch (err: any) {
@@ -89,15 +90,19 @@ export const CombinedInsights: React.FC<CombinedInsightsProps> = ({ onClose }) =
             }
         };
 
-        // Subscribe to real-time updates
-        window.electronAPI.subscribeCombinedInsights();
+        // Subscribe to real-time updates (today's data only)
+        // This will also send initial data immediately
+        window.electronAPI.subscribeCombinedInsights('today');
         
         // Listen for updates
         window.electronAPI.onCombinedInsightsUpdate((updatedData: CombinedData) => {
-            setData(updatedData);
+            if (updatedData && updatedData.success) {
+                setData(updatedData);
+                setError(null);
+            }
         });
 
-        // Fetch initial data
+        // Also fetch initial data as backup (in case subscription doesn't send it immediately)
         fetchData();
 
         // Cleanup
@@ -171,12 +176,14 @@ export const CombinedInsights: React.FC<CombinedInsightsProps> = ({ onClose }) =
                     <div>
                         <h2 className="text-lg font-bold flex items-center">
                             <i className="fas fa-chart-pie text-blue-500 mr-2"></i>
-                            Combined Insights Report
+                            Today's Combined Insights Report
                         </h2>
                         <p className="text-xs text-gray-500">
-                            Real-time aggregated data from all tasks and projects
-                            {lastUpdated && (
+                            Real-time aggregated data from today's tasks and projects
+                            {lastUpdated ? (
                                 <span className="ml-2">• Last updated: {formatDate(lastUpdated)}</span>
+                            ) : (
+                                <span className="ml-2">• Last updated: {formatDate(new Date().toISOString())}</span>
                             )}
                         </p>
                     </div>

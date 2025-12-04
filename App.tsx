@@ -97,6 +97,22 @@ const App: React.FC = () => {
     // Track accumulated time per task (taskId -> total seconds)
     const [taskAccumulatedTime, setTaskAccumulatedTime] = useState<Record<string, number>>({});
     
+    // Today's tasks (for restoration and continuation)
+    const [todayTasks, setTodayTasks] = useState<Array<{
+        projectId: string;
+        taskId: string;
+        taskName: string;
+        projectName: string;
+        createdAt: string;
+        lastUpdated: string;
+        totalTime: number;
+        keystrokes: number;
+        mouseClicks: number;
+        activityLogCount: number;
+        screenshotCount: number;
+        webcamPhotoCount: number;
+    }>>([]);
+    
     // Settings state for screenshot blur
     const [settings, setSettings] = useState<Settings | null>(null);
 
@@ -200,6 +216,69 @@ const App: React.FC = () => {
         };
         loadSettings();
     }, []);
+
+    // Fetch today's tasks and restore last active task on app startup
+    useEffect(() => {
+        const fetchTodayTasksAndRestore = async () => {
+            // Only restore if consent is checked and user has consented
+            if (!consentChecked || userConsent !== true) {
+                return;
+            }
+
+            try {
+                // First, fetch all today's tasks
+                if (window.electronAPI?.getTodayTasks) {
+                    const tasks = await window.electronAPI.getTodayTasks();
+                    setTodayTasks(tasks);
+                    console.log('[RESTORE] Fetched', tasks.length, 'tasks from today');
+                    
+                    // Update accumulated time for all today's tasks
+                    const accumulated: Record<string, number> = {};
+                    tasks.forEach(task => {
+                        if (task.totalTime > 0) {
+                            accumulated[task.taskId] = task.totalTime;
+                        }
+                    });
+                    setTaskAccumulatedTime(prev => ({ ...prev, ...accumulated }));
+                }
+                
+                // Then try to restore the last active task
+                if (window.electronAPI?.getLastActiveTaskState) {
+                    const lastState = await window.electronAPI.getLastActiveTaskState();
+                    
+                    if (lastState && lastState.projectId && lastState.taskId) {
+                        console.log('[RESTORE] Restoring last active task:', lastState.taskId, 'in project:', lastState.projectId);
+                        
+                        // Restore project and task selection
+                        setSelectedProjectId(lastState.projectId);
+                        setSelectedTaskId(lastState.taskId);
+                        
+                        // Restore elapsed time from task data (timer won't auto-start - user needs to manually start)
+                        if (lastState.taskData) {
+                            // Load accumulated time from task data
+                            const elapsedSeconds = lastState.elapsedSeconds || 0;
+                            if (elapsedSeconds > 0) {
+                                setTaskAccumulatedTime(prev => ({
+                                    ...prev,
+                                    [lastState.taskId]: elapsedSeconds
+                                }));
+                                setElapsedSeconds(elapsedSeconds);
+                            }
+                            
+                            console.log('[RESTORE] Task selection restored with', elapsedSeconds, 'seconds of accumulated time');
+                        }
+                    } else {
+                        // No saved state, but we have today's tasks - user can select one to continue
+                        console.log('[RESTORE] No saved state found, but', todayTasks.length, 'tasks available from today');
+                    }
+                }
+            } catch (error) {
+                console.error('[RESTORE] Error fetching tasks and restoring:', error);
+            }
+        };
+
+        fetchTodayTasksAndRestore();
+    }, [consentChecked, userConsent]);
 
     // Handle consent dialog response
     const handleConsent = async (consent: boolean, remember: boolean) => {
@@ -314,10 +393,15 @@ const App: React.FC = () => {
     useEffect(() => {
         if (isTimerRunning && startTime && selectedTaskId) {
             const accumulated = taskAccumulatedTime[selectedTaskId] || 0;
+            let saveCounter = 0; // Save state every 30 seconds (30 intervals)
+            
             timerIntervalRef.current = window.setInterval(() => {
                 const now = Date.now();
                 const currentSessionSeconds = Math.floor((now - startTime) / 1000);
-                setElapsedSeconds(accumulated + currentSessionSeconds);
+                const totalElapsed = accumulated + currentSessionSeconds;
+                setElapsedSeconds(totalElapsed);
+                
+                // No longer saving active task state - all data comes from task JSON files
             }, 1000);
         } else {
             if (timerIntervalRef.current) {
@@ -328,7 +412,7 @@ const App: React.FC = () => {
         return () => {
             if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
         };
-    }, [isTimerRunning, startTime, selectedTaskId, taskAccumulatedTime]);
+    }, [isTimerRunning, startTime, selectedTaskId, selectedProjectId, taskAccumulatedTime]);
 
     // Check if we're in dev mode (check for localhost or development indicators)
     const isDevMode = window.location.hostname === 'localhost' || 
@@ -451,6 +535,7 @@ const App: React.FC = () => {
             // Find the latest log that belongs to the CURRENT task
             // This ensures media is only attached to logs for the active task
             const latestLogForCurrentTask = activityLogs.find(log => 
+                log && // Ensure log is not null/undefined
                 log.taskId === selectedTaskId && 
                 log.projectId === selectedProjectId
             );
@@ -1016,6 +1101,8 @@ const App: React.FC = () => {
             setStartTime(null);
             // Keep elapsedSeconds showing the accumulated total (don't reset to 0)
             // It will be recalculated when timer restarts
+            
+            // No longer saving active task state - all data comes from task JSON files
         } else {
             // Validate task is selected before starting
             if (!selectedTaskId && !selectedProjectId) {
@@ -1058,17 +1145,26 @@ const App: React.FC = () => {
                 setElapsedSeconds(0);
             }
             
-            setStartTime(Date.now());
+            const newStartTime = Date.now();
+            setStartTime(newStartTime);
             setIsTimerRunning(true);
             // Camera will be started only when needed for capture, not always
+            
+            // No longer saving active task state - all data comes from task JSON files
         }
     };
 
-    const handleFaceConfirmed = (photoData: string) => {
+    const handleFaceConfirmed = async (photoData: string) => {
         if (!user) return;
         
         if (user.isCheckedIn) {
-            // Check Out
+            // Check Out - stop task if running
+            if (isTimerRunning) {
+                await toggleTimer();
+                // Wait a moment for the task to stop and save
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+            
             setUser({ ...user, isCheckedIn: false, checkInTime: undefined });
             stopCamera(); // Turn off camera
             setView(AppView.LOGIN);
@@ -1319,7 +1415,15 @@ const App: React.FC = () => {
                              {activityLogs.length > 0 && <span className="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full"></span>}
                         </button>
                         <button 
-                            onClick={() => setView(AppView.CHECK_IN_OUT)}
+                            onClick={async () => {
+                                // If timer is running, stop the task first
+                                if (isTimerRunning) {
+                                    await toggleTimer();
+                                    // Wait a moment for the task to stop and save
+                                    await new Promise(resolve => setTimeout(resolve, 500));
+                                }
+                                setView(AppView.CHECK_IN_OUT);
+                            }}
                             className="w-8 h-8 rounded-full bg-red-900/30 hover:bg-red-900/50 text-red-400 flex items-center justify-center transition-colors"
                             title="Check Out"
                         >
@@ -1447,6 +1551,93 @@ const App: React.FC = () => {
                                     );
                                 })()}
                                 
+                                {/* Today's Tasks - Continue Previous Work */}
+                                {todayTasks.length > 0 && !isTimerRunning && !selectedTaskId && !selectedProjectId && (
+                                    <div className="mb-6">
+                                        <div className="mb-3">
+                                            <h3 className="text-white text-sm font-semibold mb-2 flex items-center gap-2">
+                                                <i className="fas fa-history text-yellow-500"></i>
+                                                Continue Today's Tasks ({todayTasks.length})
+                                            </h3>
+                                            <p className="text-gray-500 text-xs">Select a task to continue where you left off</p>
+                                        </div>
+                                        <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
+                                            {todayTasks.map((task) => {
+                                                const project = projects.find(p => p.id === task.projectId);
+                                                const hours = Math.floor(task.totalTime / 3600);
+                                                const minutes = Math.floor((task.totalTime % 3600) / 60);
+                                                const timeStr = hours > 0 
+                                                    ? `${hours}h ${minutes}m` 
+                                                    : `${minutes}m`;
+                                                
+                                                return (
+                                                    <button
+                                                        key={`${task.projectId}-${task.taskId}`}
+                                                        onClick={async () => {
+                                                            setSelectedProjectId(task.projectId);
+                                                            setSelectedTaskId(task.taskId);
+                                                            setDescription(task.taskName);
+                                                            
+                                                            // Load task data and set accumulated time
+                                                            if (window.electronAPI?.loadTaskTrackingData) {
+                                                                try {
+                                                                    const taskData = await window.electronAPI.loadTaskTrackingData(
+                                                                        task.projectId,
+                                                                        task.taskId
+                                                                    );
+                                                                    if (taskData?.trackingData) {
+                                                                        setTaskAccumulatedTime(prev => ({
+                                                                            ...prev,
+                                                                            [task.taskId]: task.totalTime
+                                                                        }));
+                                                                        setElapsedSeconds(task.totalTime);
+                                                                    }
+                                                                } catch (error) {
+                                                                    console.error('Error loading task data:', error);
+                                                                }
+                                                            }
+                                                        }}
+                                                        className="w-full p-3 rounded-lg border border-gray-700 hover:border-gray-600 bg-gray-900/50 hover:bg-gray-900 transition-all text-left group"
+                                                        style={{
+                                                            borderColor: selectedTaskId === task.taskId ? (project?.color || '#60A5FA') : undefined,
+                                                            backgroundColor: selectedTaskId === task.taskId ? `${project?.color || '#60A5FA'}15` : undefined
+                                                        }}
+                                                    >
+                                                        <div className="flex items-start justify-between gap-2">
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="flex items-center gap-2 mb-1">
+                                                                    <span 
+                                                                        className="w-2 h-2 rounded-full flex-shrink-0" 
+                                                                        style={{ background: project?.color || '#60A5FA' }}
+                                                                    ></span>
+                                                                    <p className="text-white text-sm font-medium truncate">{task.taskName}</p>
+                                                                </div>
+                                                                <p className="text-gray-500 text-xs mb-1">{task.projectName}</p>
+                                                                <div className="flex items-center gap-3 text-xs text-gray-500">
+                                                                    <span className="flex items-center gap-1">
+                                                                        <i className="far fa-clock"></i>
+                                                                        {timeStr}
+                                                                    </span>
+                                                                    {task.activityLogCount > 0 && (
+                                                                        <span className="flex items-center gap-1">
+                                                                            <i className="fas fa-chart-line"></i>
+                                                                            {task.activityLogCount} logs
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                            <i className="fas fa-chevron-right text-gray-500 text-xs mt-1 group-hover:text-gray-400"></i>
+                                                        </div>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                        <div className="mt-4 pt-4 border-t border-gray-700">
+                                            <h3 className="text-white text-sm font-semibold mb-3">Or Start New Task</h3>
+                                        </div>
+                                    </div>
+                                )}
+
                                 <div className="mb-4">
                                     <h3 className="text-white text-sm font-semibold mb-3">Select Project</h3>
                                     <div className="grid grid-cols-2 gap-2">

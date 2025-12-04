@@ -24,14 +24,39 @@ declare global {
             addActivityLogToTask: (activityLog: any) => Promise<boolean>;
             addWebcamPhotoToTask: (photoDataUrl: string) => Promise<boolean>;
             saveTaskTrackingData: (projectId?: string, taskId?: string, taskName?: string, projectName?: string) => Promise<boolean>;
-            loadTaskTrackingData: (projectId: string, taskId: string) => Promise<any | null>;
+            loadTaskTrackingData: (projectId: string, taskId: string, dateFilter?: 'today' | 'all') => Promise<any | null>;
             getProjectTasksTracking: (projectId: string) => Promise<any[]>;
+            getTodayTasks: () => Promise<Array<{
+                projectId: string;
+                taskId: string;
+                taskName: string;
+                projectName: string;
+                createdAt: string;
+                lastUpdated: string;
+                totalTime: number;
+                keystrokes: number;
+                mouseClicks: number;
+                activityLogCount: number;
+                screenshotCount: number;
+                webcamPhotoCount: number;
+                summary?: any;
+            }>>;
             getTrackingDataPath: () => Promise<{ projectRoot: string; trackingDataPath: string; exists: boolean }>;
             verifyTrackingData: (projectId?: string) => Promise<any>;
             
+            // Active task state management (for restoration on app restart - only uses task JSON files)
+            getLastActiveTaskState: () => Promise<{
+                projectId: string;
+                taskId: string;
+                isTimerRunning: boolean;
+                startTime: number | null;
+                elapsedSeconds: number;
+                taskData?: any;
+            } | null>;
+            
             // Combined insights
-            getCombinedInsights: () => Promise<any>;
-            subscribeCombinedInsights: () => Promise<void>;
+            getCombinedInsights: (dateFilter?: 'today' | 'all') => Promise<any>;
+            subscribeCombinedInsights: (dateFilter?: 'today' | 'all') => Promise<void>;
             unsubscribeCombinedInsights: () => Promise<void>;
             onCombinedInsightsUpdate: (callback: (data: any) => void) => void;
             removeCombinedInsightsListener: () => void;

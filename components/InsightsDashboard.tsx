@@ -35,10 +35,19 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             setIsLoadingJsonData(true);
             const fetchJsonData = async () => {
                 try {
-                    const data = await window.electronAPI!.loadTaskTrackingData(filterProjectId, filterTaskId);
+                    // Load only today's data for the task
+                    const data = await window.electronAPI!.loadTaskTrackingData(filterProjectId, filterTaskId, 'today');
                     if (data) {
                         setJsonTrackingData(data);
-                        console.log('✅ Loaded JSON tracking data:', data);
+                        console.log('✅ Loaded today\'s JSON tracking data for task:', {
+                            taskId: filterTaskId,
+                            projectId: filterProjectId,
+                            summary: data.trackingData?.summary,
+                            keystrokes: data.trackingData?.summary?.totalKeystrokes || 0,
+                            clicks: data.trackingData?.summary?.totalMouseClicks || 0,
+                            logsCount: data.trackingData?.activityLogs?.length || 0,
+                            windowsCount: data.trackingData?.activeWindows?.length || 0
+                        });
                     } else {
                         console.log('⚠️ No JSON data found for task');
                         setJsonTrackingData(null);
@@ -72,7 +81,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             setIsLoadingJsonData(true);
             const fetchCombinedData = async () => {
                 try {
-                    const combinedData = await window.electronAPI!.getCombinedInsights();
+                    // Fetch only today's data
+                    const combinedData = await window.electronAPI!.getCombinedInsights('today');
                     if (combinedData && combinedData.success) {
                         // Transform combined data to match the format expected by the component
                         const transformedData = {
@@ -114,9 +124,9 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
     useEffect(() => {
         if (!window.electronAPI) return;
         
-        // Subscribe to combined insights updates for real-time updates
+        // Subscribe to combined insights updates for real-time updates (today's data only)
         if (isCombinedView) {
-            window.electronAPI.subscribeCombinedInsights();
+            window.electronAPI.subscribeCombinedInsights('today');
             
             const handleCombinedUpdate = (updatedData: any) => {
                 if (updatedData && updatedData.success) {
@@ -149,10 +159,10 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 window.electronAPI?.removeCombinedInsightsListener();
             };
         } else if (isTaskActive && filterTaskId && filterProjectId) {
-            // Refresh single task data every 3 seconds when active
+            // Refresh single task data every 3 seconds when active (today's data only)
             const refreshInterval = setInterval(async () => {
                 try {
-                    const data = await window.electronAPI!.loadTaskTrackingData(filterProjectId, filterTaskId);
+                    const data = await window.electronAPI!.loadTaskTrackingData(filterProjectId, filterTaskId, 'today');
                     if (data) {
                         setJsonTrackingData(data);
                     }
@@ -166,7 +176,21 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
     }, [isTaskActive, filterTaskId, filterProjectId, isCombinedView]);
     
     // Filter logs by task if provided - STRICT filtering by taskId and time ranges
+    // Also filter by today's date to ensure only today's data is shown
     const filteredLogs = useMemo(() => {
+        // Calculate today's date range
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const todayStart = today.getTime();
+        const todayEnd = todayStart + (24 * 60 * 60 * 1000) - 1;
+        
+        // First filter by date (today only)
+        const todayLogs = logs.filter(log => {
+            if (!log || !log.timestamp) return false;
+            const logTime = log.timestamp.getTime();
+            return logTime >= todayStart && logTime <= todayEnd;
+        });
+        
         if (filterTaskId && filterProjectId && filterTimeEntries && filterTimeEntries.length > 0) {
             // Create a sorted list of time ranges for efficient checking
             const timeRanges = filterTimeEntries
@@ -176,7 +200,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 }))
                 .sort((a, b) => a.start - b.start);
             
-            const filtered = logs.filter(log => {
+            const filtered = todayLogs.filter(log => {
                 // PRIMARY CHECK: If log has taskId, it MUST match (strict)
                 if (log.taskId) {
                     // Log has taskId - only include if it matches
@@ -222,47 +246,25 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 }, 0);
                 const totalWebcam = filtered.filter(l => l.webcamUrl).length;
                 
-                console.log('Task Report Filtering:', {
-                    taskId: filterTaskId,
-                    projectId: filterProjectId,
-                    timeRanges: timeRanges.length,
-                    totalLogs: logs.length,
-                    filteredLogs: filtered.length,
-                    logsWithTaskId,
-                    logsWithoutTaskId,
-                    totalKeystrokes,
-                    totalMouseClicks,
-                    totalScreenshots,
-                    totalWebcam,
-                    sampleLogs: filtered.slice(0, 3).map(l => ({
-                        id: l.id,
-                        taskId: l.taskId,
-                        timestamp: l.timestamp.toISOString(),
-                        keystrokes: l.keyboardEvents,
-                        mouseClicks: l.mouseEvents,
-                        hasScreenshot: !!(l.screenshotUrl || l.screenshotUrls?.length),
-                        hasWebcam: !!l.webcamUrl
-                    })),
-                    timeRangesDetail: timeRanges.map(r => ({
-                        start: new Date(r.start).toISOString(),
-                        end: new Date(r.end).toISOString()
-                    }))
-                });
+                // Removed excessive debug logging to prevent performance issues
+                // Uncomment below for debugging if needed:
+                // console.log('Task Report Filtering:', { taskId: filterTaskId, filteredLogs: filtered.length });
             }
             
             return filtered;
         } else if (filterTaskId && filterProjectId) {
             // If filtering by taskId only (no time entries), filter by taskId or projectId
             // This is a fallback - prefer taskId but allow projectId if taskId not set
-            return logs.filter(log => {
-                if (log.taskId) {
+            return todayLogs.filter(log => {
+                if (log && log.taskId) {
                     return log.taskId === filterTaskId;
                 }
                 // Fallback: if no taskId, match by projectId
-                return log.projectId === filterProjectId;
+                return log && log.projectId === filterProjectId;
             });
         }
-        return logs;
+        // No task filter - return today's logs only
+        return todayLogs;
     }, [logs, filterTaskId, filterProjectId, filterTimeEntries]);
     // Real-time activity state
     const [currentActivity, setCurrentActivity] = useState<{
@@ -392,17 +394,25 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
         };
     }, [currentActivity]);
     
-    // Force re-render every second to update time spent
+    // Force re-render every second to update time spent (only if activity is active)
     useEffect(() => {
         if (!currentActivity) return;
         
         const interval = setInterval(() => {
-            // Trigger re-render to update time spent
-            setCurrentActivity(prev => prev ? { ...prev, timestamp: Date.now() } : null);
+            // Only update timestamp, don't recreate the whole object to prevent unnecessary re-renders
+            setCurrentActivity(prev => {
+                if (!prev) return null;
+                // Only update if timestamp changed significantly (every second)
+                const now = Date.now();
+                if (now - prev.timestamp >= 1000) {
+                    return { ...prev, timestamp: now };
+                }
+                return prev; // Return same object if less than 1 second passed
+            });
         }, 1000);
         
         return () => clearInterval(interval);
-    }, [currentActivity]);
+    }, [currentActivity?.app]); // Only depend on app name, not the whole object
     
     // Calculate aggregate stats (including real-time data from all windows)
     const stats = useMemo(() => {
@@ -461,7 +471,15 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             totalContextSwitches,
             avgBreakdown
         };
-    }, [filteredLogs, currentActivity, totalStats]);
+    }, [
+        filteredLogs.length, // Use length instead of full array
+        currentActivity?.keystrokes, 
+        currentActivity?.clicks, 
+        totalStats.totalKeystrokes, 
+        totalStats.totalClicks, 
+        jsonTrackingData?.trackingData?.summary?.totalKeystrokes, 
+        jsonTrackingData?.trackingData?.summary?.totalMouseClicks
+    ]);
 
     // Calculate App Usage with detailed stats (including all windows data)
     const appUsage = useMemo(() => {
@@ -645,7 +663,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             // If logs are less than 2 minutes apart, it's dev mode (1-minute intervals)
             if (timeDiff < 120 && timeDiff > 0) {
                 intervalDuration = 60; // 1 minute in dev mode
-                console.log('🔧 Detected dev mode intervals (1 minute) for time calculation');
+                // Removed console.log to prevent excessive logging
             }
         }
         
@@ -808,33 +826,17 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             return (b.timeSpent || 0) - (a.timeSpent || 0);
         });
         
-        // Debug logging for app usage
-        if (filterTaskId) {
-            console.log('App Usage Calculation:', {
-                taskId: filterTaskId,
-                filteredLogsCount: filteredLogs.length,
-                filteredWindowsCount: filteredWindows.length,
-                totalApps: appUsageArray.length,
-                apps: appUsageArray.map(a => ({
-                    name: a.appName,
-                    keystrokes: a.keystrokes,
-                    clicks: a.clicks,
-                    timeSpent: a.timeSpent,
-                    percentage: a.percentage,
-                    urlsCount: a.urls.length
-                })),
-                totalTimeSpent,
-                sampleLogs: filteredLogs.slice(0, 3).map(l => ({
-                    app: l.activeWindow,
-                    keystrokes: l.keyboardEvents,
-                    mouseClicks: l.mouseEvents,
-                    timestamp: l.timestamp.toISOString()
-                }))
-            });
-        }
+        // Debug logging for app usage (only in dev mode and only log once per change)
+        // Removed excessive logging to prevent performance issues
         
         return appUsageArray;
-    }, [filteredLogs, currentActivity, allWindows, filterTaskId, filterTimeEntries]);
+    }, [
+        filteredLogs.length, // Use length to prevent re-calculation on every log change
+        allWindows.length,
+        filterTaskId, 
+        filterTimeEntries?.length,
+        currentActivity?.app
+    ]);
 
     // Expandable state
     const [expandedApps, setExpandedApps] = useState<Set<string>>(new Set());
@@ -898,9 +900,9 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                         )}
                     </h2>
                     <p className="text-xs text-gray-500">
-                        {filterTaskId ? 'Task-specific activity & productivity report' : 
-                         isCombinedView ? 'Combined activity & productivity report from all tasks' :
-                         'Activity & Productivity Log'}
+                        {filterTaskId ? 'Task-specific activity & productivity report (today\'s data)' : 
+                         isCombinedView ? 'Combined activity & productivity report from today\'s tasks' :
+                         'Activity & Productivity Log (today\'s data)'}
                     </p>
                 </div>
                 <button onClick={onClose} className="text-gray-400 hover:text-white bg-gray-800 p-2 rounded-lg transition-colors">
@@ -920,11 +922,35 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                     // Calculate activity score (0-100) based on keystrokes and clicks
                     const totalKeys = jsonSummary.totalKeystrokes || 0;
                     const totalClicks = jsonSummary.totalMouseClicks || 0;
+                    const activityLogs = jsonTrackingData.trackingData?.activityLogs || [];
+                    
+                    // Check if there's any actual data for today
+                    const hasData = totalKeys > 0 || totalClicks > 0 || jsonWindows.length > 0 || activityLogs.length > 0;
+                    
+                    // If no data, all scores should be 0
+                    if (!hasData) {
+                        return (
+                            <>
+                                {/* Summary Section - No Data */}
+                                <div className="bg-gradient-to-br from-blue-900/30 to-purple-900/30 rounded-xl p-4 border border-blue-500/30">
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <i className="fas fa-chart-pie text-blue-400"></i>
+                                        <h3 className="text-sm font-bold text-gray-200">Total Activity Summary</h3>
+                                    </div>
+                                    <div className="text-center py-8 text-gray-500">
+                                        <i className="fas fa-inbox text-4xl mb-3 opacity-50"></i>
+                                        <p className="text-sm">No activity recorded for today</p>
+                                        <p className="text-xs mt-1">Start the timer to begin tracking</p>
+                                    </div>
+                                </div>
+                            </>
+                        );
+                    }
+                    
                     const activityScore = Math.min(100, Math.round((totalKeys + totalClicks * 10) / 100)); // Normalize
                     
                     // Calculate app score from active windows or activity logs
                     const appScores: number[] = [];
-                    const activityLogs = jsonTrackingData.trackingData?.activityLogs || [];
                     
                     if (jsonWindows.length > 0) {
                         // Use active windows if available
@@ -956,7 +982,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             }
                         });
                     }
-                    const avgAppScore = appScores.length > 0 ? Math.round(appScores.reduce((a, b) => a + b, 0) / appScores.length) : 50;
+                    const avgAppScore = appScores.length > 0 ? Math.round(appScores.reduce((a, b) => a + b, 0) / appScores.length) : 0;
                     
                     // Calculate URL score from URL history or activity logs
                     const urlScores: number[] = [];
@@ -992,7 +1018,7 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             }
                         });
                     }
-                    const avgUrlScore = urlScores.length > 0 ? Math.round(urlScores.reduce((a, b) => a + b, 0) / urlScores.length) : 50;
+                    const avgUrlScore = urlScores.length > 0 ? Math.round(urlScores.reduce((a, b) => a + b, 0) / urlScores.length) : 0;
                     
                     // Calculate focus score (based on number of windows or unique apps - fewer = better focus)
                     let windowCount = jsonWindows.length;
@@ -1004,9 +1030,10 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                         });
                         windowCount = uniqueApps.size;
                     }
-                    const focusScore = windowCount <= 2 ? 100 : windowCount <= 4 ? 80 : windowCount <= 6 ? 60 : 40;
+                    // Only calculate focus score if there are windows/apps
+                    const focusScore = windowCount === 0 ? 0 : (windowCount <= 2 ? 100 : windowCount <= 4 ? 80 : windowCount <= 6 ? 60 : 40);
                     
-                    // Calculate composite score
+                    // Calculate composite score (only if we have data)
                     const compositeScore = Math.round(
                         (activityScore * 0.25) +
                         (avgAppScore * 0.25) +
@@ -1695,12 +1722,72 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 <div className="bg-gray-900 rounded-lg p-4 border border-gray-800">
                     <h3 className="text-xs font-bold text-gray-400 uppercase mb-4">Activity Timeline</h3>
                     <div className="h-24 flex items-end gap-1 overflow-x-auto pb-2 custom-scrollbar">
-                        {filteredLogs.length === 0 ? (
-                            <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs italic">
-                                No activity recorded yet.
-                            </div>
-                        ) : (
-                            filteredLogs.map((log) => {
+                        {(() => {
+                            // Combine logs from filteredLogs and JSON tracking data
+                            const allLogs: Array<{
+                                id: string;
+                                timestamp: Date;
+                                activeWindow: string;
+                                compositeScore?: number;
+                                productivityScore?: number;
+                                scoreClassification?: { color: string; label: string };
+                                appCategory?: string;
+                                focusScore?: number;
+                                projectId?: string;
+                            }> = [];
+                            
+                            // Add logs from filteredLogs
+                            filteredLogs.forEach(log => {
+                                allLogs.push({
+                                    id: log.id,
+                                    timestamp: log.timestamp,
+                                    activeWindow: log.activeWindow,
+                                    compositeScore: log.compositeScore,
+                                    productivityScore: log.productivityScore,
+                                    scoreClassification: log.scoreClassification,
+                                    appCategory: log.appCategory,
+                                    focusScore: log.focusScore,
+                                    projectId: log.projectId
+                                });
+                            });
+                            
+                            // Add activity logs from JSON tracking data if available
+                            if (jsonTrackingData?.trackingData?.activityLogs) {
+                                const jsonActivityLogs = jsonTrackingData.trackingData.activityLogs;
+                                jsonActivityLogs.forEach((log: any, idx: number) => {
+                                    const timestamp = log.timestamp 
+                                        ? new Date(log.timestamp) 
+                                        : (log.createdAt ? new Date(log.createdAt) : new Date());
+                                    
+                                    // Calculate productivity score if not present
+                                    const productivityScore = log.productivityScore || log.compositeScore || 0;
+                                    
+                                    allLogs.push({
+                                        id: `json-log-${idx}-${timestamp.getTime()}`,
+                                        timestamp: timestamp,
+                                        activeWindow: log.activeWindow || log.windowTitle || 'Unknown',
+                                        compositeScore: log.compositeScore,
+                                        productivityScore: productivityScore,
+                                        scoreClassification: log.scoreClassification,
+                                        appCategory: log.appCategory,
+                                        focusScore: log.focusScore,
+                                        projectId: log.projectId || jsonTrackingData.metadata?.projectId
+                                    });
+                                });
+                            }
+                            
+                            // Sort by timestamp
+                            allLogs.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+                            
+                            if (allLogs.length === 0) {
+                                return (
+                                    <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs italic">
+                                        No activity recorded yet.
+                                    </div>
+                                );
+                            }
+                            
+                            return allLogs.map((log) => {
                                 const project = projects.find(p => p.id === log.projectId);
                                 return (
                                     <div key={log.id} className="group relative flex-shrink-0 w-3 bg-gray-800 rounded-sm hover:bg-gray-700 transition-all cursor-pointer" style={{ height: '100%' }}>
@@ -1740,8 +1827,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                         </div>
                                     </div>
                                 );
-                            })
-                        )}
+                            });
+                        })()}
                     </div>
                 </div>
 
@@ -1753,6 +1840,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             {(() => {
                                 // Count all individual images (screenshots + webcam photos)
                                 let count = 0;
+                                
+                                // Count from filteredLogs
                                 filteredLogs.forEach(log => {
                                     if (log.screenshotUrls && log.screenshotUrls.length > 0) {
                                         count += log.screenshotUrls.length;
@@ -1763,6 +1852,15 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                         count += 1;
                                     }
                                 });
+                                
+                                // Count from JSON tracking data if available
+                                if (jsonTrackingData?.trackingData) {
+                                    const jsonScreenshots = jsonTrackingData.trackingData.screenshots || [];
+                                    const jsonWebcamPhotos = jsonTrackingData.trackingData.webcamPhotos || [];
+                                    count += jsonScreenshots.length;
+                                    count += jsonWebcamPhotos.length;
+                                }
+                                
                                 return count;
                             })()} images
                         </span>
@@ -1775,10 +1873,14 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                 id: string;
                                 imageUrl: string;
                                 type: 'screenshot' | 'webcam';
-                                log: ActivityLog;
+                                timestamp: Date;
+                                activeWindow?: string;
+                                activeUrl?: string;
+                                productivityScore?: number;
                                 index?: number;
                             }> = [];
                             
+                            // Add evidence from filteredLogs
                             filteredLogs.forEach(log => {
                                 // Add all screenshots as separate items
                                 if (log.screenshotUrls && log.screenshotUrls.length > 0) {
@@ -1787,7 +1889,10 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                             id: `${log.id}-screenshot-${idx}`,
                                             imageUrl: url,
                                             type: 'screenshot',
-                                            log: log,
+                                            timestamp: log.timestamp,
+                                            activeWindow: log.activeWindow,
+                                            activeUrl: log.activeUrl,
+                                            productivityScore: log.productivityScore,
                                             index: idx
                                         });
                                     });
@@ -1796,7 +1901,10 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                         id: `${log.id}-screenshot-0`,
                                         imageUrl: log.screenshotUrl,
                                         type: 'screenshot',
-                                        log: log,
+                                        timestamp: log.timestamp,
+                                        activeWindow: log.activeWindow,
+                                        activeUrl: log.activeUrl,
+                                        productivityScore: log.productivityScore,
                                         index: 0
                                     });
                                 }
@@ -1807,14 +1915,64 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                         id: `${log.id}-webcam`,
                                         imageUrl: log.webcamUrl,
                                         type: 'webcam',
-                                        log: log
+                                        timestamp: log.timestamp,
+                                        activeWindow: log.activeWindow,
+                                        activeUrl: log.activeUrl,
+                                        productivityScore: log.productivityScore
                                     });
                                 }
                             });
                             
+                            // Add evidence from JSON tracking data if available
+                            if (jsonTrackingData?.trackingData) {
+                                const jsonScreenshots = jsonTrackingData.trackingData.screenshots || [];
+                                const jsonWebcamPhotos = jsonTrackingData.trackingData.webcamPhotos || [];
+                                
+                                // Add screenshots from JSON data
+                                jsonScreenshots.forEach((screenshot: any, idx: number) => {
+                                    const timestamp = screenshot.timestamp 
+                                        ? new Date(screenshot.timestamp) 
+                                        : (screenshot.createdAt ? new Date(screenshot.createdAt) : new Date());
+                                    // Support both dataUrl (base64) and file paths
+                                    const imageUrl = screenshot.dataUrl || screenshot.path || screenshot.url || screenshot.filePath;
+                                    if (imageUrl) { // Only add if imageUrl exists
+                                        evidenceItems.push({
+                                            id: `json-screenshot-${idx}-${timestamp.getTime()}`,
+                                            imageUrl: imageUrl,
+                                            type: 'screenshot',
+                                            timestamp: timestamp,
+                                            activeWindow: screenshot.activeWindow || screenshot.windowTitle || 'Unknown',
+                                            activeUrl: screenshot.url || screenshot.activeUrl,
+                                            productivityScore: screenshot.productivityScore,
+                                            index: idx
+                                        });
+                                    }
+                                });
+                                
+                                // Add webcam photos from JSON data
+                                jsonWebcamPhotos.forEach((photo: any, idx: number) => {
+                                    const timestamp = photo.timestamp 
+                                        ? new Date(photo.timestamp) 
+                                        : (photo.createdAt ? new Date(photo.createdAt) : new Date());
+                                    // Support both dataUrl (base64) and file paths
+                                    const photoUrl = photo.dataUrl || photo.path || photo.url || photo.filePath;
+                                    if (photoUrl) { // Only add if photoUrl exists
+                                        evidenceItems.push({
+                                            id: `json-webcam-${idx}-${timestamp.getTime()}`,
+                                            imageUrl: photoUrl,
+                                            type: 'webcam',
+                                            timestamp: timestamp,
+                                            activeWindow: photo.activeWindow || photo.windowTitle || 'Unknown',
+                                            activeUrl: photo.url || photo.activeUrl,
+                                            productivityScore: photo.productivityScore
+                                        });
+                                    }
+                                });
+                            }
+                            
                             // Sort by timestamp (newest first) and take latest 20
                             evidenceItems.sort((a, b) => 
-                                b.log.timestamp.getTime() - a.log.timestamp.getTime()
+                                b.timestamp.getTime() - a.timestamp.getTime()
                             );
                             
                             return evidenceItems.length > 0 ? (
@@ -1822,15 +1980,21 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                     {evidenceItems.slice(0, 20).map((item) => (
                                         <div key={item.id} className="bg-gray-800 rounded-lg overflow-hidden border border-gray-700 group relative hover:border-blue-500 transition-colors">
                                             <div className="aspect-video relative bg-black">
-                                                <img 
-                                                    src={item.imageUrl} 
-                                                    alt={item.type === 'screenshot' ? `Screen Capture ${(item.index || 0) + 1}` : 'Camera Photo'} 
-                                                    className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" 
-                                                    onError={(e) => {
-                                                        console.error(`Failed to load ${item.type}:`, item.id);
-                                                        (e.target as HTMLImageElement).style.display = 'none';
-                                                    }}
-                                                />
+                                                {item.imageUrl ? (
+                                                    <img 
+                                                        src={item.imageUrl} 
+                                                        alt={item.type === 'screenshot' ? `Screen Capture ${(item.index || 0) + 1}` : 'Camera Photo'} 
+                                                        className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" 
+                                                        onError={(e) => {
+                                                            console.error(`Failed to load ${item.type}:`, item.id);
+                                                            (e.target as HTMLImageElement).style.display = 'none';
+                                                        }}
+                                                    />
+                                                ) : (
+                                                    <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs">
+                                                        No image available
+                                                    </div>
+                                                )}
                                                 {/* Type badge */}
                                                 <div className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[8px] font-bold ${
                                                     item.type === 'screenshot' 
@@ -1842,25 +2006,27 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                                 {/* Hover overlay with details */}
                                                 <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-xs p-2">
                                                     <div className="text-white font-bold mb-1">
-                                                        {item.log.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                                        {item.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                                                     </div>
                                                     <div className="text-gray-300 text-[10px] text-center">
-                                                        {item.log.activeWindow}
+                                                        {item.activeWindow || 'Unknown'}
                                                     </div>
-                                                    {item.log.activeUrl && (
-                                                        <div className="text-blue-400 text-[9px] mt-1 text-center max-w-full truncate" title={item.log.activeUrl}>
-                                                            {item.log.activeUrl}
+                                                    {item.activeUrl && (
+                                                        <div className="text-blue-400 text-[9px] mt-1 text-center max-w-full truncate" title={item.activeUrl}>
+                                                            {item.activeUrl}
                                                         </div>
                                                     )}
-                                                    <div className="text-gray-400 text-[10px] mt-1">
-                                                        Prod: {item.log.productivityScore}%
-                                                    </div>
+                                                    {item.productivityScore !== undefined && (
+                                                        <div className="text-gray-400 text-[10px] mt-1">
+                                                            Prod: {item.productivityScore}%
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                             <div className="p-2 flex flex-col gap-1 bg-gray-850">
                                                 <div className="flex justify-between items-center">
                                                     <span className="text-[10px] text-gray-400">
-                                                        {item.log.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                                        {item.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                                                     </span>
                                                     <div className="flex items-center gap-1">
                                                         {item.type === 'screenshot' && (
@@ -1876,12 +2042,12 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                                     </div>
                                                 </div>
                                                 <div className="flex items-center justify-between">
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 truncate max-w-[120px]" title={item.log.activeWindow}>
-                                                        {item.log.activeWindow}
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 truncate max-w-[120px]" title={item.activeWindow || 'Unknown'}>
+                                                        {item.activeWindow || 'Unknown'}
                                                     </span>
-                                                    {item.log.activeUrl && (
-                                                        <span className="text-[9px] text-blue-400 truncate max-w-[150px]" title={item.log.activeUrl}>
-                                                            🔗 {item.log.activeUrl.replace(/^https?:\/\//, '').split('/')[0]}
+                                                    {item.activeUrl && (
+                                                        <span className="text-[9px] text-blue-400 truncate max-w-[150px]" title={item.activeUrl}>
+                                                            🔗 {item.activeUrl.replace(/^https?:\/\//, '').split('/')[0]}
                                                         </span>
                                                     )}
                                                 </div>

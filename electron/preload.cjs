@@ -28,13 +28,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   addActivityLogToTask: (activityLog) => ipcRenderer.invoke('add-activity-log-to-task', activityLog),
   addWebcamPhotoToTask: (photoDataUrl) => ipcRenderer.invoke('add-webcam-photo-to-task', photoDataUrl),
   saveTaskTrackingData: (projectId, taskId, taskName, projectName) => ipcRenderer.invoke('save-task-tracking-data', projectId, taskId, taskName, projectName),
-  loadTaskTrackingData: (projectId, taskId) => ipcRenderer.invoke('load-task-tracking-data', projectId, taskId),
+  loadTaskTrackingData: (projectId, taskId, dateFilter = 'today') => ipcRenderer.invoke('load-task-tracking-data', projectId, taskId, dateFilter),
   getProjectTasksTracking: (projectId) => ipcRenderer.invoke('get-project-tasks-tracking', projectId),
+  getTodayTasks: () => ipcRenderer.invoke('get-today-tasks'),
   getTrackingDataPath: () => ipcRenderer.invoke('get-tracking-data-path'),
   verifyTrackingData: (projectId) => ipcRenderer.invoke('verify-tracking-data', projectId),
+  // Active task state management (for restoration on app restart)
+  getLastActiveTaskState: () => ipcRenderer.invoke('get-last-active-task-state'),
   // Combined insights
-  getCombinedInsights: () => ipcRenderer.invoke('get-combined-insights'),
-  subscribeCombinedInsights: () => ipcRenderer.invoke('subscribe-combined-insights'),
+  getCombinedInsights: (dateFilter = 'today') => ipcRenderer.invoke('get-combined-insights', dateFilter),
+  subscribeCombinedInsights: (dateFilter = 'today') => ipcRenderer.invoke('subscribe-combined-insights', dateFilter),
   unsubscribeCombinedInsights: () => ipcRenderer.invoke('unsubscribe-combined-insights'),
   onCombinedInsightsUpdate: (callback) => {
     ipcRenderer.on('combined-insights-update', (_, data) => callback(data));
