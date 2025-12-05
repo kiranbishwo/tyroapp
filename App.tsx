@@ -102,6 +102,20 @@ const App: React.FC = () => {
     const [userStatus, setUserStatus] = useState<UserStatus>('idle');
     const [showStatusMenu, setShowStatusMenu] = useState(false);
     
+    // Workspace State
+    const [currentWorkspace, setCurrentWorkspace] = useState<{ id: string; name: string; memberCount: number }>({
+        id: 'ws1',
+        name: 'Development Team',
+        memberCount: 12
+    });
+    const [availableWorkspaces] = useState<Array<{ id: string; name: string; memberCount: number }>>([
+        { id: 'ws1', name: 'Development Team', memberCount: 12 },
+        { id: 'ws2', name: 'Design Team', memberCount: 8 },
+        { id: 'ws3', name: 'Marketing Team', memberCount: 15 },
+        { id: 'ws4', name: 'QA Team', memberCount: 6 }
+    ]);
+    const [showUserMenu, setShowUserMenu] = useState(false);
+    
     // Today's tasks (for restoration and continuation)
     const [todayTasks, setTodayTasks] = useState<Array<{
         projectId: string;
@@ -357,10 +371,27 @@ const App: React.FC = () => {
             };
             initCamera();
         } else {
-            // When leaving CHECK_IN_OUT view, optionally stop camera (but keep it if timer is running)
-            // Don't stop here - let the component handle it
+            // When leaving CHECK_IN_OUT view, stop camera if timer is not running and status is not working
+            if (view !== AppView.CHECK_IN_OUT && !isTimerRunning && userStatus !== 'working') {
+                if (cameraStream) {
+                    console.log('Stopping camera - leaving check-in/out view and timer not running');
+                    stopCamera();
+                }
+            }
         }
-    }, [view, startCamera, stopCamera]);
+    }, [view, startCamera, stopCamera, isTimerRunning, userStatus, cameraStream]);
+
+    // Stop camera when timer stops or status changes to non-working (unless in CHECK_IN_OUT view)
+    useEffect(() => {
+        // Only stop camera if:
+        // 1. Not in CHECK_IN_OUT view (camera is needed there)
+        // 2. Timer is not running OR status is not working
+        // 3. Camera stream exists
+        if (view !== AppView.CHECK_IN_OUT && cameraStream && (!isTimerRunning || userStatus !== 'working')) {
+            console.log('Stopping camera - timer stopped or status changed to non-working');
+            stopCamera();
+        }
+    }, [isTimerRunning, userStatus, view, cameraStream, stopCamera]);
 
     // Attach streams to hidden video elements for capture
     useEffect(() => {
@@ -604,6 +635,12 @@ const App: React.FC = () => {
             const shouldCapture = isDevMode ? (needsScreenshot || needsWebcam) : (isFresh && (needsScreenshot || needsWebcam));
             
             if (shouldCapture) {
+                // Double-check conditions before starting capture
+                if (!isTimerRunning || userStatus !== 'working') {
+                    console.log('Capture skipped - timer not running or status not working');
+                    return;
+                }
+                
                 // Mark capture as in progress
                 captureInProgressRef.current = true;
                 console.log('Starting media capture for log:', latestLog.id, isDevMode ? '(DEV MODE)' : '');
@@ -613,13 +650,38 @@ const App: React.FC = () => {
                     let tempCameraStream: MediaStream | null = null;
                     
                     try {
+                        // CRITICAL: Check if timer is still running and status is still working before starting camera
+                        // This prevents camera from starting if conditions changed during async operations
+                        if (!isTimerRunning || userStatus !== 'working') {
+                            console.log('Timer stopped or status changed - aborting camera start and capture');
+                            captureInProgressRef.current = false;
+                            return;
+                        }
+                        
                         // Start camera first if we need webcam capture (before capturing screenshots)
                     // Check if cameraStream exists AND has active tracks, not just if it exists
                     const hasActiveCamera = cameraStream && cameraStream.getTracks().some(track => track.readyState === 'live');
                     if (needsWebcam && !hasActiveCamera) {
+                        // Double-check conditions before starting camera
+                        if (!isTimerRunning || userStatus !== 'working') {
+                            console.log('Conditions changed - aborting camera start');
+                            captureInProgressRef.current = false;
+                            return;
+                        }
+                        
                         console.log('Starting camera for webcam capture...');
                         try {
                             tempCameraStream = await startCamera();
+                            
+                            // Verify conditions again after camera starts (async operation)
+                            if (!isTimerRunning || userStatus !== 'working') {
+                                console.log('Conditions changed after camera start - stopping camera');
+                                if (tempCameraStream) {
+                                    tempCameraStream.getTracks().forEach(track => track.stop());
+                                }
+                                captureInProgressRef.current = false;
+                                return;
+                            }
                             if (tempCameraStream && hiddenCamVideoRef.current) {
                                 const video = hiddenCamVideoRef.current;
                                 
@@ -1014,6 +1076,12 @@ const App: React.FC = () => {
 
                 // Add small delay to ensure log is fully created and DOM is ready
                 setTimeout(() => {
+                    // Final check before executing capture - conditions might have changed during delay
+                    if (!isTimerRunning || userStatus !== 'working') {
+                        console.log('Conditions changed during delay - aborting capture');
+                        captureInProgressRef.current = false;
+                        return;
+                    }
                     captureMedia();
                 }, 1000); // Increased delay to ensure everything is ready
             } else {
@@ -1252,6 +1320,31 @@ const App: React.FC = () => {
                         <h1 className="text-2xl font-bold text-white tracking-tight">Tyrodesk</h1>
                         <p className="text-gray-400 text-sm">Workforce Management</p>
                     </div>
+                    
+                    {/* Google Login Button */}
+                    <button
+                        onClick={() => {
+                            // Handle Google login
+                            console.log('Google login clicked');
+                            // You can implement Google OAuth here
+                        }}
+                        className="w-full bg-white hover:bg-gray-100 text-gray-900 font-semibold py-3 rounded-lg shadow-md transition-all flex items-center justify-center gap-3 mb-4 border border-gray-300"
+                    >
+                        <svg className="w-5 h-5" viewBox="0 0 24 24">
+                            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                        </svg>
+                        <span>Continue with Google</span>
+                    </button>
+                    
+                    <div className="flex items-center my-6">
+                        <div className="flex-1 border-t border-gray-700"></div>
+                        <span className="px-4 text-xs text-gray-500 uppercase font-bold">Or</span>
+                        <div className="flex-1 border-t border-gray-700"></div>
+                    </div>
+                    
                     <form onSubmit={(e) => { e.preventDefault(); handleLogin((e.target as any).email.value); }}>
                         <div className="mb-4">
                             <label className="block text-xs uppercase text-gray-500 font-bold mb-2">Work Email</label>
@@ -1407,8 +1500,85 @@ const App: React.FC = () => {
                 <header className="bg-gray-800 px-3 sm:px-4 md:px-6 py-3 md:py-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-0 shadow-md z-10">
                     <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto">
                         <div className="relative flex-shrink-0">
-                            <img src={user?.avatar} alt="User" className="w-7 h-7 sm:w-8 sm:h-8 rounded-full border border-gray-600" />
-                            <div className={`absolute bottom-0 right-0 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full border-2 border-gray-800 ${isTimerRunning ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
+                            <button
+                                onClick={() => setShowUserMenu(!showUserMenu)}
+                                className="relative focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-full"
+                            >
+                                <img src={user?.avatar} alt="User" className="w-7 h-7 sm:w-8 sm:h-8 rounded-full border border-gray-600 hover:border-gray-500 transition-colors cursor-pointer" />
+                                <div className={`absolute bottom-0 right-0 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full border-2 border-gray-800 ${isTimerRunning ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
+                            </button>
+                            
+                            {/* User Dropdown Menu */}
+                            {showUserMenu && (
+                                <>
+                                    <div 
+                                        className="fixed inset-0 z-40" 
+                                        onClick={() => setShowUserMenu(false)}
+                                    ></div>
+                                    <div className="absolute left-0 top-full mt-2 w-72 bg-gray-800 rounded-lg shadow-xl border border-gray-700 z-50 overflow-hidden">
+                                        {/* User Info Section */}
+                                        <div className="p-4 border-b border-gray-700">
+                                            <div className="flex items-center gap-3 mb-3">
+                                                <img src={user?.avatar} alt="User" className="w-10 h-10 rounded-full border border-gray-600" />
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-sm font-semibold text-white truncate">{user?.name}</p>
+                                                    <p className="text-xs text-gray-400 truncate">{user?.id}</p>
+                                                </div>
+                                            </div>
+                                            
+                                            {/* Workspace Details */}
+                                            <div className="mt-3 pt-3 border-t border-gray-700">
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <span className="text-xs text-gray-500 uppercase font-bold">Workspace</span>
+                                                </div>
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="text-sm font-medium text-white truncate">{currentWorkspace.name}</p>
+                                                        <div className="flex items-center gap-2 mt-1">
+                                                            <i className="fas fa-users text-[10px] text-gray-400"></i>
+                                                            <span className="text-xs text-gray-400">{currentWorkspace.memberCount} members</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        
+                                        {/* Change Workspace Section */}
+                                        <div className="p-2">
+                                            <div className="mb-2 px-2">
+                                                <span className="text-xs text-gray-500 uppercase font-bold">Switch Workspace</span>
+                                            </div>
+                                            <div className="space-y-1 max-h-48 overflow-y-auto custom-scrollbar">
+                                                {availableWorkspaces.map((workspace) => (
+                                                    <button
+                                                        key={workspace.id}
+                                                        onClick={() => {
+                                                            setCurrentWorkspace(workspace);
+                                                            setShowUserMenu(false);
+                                                        }}
+                                                        className={`w-full px-3 py-2.5 rounded-md text-xs font-medium transition-all flex items-center justify-between text-left ${
+                                                            currentWorkspace.id === workspace.id
+                                                                ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                                                                : 'text-gray-300 hover:bg-gray-700'
+                                                        }`}
+                                                    >
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="text-sm font-medium truncate">{workspace.name}</p>
+                                                            <div className="flex items-center gap-2 mt-0.5">
+                                                                <i className="fas fa-users text-[9px] text-gray-500"></i>
+                                                                <span className="text-[10px] text-gray-500">{workspace.memberCount} members</span>
+                                                            </div>
+                                                        </div>
+                                                        {currentWorkspace.id === workspace.id && (
+                                                            <i className="fas fa-check text-[10px] text-blue-400 ml-2 flex-shrink-0"></i>
+                                                        )}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
                         </div>
                         <div className="flex flex-col min-w-0 flex-1 sm:flex-initial">
                             <span className="text-xs sm:text-sm font-semibold text-gray-200 leading-tight truncate">{user?.name}</span>
