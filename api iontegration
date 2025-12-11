@@ -1,0 +1,538 @@
+# Master AI Prompt: Desktop App OAuth Device Flow Integration
+
+## 🤖 Complete Prompt for AI Assistants
+
+Copy and paste this entire prompt into ChatGPT, Claude, Cursor AI, or any AI coding assistant:
+
+---
+
+```
+I need to integrate OAuth Device Flow authentication into my desktop application. 
+The backend API is already fully implemented and working. I need you to help me create 
+a complete, production-ready authentication module for my desktop app.
+
+================================================================================
+BACKEND API SPECIFICATIONS
+================================================================================
+
+BASE URL: https://your-domain.com (I will replace this with my actual domain)
+
+API ENDPOINTS:
+
+1. START DEVICE FLOW
+   Endpoint: POST https://your-domain.com/api/auth/device/start
+   Request Headers: Content-Type: application/json
+   Request Body: {} (empty JSON object)
+   
+   Success Response (200):
+   {
+     "result": true,
+     "message": "Device code generated successfully",
+     "data": {
+       "device_code": "xyz123abcdef...",  // 64 character random string
+       "user_code": "ABCD-EFGH",          // 8 character code, formatted with dash
+       "verification_url": "https://your-domain.com/device?code=ABCD-EFGH",
+       "expires_in": 600,                 // 10 minutes in seconds
+       "interval": 5                      // Poll interval in seconds
+     }
+   }
+   
+   Error Response (500):
+   {
+     "result": false,
+     "message": "Failed to generate device code",
+     "error": "Error message here"
+   }
+
+2. POLL FOR TOKEN
+   Endpoint: POST https://your-domain.com/api/auth/device/poll
+   Request Headers: Content-Type: application/json
+   Request Body: {
+     "device_code": "xyz123abcdef..."  // The device_code from step 1
+   }
+   
+   Response - Authorization Pending (202):
+   {
+     "result": false,
+     "message": "Authorization pending",
+     "error": "authorization_pending"
+   }
+   
+   Response - Success (200):
+   {
+     "result": true,
+     "message": "Authentication successful",
+     "data": {
+       "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",  // JWT token
+       "refresh_token": "random64characterstring...",                // Refresh token
+       "token_type": "Bearer",
+       "expires_in": 604800,                                          // 7 days in seconds
+       "user": {
+         "id": 18,
+         "name": "John Doe",
+         "email": "john@example.com",
+         "company_id": 1
+       }
+     }
+   }
+   
+   Response - Expired Token (410):
+   {
+     "result": false,
+     "message": "Device code has expired",
+     "error": "expired_token"
+   }
+   
+   Response - Already Used (400):
+   {
+     "result": false,
+     "message": "Device code has already been used",
+     "error": "code_already_used"
+   }
+   
+   Response - Invalid Code (404):
+   {
+     "result": false,
+     "message": "Invalid device code"
+   }
+
+================================================================================
+AUTHENTICATION FLOW
+================================================================================
+
+The OAuth Device Flow works as follows:
+
+1. Desktop app calls POST /api/auth/device/start
+   → Receives device_code, user_code, verification_url, expires_in, interval
+
+2. Desktop app opens verification_url in user's default browser
+   → User sees a web page with their user_code
+   → User must be logged into the web application
+   → User clicks "Authorize Device" button
+
+3. Desktop app polls POST /api/auth/device/poll every 5 seconds (or interval from response)
+   → Sends device_code in request body
+   → Receives "authorization_pending" until user authorizes
+   → Receives access_token and refresh_token when user authorizes
+
+4. Desktop app stores tokens securely
+   → Uses OS keychain/credential manager
+   → Never stores in plain text files
+
+5. Desktop app uses access_token for all API calls
+   → Includes in Authorization header: "Bearer {access_token}"
+   → Token expires in 7 days
+
+================================================================================
+REQUIREMENTS
+================================================================================
+
+I need you to create a complete, production-ready implementation with the following:
+
+1. DEVICE AUTH CLASS/MODULE
+   Create a DeviceAuth class (or equivalent in your language) with these methods:
+   
+   a) startFlow() / startFlowAsync()
+      - Makes POST request to /api/auth/device/start
+      - Handles network errors with retry logic
+      - Returns device_code, user_code, verification_url, expires_in, interval
+      - Throws/returns errors appropriately
+   
+   b) openBrowser() / openBrowserAsync()
+      - Opens verification_url in user's default browser
+      - Shows user_code to user (console/UI)
+      - Handles cases where browser can't be opened (show URL manually)
+   
+   c) pollForToken() / pollForTokenAsync()
+      - Polls /api/auth/device/poll every 5 seconds (or interval from response)
+      - Handles "authorization_pending" by continuing to poll
+      - Stops polling when tokens are received
+      - Handles expired codes (expires_in: 600 seconds = 10 minutes)
+      - Implements timeout (max 120 attempts = 10 minutes)
+      - Returns access_token, refresh_token, user info
+      - Handles all error cases gracefully
+   
+   d) authenticate() / authenticateAsync()
+      - Orchestrates the complete flow:
+        1. Call startFlow()
+        2. Call openBrowser()
+        3. Call pollForToken()
+      - Returns tokens on success
+      - Returns null/None/error on failure
+      - Shows progress messages to user
+
+2. ERROR HANDLING
+   Implement comprehensive error handling for:
+   
+   - Network errors (connection timeout, DNS failure, etc.)
+     → Retry with exponential backoff (3 attempts)
+     → Show user-friendly error messages
+   
+   - "authorization_pending" error
+     → Continue polling (this is expected)
+     → Show progress indicator
+   
+   - "expired_token" error
+     → Stop polling
+     → Return error indicating user needs to start new flow
+     → Optionally auto-restart flow
+   
+   - "code_already_used" error
+     → Stop polling
+     → Return error
+   
+   - Invalid device code (404)
+     → Return error
+   
+   - Timeout (user didn't authorize in 10 minutes)
+     → Stop polling
+     → Return timeout error
+     → Allow user to retry
+   
+   - Device code expiry (10 minutes)
+     → Check elapsed time before each poll
+     → Return expired error if time exceeded
+   
+   - Browser opening failures
+     → Fallback: Display URL and user_code for manual entry
+     → Continue with polling
+
+3. TOKEN STORAGE
+   Implement secure token storage using OS-native credential managers:
+   
+   For Windows:
+   - Python: Use 'keyring' library (Windows Credential Manager)
+   - C#: Use ProtectedData.Protect() (DPAPI)
+   - JavaScript/Electron: Use 'keytar' package
+   
+   For macOS:
+   - Python: Use 'keyring' library (Keychain)
+   - C#: Use Keychain via P/Invoke or library
+   - JavaScript/Electron: Use 'keytar' package
+   
+   For Linux:
+   - Python: Use 'keyring' library (Secret Service/KWallet)
+   - C#: Use keyring library
+   - JavaScript/Electron: Use 'keytar' package
+   
+   Create helper functions:
+   - saveTokens(access_token, refresh_token) → Store securely
+   - loadTokens() → Retrieve tokens
+   - deleteTokens() → Remove tokens (for logout)
+   - hasTokens() → Check if tokens exist
+   
+   NEVER store tokens in:
+   - Plain text files
+   - Environment variables
+   - Registry (Windows) without encryption
+   - Configuration files
+
+4. API CLIENT CLASS
+   Create an API client class that:
+   
+   - Automatically includes Bearer token in Authorization header
+   - Handles token expiration (401 Unauthorized)
+   - Implements retry logic for network errors
+   - Provides methods for common HTTP operations (GET, POST, PUT, DELETE)
+   - Returns typed responses (if using typed language)
+   - Logs requests/responses (optional, for debugging)
+   
+   Example usage:
+   ```python
+   client = APIClient(api_base_url, access_token)
+   profile = client.get('/api/user/profile')
+   tasks = client.post('/api/tasks', data={'title': 'Task'})
+   ```
+
+5. USER EXPERIENCE
+   Implement user-friendly features:
+   
+   - Progress messages:
+     * "Requesting device code..."
+     * "Device code received: ABCD-EFGH"
+     * "Opening browser for verification..."
+     * "Waiting for authorization... (attempt 1/120)"
+     * "Authentication successful!"
+   
+   - Display user_code prominently
+     * Show in console/UI
+     * Make it easy to read (format: ABCD-EFGH)
+   
+   - Error messages:
+     * User-friendly, non-technical language
+     * Actionable (what user should do)
+     * Clear and concise
+   
+   - Success confirmation:
+     * Show user name/email
+     * Confirm tokens are stored
+   
+   - Cancel option:
+     * Allow user to cancel during polling
+     * Clean up resources
+     * Return appropriate error
+
+6. CODE QUALITY
+   Write production-ready code with:
+   
+   - Proper error handling (try-catch, error types)
+   - Logging for debugging (optional but recommended)
+   - Type safety (TypeScript, type hints, etc.)
+   - Code comments explaining OAuth Device Flow steps
+   - Clean code structure (separate concerns)
+   - Async/await or promises (for network calls)
+   - No blocking operations in UI thread
+   - Resource cleanup (close connections, cancel timers)
+   - Unit testable structure (optional but recommended)
+
+7. CONFIGURATION
+   Make the implementation configurable:
+   
+   - API base URL (configurable, not hardcoded)
+   - Polling interval (use from API response, but allow override)
+   - Max polling attempts (default 120, configurable)
+   - Timeout values (configurable)
+   - Enable/disable logging
+   - Enable/disable auto-retry
+
+================================================================================
+MY DESKTOP APP DETAILS
+================================================================================
+
+Please specify:
+- Programming Language: [Python / C# / JavaScript / Java / Other]
+- Framework/Platform: [Tkinter / PyQt / WPF / Electron / JavaFX / Other]
+- Target OS: [Windows / macOS / Linux / Cross-platform]
+- Existing HTTP Library: [requests / HttpClient / axios / OkHttp / Other]
+- UI Framework: [Console / GUI Framework Name / None]
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+Please provide:
+
+1. COMPLETE DEVICE AUTH CLASS
+   - Full source code (not just snippets)
+   - All methods implemented
+   - Error handling included
+   - Ready to use
+
+2. TOKEN STORAGE IMPLEMENTATION
+   - Platform-specific secure storage
+   - Helper functions (save, load, delete, has)
+   - Error handling for storage failures
+
+3. API CLIENT CLASS
+   - Automatic Bearer token injection
+   - Common HTTP methods (GET, POST, PUT, DELETE)
+   - Error handling and retry logic
+   - Token expiration handling
+
+4. USAGE EXAMPLE
+   - Complete example showing:
+     * How to authenticate
+     * How to store tokens
+     * How to use API client
+     * How to handle errors
+     * How to check for existing tokens on app startup
+
+5. INTEGRATION GUIDE
+   - How to add to existing project
+   - Dependencies to install
+   - Configuration steps
+   - Testing instructions
+
+6. ERROR HANDLING GUIDE
+   - All error scenarios covered
+   - User-friendly error messages
+   - Recovery strategies
+
+7. BEST PRACTICES
+   - Security considerations
+   - Performance tips
+   - Common pitfalls to avoid
+
+================================================================================
+ADDITIONAL REQUIREMENTS
+================================================================================
+
+1. THREAD SAFETY
+   - If using multi-threading, ensure thread-safe operations
+   - Proper synchronization for shared state
+
+2. CANCELLATION
+   - Support cancellation tokens (C#) or similar
+   - Allow user to cancel polling
+   - Clean up resources on cancellation
+
+3. TOKEN REFRESH (Optional)
+   - If refresh endpoint exists, implement token refresh
+   - Auto-refresh before expiration
+   - Handle refresh failures
+
+4. MULTIPLE ACCOUNTS (Optional)
+   - Support storing multiple user tokens
+   - Allow switching between accounts
+
+5. OFFLINE MODE (Optional)
+   - Cache tokens for offline access
+   - Validate tokens when back online
+
+6. BIOMETRIC AUTH (Optional)
+   - Use OS biometrics to unlock stored tokens
+   - Secure token access
+
+================================================================================
+TESTING REQUIREMENTS
+================================================================================
+
+Please include:
+
+1. Unit tests (if applicable)
+   - Test startFlow() with mock responses
+   - Test pollForToken() with various responses
+   - Test error handling
+
+2. Integration test example
+   - How to test against real API
+   - What to verify
+
+3. Manual testing checklist
+   - Test successful authentication
+   - Test error scenarios
+   - Test token storage
+   - Test API calls with token
+
+================================================================================
+CODE STYLE PREFERENCES
+================================================================================
+
+- Use async/await or promises (not callbacks)
+- Follow language-specific conventions
+- Use meaningful variable names
+- Add docstrings/comments for public methods
+- Keep methods focused and small
+- Use constants for magic numbers
+- Handle edge cases
+
+================================================================================
+EXAMPLE RESPONSE FORMAT
+================================================================================
+
+Please structure your response as:
+
+1. **Overview** - Brief explanation of the implementation
+2. **Dependencies** - List of required libraries/packages
+3. **DeviceAuth Class** - Complete implementation
+4. **Token Storage** - Secure storage implementation
+5. **API Client** - API client class
+6. **Usage Example** - Complete working example
+7. **Integration Steps** - How to add to project
+8. **Testing** - Testing instructions
+9. **Troubleshooting** - Common issues and solutions
+
+================================================================================
+IMPORTANT NOTES
+================================================================================
+
+- Device codes expire in 10 minutes (600 seconds)
+- Poll every 5 seconds (or use interval from API response)
+- Maximum polling attempts: 120 (10 minutes total)
+- Access tokens expire in 7 days (604800 seconds)
+- User MUST be logged into web app before authorizing device
+- Tokens must be stored securely (OS keychain)
+- Never log or expose tokens in error messages
+- Handle all network errors gracefully
+- Provide user-friendly error messages
+
+================================================================================
+
+Please create a complete, production-ready implementation based on the above 
+specifications. Include all code, examples, and documentation needed to 
+integrate OAuth Device Flow authentication into my desktop application.
+
+Thank you!
+```
+
+---
+
+## 📝 How to Use This Prompt
+
+### Step 1: Customize the Prompt
+Before using, replace these placeholders:
+- `https://your-domain.com` → Your actual API base URL
+- `[Programming Language]` → Your language (Python, C#, JavaScript, etc.)
+- `[Framework/Platform]` → Your framework (Tkinter, WPF, Electron, etc.)
+- `[Target OS]` → Your target platform (Windows, macOS, Linux, Cross-platform)
+
+### Step 2: Copy to AI Assistant
+1. Copy the entire prompt (everything between the ``` markers)
+2. Paste into ChatGPT, Claude, Cursor AI, or your preferred AI assistant
+3. Wait for the complete implementation
+
+### Step 3: Review and Test
+1. Review the generated code
+2. Install required dependencies
+3. Test the authentication flow
+4. Integrate into your desktop app
+
+---
+
+## 🎯 What This Prompt Provides
+
+This comprehensive prompt will generate:
+
+✅ **Complete DeviceAuth class** - All methods implemented  
+✅ **Secure token storage** - Platform-specific implementation  
+✅ **API client** - Ready-to-use HTTP client with Bearer token  
+✅ **Error handling** - All error scenarios covered  
+✅ **Usage examples** - Complete working examples  
+✅ **Integration guide** - Step-by-step integration instructions  
+✅ **Testing instructions** - How to test the implementation  
+✅ **Best practices** - Security and performance tips  
+
+---
+
+## 💡 Tips for Best Results
+
+1. **Be Specific**: Fill in all the placeholders in the prompt
+2. **Specify Language**: Clearly state your programming language
+3. **Mention Framework**: Include your UI framework if applicable
+4. **Ask for Clarification**: If something is unclear, ask the AI
+5. **Iterate**: Review the code and ask for improvements if needed
+
+---
+
+## 🔄 Alternative: Shorter Version
+
+If the full prompt is too long, you can use this shorter version:
+
+```
+I need OAuth Device Flow authentication for my desktop app. Backend API:
+- POST /api/auth/device/start → Returns device_code, user_code, verification_url
+- POST /api/auth/device/poll → Returns access_token when authorized
+
+Flow: Request code → Open browser → User authorizes → Poll for token → Store tokens securely.
+
+Language: [YOUR LANGUAGE]
+Platform: [YOUR PLATFORM]
+Framework: [YOUR FRAMEWORK]
+
+Create complete DeviceAuth class with:
+- startFlow() - Request device code
+- openBrowser() - Open verification URL
+- pollForToken() - Poll every 5 seconds
+- authenticate() - Complete flow
+- Secure token storage (OS keychain)
+- API client with Bearer token
+- Full error handling
+- Usage examples
+
+Provide production-ready code with all error cases handled.
+```
+
+---
+
+**This master prompt contains everything needed for a complete desktop app integration!** 🚀
+

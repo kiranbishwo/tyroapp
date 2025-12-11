@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Settings as SettingsType, ActivityLog, TimeEntry } from '../types';
+import { apiService } from '../services/apiService';
 
 interface SettingsProps {
     activityLogs: ActivityLog[];
@@ -21,15 +22,42 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
     const [loading, setLoading] = useState(true);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [exportStatus, setExportStatus] = useState<string>('');
+    const [apiStatus, setApiStatus] = useState<string>('');
+    const [testingConnection, setTestingConnection] = useState(false);
+    const [oauthStatus, setOauthStatus] = useState<{ authenticated: boolean; user?: any } | null>(null);
+    const [authenticating, setAuthenticating] = useState(false);
+    const [deviceCode, setDeviceCode] = useState<{ user_code: string; verification_url: string; browser_opened: boolean } | null>(null);
 
     useEffect(() => {
         const loadSettings = async () => {
             if (window.electronAPI) {
                 try {
                     const savedSettings = await window.electronAPI.getSettings();
-                    if (savedSettings) {
-                        setSettings(savedSettings);
+                    
+                    // Check for environment variables first
+                    const envApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
+                    const envApiKey = import.meta.env.VITE_API_KEY;
+                    const envApiEnabled = import.meta.env.VITE_API_ENABLED === 'true';
+                    
+                    // Merge settings: env vars take precedence, then saved settings, then defaults
+                    const mergedSettings: SettingsType = {
+                        ...savedSettings,
+                        // Use env vars if available, otherwise use saved settings
+                        apiBaseUrl: envApiBaseUrl || savedSettings?.apiBaseUrl || '',
+                        apiKey: envApiKey || savedSettings?.apiKey || '',
+                        apiEnabled: envApiEnabled !== undefined ? envApiEnabled : (savedSettings?.apiEnabled || false),
+                    };
+                    
+                    setSettings(mergedSettings);
+                    
+                    // If we have env vars but settings weren't saved, save them
+                    if (envApiBaseUrl && (!savedSettings?.apiBaseUrl || savedSettings.apiBaseUrl !== envApiBaseUrl)) {
+                        await window.electronAPI.setSettings(mergedSettings);
                     }
+                    
+                    // Check OAuth status
+                    const oauthStatus = await window.electronAPI.oauthCheckStatus();
+                    setOauthStatus(oauthStatus);
                 } catch (error) {
                     console.error('Error loading settings:', error);
                 }
@@ -37,11 +65,27 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
             setLoading(false);
         };
         loadSettings();
+        
+        // Cleanup: Remove OAuth listeners on unmount
+        return () => {
+            if (window.electronAPI?.removeOAuthListeners) {
+                window.electronAPI.removeOAuthListeners();
+            }
+        };
     }, []);
 
-    const handleSettingChange = async (key: keyof SettingsType, value: boolean | number) => {
+    const handleSettingChange = async (key: keyof SettingsType, value: boolean | number | string) => {
         const newSettings = { ...settings, [key]: value };
         setSettings(newSettings);
+        
+        // Update API service config if API settings changed
+        if (key === 'apiBaseUrl' || key === 'apiKey' || key === 'apiEnabled') {
+            apiService.updateConfig({
+                baseUrl: newSettings.apiBaseUrl || '',
+                apiKey: newSettings.apiKey || '',
+                enabled: newSettings.apiEnabled || false,
+            });
+        }
         
         if (window.electronAPI) {
             try {
@@ -49,6 +93,131 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
             } catch (error) {
                 console.error('Error saving settings:', error);
             }
+        }
+    };
+
+    const handleTestConnection = async () => {
+        if (!settings.apiBaseUrl) {
+            setApiStatus('Please enter API base URL');
+            return;
+        }
+
+        setTestingConnection(true);
+        setApiStatus('Testing connection...');
+        
+        try {
+            apiService.updateConfig({
+                baseUrl: settings.apiBaseUrl || '',
+                apiKey: settings.apiKey || '',
+                enabled: true,
+            });
+            
+            const result = await apiService.healthCheck();
+            if (result.success) {
+                setApiStatus('✓ Connection successful!');
+            } else {
+                setApiStatus(`✗ Connection failed: ${result.error}`);
+            }
+        } catch (error: any) {
+            setApiStatus(`✗ Connection failed: ${error.message}`);
+        } finally {
+            setTestingConnection(false);
+            setTimeout(() => setApiStatus(''), 5000);
+        }
+    };
+
+    const handleOAuthAuthenticate = async () => {
+        if (!window.electronAPI) {
+            return;
+        }
+
+        if (!settings.apiBaseUrl) {
+            setApiStatus('Please enter API base URL first');
+            setTimeout(() => setApiStatus(''), 5000);
+            return;
+        }
+
+        setAuthenticating(true);
+        setDeviceCode(null);
+        setApiStatus('Starting OAuth authentication...');
+        
+        // Set up event listeners
+        if (window.electronAPI.onOAuthDeviceCode) {
+            window.electronAPI.onOAuthDeviceCode((data) => {
+                setDeviceCode(data);
+                if (data.browser_opened) {
+                    setApiStatus(`Browser opened! Enter code: ${data.user_code}`);
+                } else {
+                    setApiStatus(`Please open this URL: ${data.verification_url}\nEnter code: ${data.user_code}`);
+                }
+            });
+        }
+        
+        if (window.electronAPI.onOAuthSuccess) {
+            window.electronAPI.onOAuthSuccess(async (data) => {
+                setApiStatus(`✓ ${data.message || 'Authentication successful!'}`);
+                setAuthenticating(false);
+                setDeviceCode(null);
+                
+                // Refresh OAuth status
+                const oauthStatus = await window.electronAPI.oauthCheckStatus();
+                setOauthStatus(oauthStatus);
+                
+                // Clean up listeners
+                if (window.electronAPI.removeOAuthListeners) {
+                    window.electronAPI.removeOAuthListeners();
+                }
+            });
+        }
+        
+        try {
+            const result = await window.electronAPI.oauthAuthenticate();
+            
+            // If authentication completed immediately (shouldn't happen with Device Flow)
+            if (result.success) {
+                setApiStatus(`✓ ${result.message || 'Authentication successful!'}`);
+                setAuthenticating(false);
+                setDeviceCode(null);
+                
+                // Refresh OAuth status
+                const oauthStatus = await window.electronAPI.oauthCheckStatus();
+                setOauthStatus(oauthStatus);
+            } else if (result.error && !deviceCode) {
+                // Only show error if we didn't get device code
+                setApiStatus(`✗ Authentication failed: ${result.error}`);
+                setAuthenticating(false);
+            }
+            // If we have device code, keep authenticating state and wait for success event
+        } catch (error: any) {
+            setApiStatus(`✗ Authentication failed: ${error.message}`);
+            setAuthenticating(false);
+            setDeviceCode(null);
+            
+            // Clean up listeners
+            if (window.electronAPI.removeOAuthListeners) {
+                window.electronAPI.removeOAuthListeners();
+            }
+        }
+    };
+
+    const handleOAuthLogout = async () => {
+        if (!window.electronAPI) {
+            return;
+        }
+
+        try {
+            const result = await window.electronAPI.oauthLogout();
+            
+            if (result.success) {
+                setOauthStatus({ authenticated: false });
+                setApiStatus('✓ Logged out successfully');
+            } else {
+                setApiStatus(`✗ Logout failed: ${result.error}`);
+            }
+        } catch (error: any) {
+            setApiStatus(`✗ Logout failed: ${error.message}`);
+        } finally {
+            setTimeout(() => setApiStatus(''), 5000);
         }
     };
 
@@ -225,6 +394,230 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
                                     <span>15 min</span>
                                 </div>
                             </div>
+                        </div>
+                    </section>
+
+                    {/* API Configuration */}
+                    <section>
+                        <h3 className="text-white font-semibold text-xs sm:text-sm mb-2 sm:mb-3">API Integration</h3>
+                        <div className="space-y-2 sm:space-y-3">
+                            {/* Enable API */}
+                            <div className="bg-gray-800 rounded-lg p-2.5 sm:p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0">
+                                <div className="flex-1 min-w-0">
+                                    <label className="text-white text-xs sm:text-sm font-medium">Enable API Sync</label>
+                                    <p className="text-gray-400 text-[10px] sm:text-xs mt-1">Sync data with remote API server</p>
+                                </div>
+                                <label className="relative inline-flex items-center cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={settings.apiEnabled || false}
+                                        onChange={(e) => handleSettingChange('apiEnabled', e.target.checked)}
+                                        className="sr-only peer"
+                                    />
+                                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                </label>
+                            </div>
+
+                            {/* API Base URL */}
+                            {settings.apiEnabled && (
+                                <>
+                                    <div className="bg-gray-800 rounded-lg p-3">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <label className="text-white text-xs sm:text-sm font-medium block">API Base URL</label>
+                                            {import.meta.env.VITE_API_BASE_URL && (
+                                                <span className="text-xs text-green-400 flex items-center gap-1">
+                                                    <i className="fas fa-check-circle"></i>
+                                                    From .env.local
+                                                </span>
+                                            )}
+                                        </div>
+                                        <input
+                                            type="text"
+                                            value={settings.apiBaseUrl || ''}
+                                            onChange={(e) => handleSettingChange('apiBaseUrl', e.target.value)}
+                                            placeholder="https://api.example.com"
+                                            disabled={!!import.meta.env.VITE_API_BASE_URL}
+                                            className="w-full bg-gray-700 text-white text-sm px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                                        />
+                                        <p className="text-gray-400 text-[10px] sm:text-xs mt-1">
+                                            {import.meta.env.VITE_API_BASE_URL 
+                                                ? 'Using value from .env.local file' 
+                                                : 'Base URL for API endpoints'}
+                                        </p>
+                                    </div>
+
+                                    {/* OAuth Authentication */}
+                                    <div className="bg-gray-800 rounded-lg p-3 space-y-3">
+                                        <div className="flex items-center justify-between">
+                                            <div>
+                                                <label className="text-white text-xs sm:text-sm font-medium block">OAuth Authentication</label>
+                                                <p className="text-gray-400 text-[10px] sm:text-xs mt-1">
+                                                    {oauthStatus?.authenticated 
+                                                        ? `Authenticated as ${oauthStatus.user?.name || oauthStatus.user?.email || 'User'}`
+                                                        : 'Authenticate using browser-based OAuth'}
+                                                </p>
+                                            </div>
+                                            {oauthStatus?.authenticated && (
+                                                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-900 text-green-300">
+                                                    <i className="fas fa-check-circle mr-1"></i>
+                                                    Authenticated
+                                                </span>
+                                            )}
+                                        </div>
+                                        
+                                        {/* Device Code Display */}
+                                        {deviceCode && (
+                                            <div className="bg-blue-900/30 border border-blue-700 rounded-lg p-3 space-y-2">
+                                                <div className="flex items-center gap-2">
+                                                    <i className="fas fa-info-circle text-blue-400"></i>
+                                                    <p className="text-white text-xs font-medium">Enter this code in your browser:</p>
+                                                </div>
+                                                <div className="bg-gray-900 rounded-lg p-3 text-center">
+                                                    <p className="text-2xl font-mono font-bold text-blue-400 tracking-wider">
+                                                        {deviceCode.user_code}
+                                                    </p>
+                                                </div>
+                                                {!deviceCode.browser_opened && (
+                                                    <div className="mt-2">
+                                                        <p className="text-yellow-400 text-xs mb-1">Browser didn't open automatically. Please open:</p>
+                                                        <a 
+                                                            href={deviceCode.verification_url}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-blue-400 hover:text-blue-300 text-xs break-all underline"
+                                                        >
+                                                            {deviceCode.verification_url}
+                                                        </a>
+                                                    </div>
+                                                )}
+                                                <p className="text-gray-400 text-xs">
+                                                    <i className="fas fa-clock mr-1"></i>
+                                                    Waiting for authorization... (This window will close automatically)
+                                                </p>
+                                            </div>
+                                        )}
+                                        
+                                        {!oauthStatus?.authenticated ? (
+                                            <button
+                                                onClick={handleOAuthAuthenticate}
+                                                disabled={authenticating}
+                                                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold py-2 rounded-lg transition-colors flex items-center justify-center gap-2"
+                                            >
+                                                {authenticating ? (
+                                                    <>
+                                                        <i className="fas fa-spinner fa-spin"></i>
+                                                        {deviceCode ? 'Waiting for authorization...' : 'Opening browser...'}
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <i className="fas fa-sign-in-alt"></i>
+                                                        Login with Browser
+                                                    </>
+                                                )}
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={handleOAuthLogout}
+                                                className="w-full bg-red-600 hover:bg-red-500 text-white font-semibold py-2 rounded-lg transition-colors flex items-center justify-center gap-2"
+                                            >
+                                                <i className="fas fa-sign-out-alt"></i>
+                                                Logout
+                                            </button>
+                                        )}
+                                        
+                                        {oauthStatus?.user && (
+                                            <div className="text-xs text-gray-400 pt-2 border-t border-gray-700">
+                                                <p><strong>Email:</strong> {oauthStatus.user.email}</p>
+                                                {oauthStatus.user.company_id && (
+                                                    <p><strong>Company ID:</strong> {oauthStatus.user.company_id}</p>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* API Key (Fallback) */}
+                                    <div className="bg-gray-800 rounded-lg p-3">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <label className="text-white text-xs sm:text-sm font-medium block">API Key (Optional - Fallback)</label>
+                                            {import.meta.env.VITE_API_KEY && (
+                                                <span className="text-xs text-green-400 flex items-center gap-1">
+                                                    <i className="fas fa-check-circle"></i>
+                                                    From .env.local
+                                                </span>
+                                            )}
+                                        </div>
+                                        <input
+                                            type="password"
+                                            value={settings.apiKey || ''}
+                                            onChange={(e) => handleSettingChange('apiKey', e.target.value)}
+                                            placeholder="Enter API key or token (used if OAuth not available)"
+                                            disabled={!!import.meta.env.VITE_API_KEY}
+                                            className="w-full bg-gray-700 text-white text-sm px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                                        />
+                                        <p className="text-gray-400 text-[10px] sm:text-xs mt-1">
+                                            {import.meta.env.VITE_API_KEY 
+                                                ? 'Using value from .env.local file (OAuth preferred)' 
+                                                : 'Fallback authentication token (OAuth preferred)'}
+                                        </p>
+                                    </div>
+
+                                    {/* Auto Sync */}
+                                    <div className="bg-gray-800 rounded-lg p-2.5 sm:p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0">
+                                        <div className="flex-1 min-w-0">
+                                            <label className="text-white text-xs sm:text-sm font-medium">Auto Sync</label>
+                                            <p className="text-gray-400 text-[10px] sm:text-xs mt-1">Automatically sync data at intervals</p>
+                                        </div>
+                                        <label className="relative inline-flex items-center cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={settings.autoSync !== false}
+                                                onChange={(e) => handleSettingChange('autoSync', e.target.checked)}
+                                                className="sr-only peer"
+                                            />
+                                            <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                        </label>
+                                    </div>
+
+                                    {/* Sync Interval */}
+                                    {settings.autoSync !== false && (
+                                        <div className="bg-gray-800 rounded-lg p-3">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <label className="text-white text-sm font-medium">Sync Interval</label>
+                                                <span className="text-blue-400 text-sm font-mono">{settings.apiSyncInterval || 60} sec</span>
+                                            </div>
+                                            <p className="text-gray-400 text-xs mb-3">How often to sync data automatically</p>
+                                            <input
+                                                type="range"
+                                                min="10"
+                                                max="300"
+                                                step="10"
+                                                value={settings.apiSyncInterval || 60}
+                                                onChange={(e) => handleSettingChange('apiSyncInterval', parseInt(e.target.value))}
+                                                className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                                            />
+                                            <div className="flex justify-between text-xs text-gray-500 mt-1">
+                                                <span>10 sec</span>
+                                                <span>300 sec</span>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Test Connection */}
+                                    <button
+                                        onClick={handleTestConnection}
+                                        disabled={testingConnection || !settings.apiBaseUrl}
+                                        className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
+                                    >
+                                        <i className="fas fa-plug"></i>
+                                        {testingConnection ? 'Testing...' : 'Test Connection'}
+                                    </button>
+                                    {apiStatus && (
+                                        <p className={`text-xs text-center ${apiStatus.includes('✓') ? 'text-green-400' : apiStatus.includes('✗') ? 'text-red-400' : 'text-yellow-400'}`}>
+                                            {apiStatus}
+                                        </p>
+                                    )}
+                                </>
+                            )}
                         </div>
                     </section>
 

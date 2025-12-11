@@ -16,7 +16,19 @@ export default defineConfig({
       },
       build: {
         outDir: 'dist',
-        emptyOutDir: true
-      }
+        emptyOutDir: true,
+        rollupOptions: {
+          external: [
+            // Exclude native modules and Electron from bundling
+            'keytar',
+            'electron',
+            /^electron\/.*/,
+          ],
+        },
+      },
+      optimizeDeps: {
+        // Exclude native modules from pre-bundling
+        exclude: ['keytar'],
+      },
 });
  

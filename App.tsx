@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { User, AppView, Project, TimeEntry, Settings, ActivityLog, Task } from './types';
+import { User, AppView, Project, TimeEntry, Settings, ActivityLog, Task, AuthenticatedUser, Workspace } from './types';
 import { FaceAttendance } from './components/FaceAttendance';
 import { ScreenLogger } from './components/ScreenLogger';
 import { InsightsDashboard } from './components/InsightsDashboard';
@@ -11,6 +11,9 @@ import { IdleDialog } from './components/IdleDialog';
 import { CombinedInsights } from './components/CombinedInsights';
 import { useSurveillance } from './hooks/useSurveillance';
 import { applyBlurWithIntensity } from './utils/imageBlur';
+import { authState } from './services/authState';
+import { UserAvatar } from './components/UserAvatar';
+import { apiService } from './services/apiService';
 
 // Electron API types are defined in types/electron.d.ts
 
@@ -102,19 +105,18 @@ const App: React.FC = () => {
     const [userStatus, setUserStatus] = useState<UserStatus>('idle');
     const [showStatusMenu, setShowStatusMenu] = useState(false);
     
-    // Workspace State
-    const [currentWorkspace, setCurrentWorkspace] = useState<{ id: string; name: string; memberCount: number }>({
-        id: 'ws1',
-        name: 'Development Team',
-        memberCount: 12
-    });
-    const [availableWorkspaces] = useState<Array<{ id: string; name: string; memberCount: number }>>([
-        { id: 'ws1', name: 'Development Team', memberCount: 12 },
-        { id: 'ws2', name: 'Design Team', memberCount: 8 },
-        { id: 'ws3', name: 'Marketing Team', memberCount: 15 },
-        { id: 'ws4', name: 'QA Team', memberCount: 6 }
-    ]);
+    // OAuth state for login screen
+    const [loginDeviceCode, setLoginDeviceCode] = useState<{ user_code: string; verification_url: string; browser_opened: boolean } | null>(null);
+    const [loginAuthenticating, setLoginAuthenticating] = useState(false);
+    const [loginOAuthStatus, setLoginOAuthStatus] = useState<string>('');
+    
+    // Auth State
+    const [authStateData, setAuthStateData] = useState(authState.getState());
+    const [authenticatedUser, setAuthenticatedUser] = useState<AuthenticatedUser | null>(null);
+    const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+    const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null);
     const [showUserMenu, setShowUserMenu] = useState(false);
+    const [workspacesLoading, setWorkspacesLoading] = useState(false);
     
     // Today's tasks (for restoration and continuation)
     const [todayTasks, setTodayTasks] = useState<Array<{
@@ -189,6 +191,62 @@ const App: React.FC = () => {
             return { ...prev, ...accumulated };
         });
     }, [timeEntries.length]); // Only recalculate when entries count changes, not on every render
+
+    // Initialize auth state on mount
+    useEffect(() => {
+        const initAuth = async () => {
+            setWorkspacesLoading(true);
+            await authState.initialize();
+            setWorkspacesLoading(false);
+            
+            const unsubscribe = authState.subscribe((state) => {
+                console.log('[APP] Auth state updated:', {
+                    isAuthenticated: state.isAuthenticated,
+                    userName: state.user?.name,
+                    workspacesCount: state.workspaces.length,
+                    currentWorkspace: state.currentWorkspace?.workspace_name || 'None',
+                });
+                
+                setAuthStateData(state);
+                setAuthenticatedUser(state.user);
+                setWorkspaces(state.workspaces);
+                setCurrentWorkspace(state.currentWorkspace);
+                setWorkspacesLoading(false);
+                
+                // Log workspace details for debugging
+                if (state.workspaces.length > 0) {
+                    console.log('[APP] ✅ Workspaces loaded successfully:', state.workspaces.map(w => ({
+                        id: w.workspace_id,
+                        name: w.workspace_name,
+                        company: w.company_name,
+                    })));
+                } else if (state.isAuthenticated) {
+                    console.warn('[APP] ⚠️ No workspaces in auth state but user is authenticated!');
+                }
+                
+                // If authenticated and user data available, update local user state and navigate to dashboard
+                if (state.isAuthenticated && state.user) {
+                    setUser({
+                        id: state.user.id.toString(),
+                        name: state.user.name,
+                        avatar: state.user.avatar || 'https://picsum.photos/100/100',
+                        isCheckedIn: false,
+                    });
+                    
+                    // If on login view and authenticated, go to check-in view
+                    if (view === AppView.LOGIN) {
+                        setView(AppView.CHECK_IN_OUT);
+                    }
+                }
+            });
+            
+            return () => {
+                unsubscribe();
+            };
+        };
+        
+        initAuth();
+    }, []);
 
     // Check user consent on mount
     useEffect(() => {
@@ -335,7 +393,81 @@ const App: React.FC = () => {
         }
         
         setUser({ ...INITIAL_USER, name: email.split('@')[0] });
+        // After login, user must check in first before accessing dashboard
         setView(AppView.CHECK_IN_OUT); 
+    };
+    
+    // Logout handler
+    const handleLogout = async () => {
+        try {
+            console.log('[APP] Logging out...');
+            
+            // Stop camera if running
+            if (cameraStream) {
+                stopCamera();
+            }
+            
+            // Stop timer if running
+            if (isTimerRunning) {
+                setIsTimerRunning(false);
+                setStartTime(null);
+                setElapsedSeconds(0);
+            }
+            
+            // Call device logout API first (unlinks device from server)
+            if (window.electronAPI?.oauthDeviceLogout) {
+                try {
+                    const deviceLogoutResult = await window.electronAPI.oauthDeviceLogout();
+                    if (deviceLogoutResult.success) {
+                        console.log('[APP] ✅ Device unlinked from server:', deviceLogoutResult.message);
+                    } else {
+                        console.warn('[APP] ⚠️ Device logout API failed:', deviceLogoutResult.error);
+                        // Continue with local logout even if API call fails
+                    }
+                } catch (error) {
+                    console.error('[APP] Error calling device logout API:', error);
+                    // Continue with local logout even if API call fails
+                }
+            }
+            
+            // Clear tokens from local storage (keytar)
+            if (window.electronAPI?.oauthLogout) {
+                try {
+                    const result = await window.electronAPI.oauthLogout();
+                    if (result.success) {
+                        console.log('[APP] ✅ Tokens cleared from storage');
+                    } else {
+                        console.warn('[APP] ⚠️ Local logout failed:', result.error);
+                    }
+                } catch (error) {
+                    console.error('[APP] Error clearing local tokens:', error);
+                }
+            }
+            
+            // Clear localStorage (login_token)
+            localStorage.removeItem('login_token');
+            console.log('[APP] ✅ Cleared login_token from localStorage');
+            
+            // Clear auth state
+            authState.clearAuth();
+            
+            // Clear local user state
+            setUser(null);
+            setAuthenticatedUser(null);
+            setWorkspaces([]);
+            setCurrentWorkspace(null);
+            
+            // Navigate to login view
+            setView(AppView.LOGIN);
+            setShowUserMenu(false);
+            
+            console.log('[APP] ✅ Logout complete - ready for new login');
+        } catch (error) {
+            console.error('[APP] Error during logout:', error);
+            // Still navigate to login even if logout fails
+            setView(AppView.LOGIN);
+            setShowUserMenu(false);
+        }
     };
 
     // Start camera when navigating to CHECK_IN_OUT view (for checkout/checkin)
@@ -1247,29 +1379,69 @@ const App: React.FC = () => {
     }, [userStatus]); // Only watch userStatus changes
 
     const handleFaceConfirmed = async (photoData: string) => {
-        if (!user) return;
+        if (!user) {
+            throw new Error('User not found');
+        }
         
         if (user.isCheckedIn) {
-            // Check Out - stop task if running, pause tracking, set to idle
-            if (isTimerRunning) {
-                await toggleTimer();
-                // Wait a moment for the task to stop and save
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-            
-            // Stop tracking and set status to idle
-            stopCamera();
-            setUserStatus('idle');
-            
-            setUser({ ...user, isCheckedIn: false, checkInTime: undefined });
-            setView(AppView.LOGIN);
+            // Check Out - This is now handled by onCheckOut callback in FaceAttendance
+            // This onConfirm is kept for backward compatibility but shouldn't be called
+            // when onFaceValidated and onCheckOut are provided
+            throw new Error('Please use onCheckOut callback for check-out');
         } else {
-            // Check In
-            setUser({ ...user, isCheckedIn: true, checkInTime: new Date() });
-            // Don't keep camera running - we'll open it only when needed for captures
-            stopCamera();
-            // Status remains 'idle' until user starts a task
-            setView(AppView.DASHBOARD);
+            // Check In - verify face with API first, then check-in
+            // Step 1: Call Face Check API to verify the face
+            const faceCheckResult = await apiService.checkFace(photoData);
+            
+            if (faceCheckResult.success && faceCheckResult.data) {
+                // Face matched successfully (similarity ≥ 75%)
+                const similarity = faceCheckResult.data.similarity;
+                console.log(`Face verification successful: ${similarity}% similarity`);
+                
+                // Step 2: Call Check-In API
+                const now = new Date();
+                const checkInTime = now.toTimeString().slice(0, 5); // HH:mm format
+                const checkInDate = now.toISOString().split('T')[0]; // YYYY-MM-DD format
+                
+                const checkInData = {
+                    check_in: checkInTime,
+                    date: checkInDate,
+                    attendance_from: 'web',
+                    check_in_location: 'Device',
+                };
+                
+                console.log('[CHECK-IN] Calling check-in API with data:', checkInData);
+                const checkInResult = await apiService.checkIn(checkInData);
+                
+                if (checkInResult.success) {
+                    console.log('[CHECK-IN] Check-in successful:', checkInResult.data);
+                    
+                    // Update user state
+                    setUser({ 
+                        ...user, 
+                        isCheckedIn: true, 
+                        checkInTime: now 
+                    });
+                    
+                    // Stop camera
+                    stopCamera();
+                    
+                    // Navigate to dashboard
+                    setView(AppView.DASHBOARD);
+                } else {
+                    // Check-in API failed
+                    const errorMessage = checkInResult.error || checkInResult.message || 'Check-in failed';
+                    console.error('[CHECK-IN] Check-in failed:', errorMessage);
+                    throw new Error(errorMessage);
+                }
+            } else {
+                // Face verification failed - throw error so FaceAttendance can catch it
+                const errorMessage = faceCheckResult.error || faceCheckResult.message || 'Face verification failed';
+                console.error('Face verification failed:', errorMessage);
+                
+                // Throw error with user-friendly message
+                throw new Error(errorMessage);
+            }
         }
     };
 
@@ -1306,6 +1478,262 @@ const App: React.FC = () => {
         );
     }
 
+    // OAuth login handler
+    const handleOAuthLogin = async () => {
+        if (!window.electronAPI) {
+            setLoginOAuthStatus('Electron API not available');
+            return;
+        }
+
+        // Check for API URL from environment variables first, then settings
+        const envApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
+        const settings = await window.electronAPI.getSettings();
+        const apiBaseUrl = envApiBaseUrl || settings?.apiBaseUrl;
+        
+        if (!apiBaseUrl) {
+            setLoginOAuthStatus('Please configure API Base URL in Settings or .env.local file');
+            return;
+        }
+        
+        // If we have env var but not in settings, update settings
+        if (envApiBaseUrl && (!settings?.apiBaseUrl || settings.apiBaseUrl !== envApiBaseUrl)) {
+            await window.electronAPI.setSettings({
+                ...settings,
+                apiBaseUrl: envApiBaseUrl,
+                apiEnabled: import.meta.env.VITE_API_ENABLED === 'true' || settings?.apiEnabled || false,
+            });
+        }
+
+        setLoginAuthenticating(true);
+        setLoginDeviceCode(null);
+        setLoginOAuthStatus('Starting authentication...');
+
+        // Set up event listeners
+        if (window.electronAPI.onOAuthDeviceCode) {
+            window.electronAPI.onOAuthDeviceCode((data) => {
+                setLoginDeviceCode(data);
+                if (data.browser_opened) {
+                    setLoginOAuthStatus(`Browser opened! Enter code: ${data.user_code}`);
+                } else {
+                    setLoginOAuthStatus(`Please open: ${data.verification_url}\nEnter code: ${data.user_code}`);
+                }
+            });
+        }
+
+        // Listen for login_token from main process and save to localStorage
+        if (window.electronAPI && window.electronAPI.onLoginToken) {
+            window.electronAPI.onLoginToken((token: string) => {
+                if (token) {
+                    localStorage.setItem('login_token', token);
+                    console.log('[APP] Saved login_token to localStorage');
+                }
+            });
+        }
+
+        // Listen for full response data from main process and save to localStorage
+        if (window.electronAPI && window.electronAPI.onFullResponse) {
+            window.electronAPI.onFullResponse((fullResponse: any) => {
+                if (fullResponse) {
+                    localStorage.setItem('auth_full_response', JSON.stringify(fullResponse));
+                    console.log('[APP] Saved full auth response to localStorage');
+                    
+                    // Also save login_token separately for backward compatibility
+                    if (fullResponse.login_token) {
+                        localStorage.setItem('login_token', fullResponse.login_token);
+                    }
+                }
+            });
+        }
+
+        if (window.electronAPI.onOAuthSuccess) {
+            window.electronAPI.onOAuthSuccess(async (data) => {
+                setLoginOAuthStatus(`✓ Authenticated as ${data.user.name || data.user.email}`);
+                setLoginAuthenticating(false);
+                setLoginDeviceCode(null);
+                
+                // Save full response data to localStorage
+                if (data.fullResponse) {
+                    localStorage.setItem('auth_full_response', JSON.stringify(data.fullResponse));
+                    console.log('[APP] Saved full auth response to localStorage from OAuth success');
+                }
+                
+                // Save login_token to localStorage if available (for backward compatibility)
+                if (data.login_token) {
+                    localStorage.setItem('login_token', data.login_token);
+                    console.log('[APP] Saved login_token to localStorage from OAuth success');
+                }
+                
+                // Update auth state with full data
+                console.log('[APP] ========== OAUTH SUCCESS EVENT ==========');
+                console.log('[APP] Full event data:', JSON.stringify(data, null, 2));
+                console.log('[APP] OAuth success event received:', {
+                    hasUser: !!data.user,
+                    hasWorkspaces: !!data.workspaces,
+                    workspacesCount: data.workspaces?.length || 0,
+                    hasToken: !!data.token,
+                    hasExpiresAt: !!data.expires_at,
+                    hasCurrentWorkspace: !!data.currentWorkspace,
+                });
+                
+                if (data.workspaces && Array.isArray(data.workspaces)) {
+                    console.log('[APP] ✅ Workspaces in success event:', data.workspaces.map((w: any) => ({
+                        id: w.workspace_id,
+                        name: w.workspace_name,
+                        company: w.company_name,
+                    })));
+                } else {
+                    console.warn('[APP] ⚠️ Workspaces not found or not an array in success event');
+                    console.log('[APP] Data keys:', Object.keys(data));
+                }
+                
+                if (data.user && data.workspaces && data.token && data.expires_at) {
+                    console.log('[APP] Setting auth data with', data.workspaces.length, 'workspaces');
+                    authState.setAuthData(
+                        data.user as AuthenticatedUser,
+                        data.workspaces as Workspace[],
+                        data.token,
+                        data.expires_at,
+                        data.currentWorkspace?.workspace_id,
+                        data.fullResponse // Include full response
+                    );
+                } else {
+                    console.warn('[APP] ⚠️ Missing data in OAuth success event:', {
+                        user: !!data.user,
+                        workspaces: !!data.workspaces,
+                        token: !!data.token,
+                        expires_at: !!data.expires_at,
+                    });
+                    
+                    // Try to reload from storage if workspaces are missing
+                    if (data.user && !data.workspaces) {
+                        console.log('[APP] Attempting to reload workspaces from storage...');
+                        try {
+                            const status = await window.electronAPI.oauthCheckStatus();
+                            if (status.workspaces && status.workspaces.length > 0) {
+                                console.log('[APP] Found workspaces in storage:', status.workspaces.length);
+                                authState.setAuthData(
+                                    data.user as AuthenticatedUser,
+                                    status.workspaces as Workspace[],
+                                    data.token || '',
+                                    data.expires_at || Date.now() + 604800000,
+                                    status.currentWorkspace?.workspace_id
+                                );
+                            }
+                        } catch (error) {
+                            console.error('[APP] Error reloading workspaces:', error);
+                        }
+                    }
+                }
+                console.log('[APP] ===========================================');
+                
+                // After OAuth success, go to check-in screen first
+                // User must check in before accessing dashboard
+                if (view === AppView.LOGIN) {
+                    setTimeout(() => {
+                        // Check if user is already checked in (from previous session)
+                        if (user?.isCheckedIn) {
+                            setView(AppView.DASHBOARD);
+                        } else {
+                            setView(AppView.CHECK_IN_OUT);
+                        }
+                    }, 500);
+                }
+                
+                // Clean up listeners
+                if (window.electronAPI.removeOAuthListeners) {
+                    window.electronAPI.removeOAuthListeners();
+                }
+            });
+        }
+
+        try {
+            const result = await window.electronAPI.oauthAuthenticate();
+            
+            if (result.success && !loginDeviceCode) {
+                setLoginOAuthStatus(`✓ ${result.message || 'Authentication successful!'}`);
+                setLoginAuthenticating(false);
+                
+                // Update auth state with full data
+                if (result.user && result.workspaces && result.token && result.expires_at) {
+                    authState.setAuthData(
+                        result.user as AuthenticatedUser,
+                        result.workspaces as Workspace[],
+                        result.token,
+                        result.expires_at,
+                        result.currentWorkspace?.workspace_id
+                    );
+                }
+                
+                // After OAuth success, go to check-in screen first
+                // User must check in before accessing dashboard
+                if (view === AppView.LOGIN) {
+                    setTimeout(() => {
+                        // Check if user is already checked in (from previous session)
+                        if (user?.isCheckedIn) {
+                            setView(AppView.DASHBOARD);
+                        } else {
+                            setView(AppView.CHECK_IN_OUT);
+                        }
+                    }, 500);
+                }
+            } else if (result.error && !loginDeviceCode) {
+                // Handle "code_already_used" - check if already authenticated
+                if ((result as any).code_already_used) {
+                    // Check current auth status
+                    try {
+                        const status = await window.electronAPI.oauthCheckStatus();
+                        if (status.authenticated && status.user) {
+                            setLoginOAuthStatus(`✓ Already authenticated as ${status.user.name || status.user.email}`);
+                            setLoginAuthenticating(false);
+                            
+                            // Update auth state
+                            if (status.user && status.workspaces) {
+                                authState.setAuthData(
+                                    status.user as AuthenticatedUser,
+                                    status.workspaces as Workspace[],
+                                    '', // Token is stored in main process
+                                    status.expires_at || Date.now() + 604800000,
+                                    status.currentWorkspace?.workspace_id
+                                );
+                            }
+                            
+                            // Go to check-in screen first
+                            // User must check in before accessing dashboard
+                            setTimeout(() => {
+                                if (user?.isCheckedIn) {
+                                    setView(AppView.DASHBOARD);
+                                } else {
+                                    setView(AppView.CHECK_IN_OUT);
+                                }
+                            }, 500);
+                            return;
+                        }
+                    } catch (checkError) {
+                        console.error('Error checking auth status:', checkError);
+                    }
+                }
+                
+                setLoginOAuthStatus(`✗ ${result.error}`);
+                setLoginAuthenticating(false);
+            }
+        } catch (error: any) {
+            setLoginOAuthStatus(`✗ Authentication failed: ${error.message}`);
+            setLoginAuthenticating(false);
+            setLoginDeviceCode(null);
+            
+            if (window.electronAPI.removeOAuthListeners) {
+                window.electronAPI.removeOAuthListeners();
+            }
+        }
+    };
+
+    // Protect login view - if user is already checked in and authenticated, go to dashboard
+    if (view === AppView.LOGIN && user?.isCheckedIn && authenticatedUser) {
+        // User is checked in and authenticated, redirect to dashboard
+        setTimeout(() => setView(AppView.DASHBOARD), 0);
+        return null;
+    }
+    
     if (view === AppView.LOGIN) {
         return (
             <div className="min-h-screen flex flex-col bg-gray-950 font-sans">
@@ -1321,23 +1749,69 @@ const App: React.FC = () => {
                         <p className="text-gray-400 text-sm">Workforce Management</p>
                     </div>
                     
-                    {/* Google Login Button */}
+                    {/* OAuth Browser Login Button */}
                     <button
-                        onClick={() => {
-                            // Handle Google login
-                            console.log('Google login clicked');
-                            // You can implement Google OAuth here
-                        }}
-                        className="w-full bg-white hover:bg-gray-100 text-gray-900 font-semibold py-3 rounded-lg shadow-md transition-all flex items-center justify-center gap-3 mb-4 border border-gray-300"
+                        onClick={handleOAuthLogin}
+                        disabled={loginAuthenticating}
+                        className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-lg shadow-md transition-all flex items-center justify-center gap-3 mb-4"
                     >
-                        <svg className="w-5 h-5" viewBox="0 0 24 24">
-                            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                        </svg>
-                        <span>Continue with Google</span>
+                        {loginAuthenticating ? (
+                            <>
+                                <i className="fas fa-spinner fa-spin"></i>
+                                <span>{loginDeviceCode ? 'Waiting for authorization...' : 'Opening browser...'}</span>
+                            </>
+                        ) : (
+                            <>
+                                <i className="fas fa-sign-in-alt"></i>
+                                <span>Login with Browser</span>
+                            </>
+                        )}
                     </button>
+
+                    {/* Device Code Display */}
+                    {loginDeviceCode && (
+                        <div className="bg-blue-900/30 border border-blue-700 rounded-lg p-4 mb-4 space-y-3">
+                            <div className="flex items-center gap-2">
+                                <i className="fas fa-info-circle text-blue-400"></i>
+                                <p className="text-white text-xs font-medium">Enter this code in your browser:</p>
+                            </div>
+                            <div className="bg-gray-900 rounded-lg p-4 text-center">
+                                <p className="text-3xl font-mono font-bold text-blue-400 tracking-wider">
+                                    {loginDeviceCode.user_code}
+                                </p>
+                            </div>
+                            {!loginDeviceCode.browser_opened && (
+                                <div className="mt-2">
+                                    <p className="text-yellow-400 text-xs mb-1">Browser didn't open automatically. Please open:</p>
+                                    <a 
+                                        href={loginDeviceCode.verification_url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-blue-400 hover:text-blue-300 text-xs break-all underline"
+                                    >
+                                        {loginDeviceCode.verification_url}
+                                    </a>
+                                </div>
+                            )}
+                            <p className="text-gray-400 text-xs text-center">
+                                <i className="fas fa-clock mr-1"></i>
+                                Waiting for authorization...
+                            </p>
+                        </div>
+                    )}
+
+                    {/* OAuth Status Message */}
+                    {loginOAuthStatus && (
+                        <div className={`mb-4 p-3 rounded-lg text-sm text-center ${
+                            loginOAuthStatus.includes('✓') 
+                                ? 'bg-green-900/30 text-green-400 border border-green-700' 
+                                : loginOAuthStatus.includes('✗')
+                                ? 'bg-red-900/30 text-red-400 border border-red-700'
+                                : 'bg-blue-900/30 text-blue-400 border border-blue-700'
+                        }`}>
+                            {loginOAuthStatus}
+                        </div>
+                    )}
                     
                     <div className="flex items-center my-6">
                         <div className="flex-1 border-t border-gray-700"></div>
@@ -1380,10 +1854,134 @@ const App: React.FC = () => {
                 <div className="flex-1 flex justify-center p-2 sm:p-4">
                     {hiddenElements}
                     <div className="w-full max-w-7xl bg-gray-900 shadow-2xl overflow-hidden relative border-x border-gray-800 mx-auto">
+                    {/* Logout Button - Top Right (only show on check-in, not check-out) */}
+                    {!user?.isCheckedIn && (
+                        <button
+                            onClick={handleLogout}
+                            className="absolute top-3 sm:top-4 right-3 sm:right-4 z-20 bg-red-600 hover:bg-red-500 text-white px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors flex items-center gap-2 shadow-lg"
+                            title="Logout and login again to get fresh token"
+                        >
+                            <i className="fas fa-sign-out-alt"></i>
+                            <span className="hidden sm:inline">Logout</span>
+                        </button>
+                    )}
                     <FaceAttendance 
                         mode={user?.isCheckedIn ? 'CHECK_OUT' : 'CHECK_IN'}
                         existingStream={cameraStream}
                         onConfirm={handleFaceConfirmed}
+                        onFaceValidated={async (photoData: string) => {
+                            // Only validate face, don't check in yet
+                            const faceCheckResult = await apiService.checkFace(photoData);
+                            
+                            if (faceCheckResult.success && faceCheckResult.data) {
+                                const similarity = faceCheckResult.data.similarity;
+                                console.log(`Face verification successful: ${similarity}% similarity`);
+                                return true; // Face validated
+                            } else {
+                                const errorMessage = faceCheckResult.error || faceCheckResult.message || 'Face verification failed';
+                                console.error('Face verification failed:', errorMessage);
+                                throw new Error(errorMessage);
+                            }
+                        }}
+                        onCheckIn={async (photoData: string) => {
+                            // Call Check-In API
+                            const now = new Date();
+                            const checkInTime = now.toTimeString().slice(0, 5); // HH:mm format
+                            const checkInDate = now.toISOString().split('T')[0]; // YYYY-MM-DD format
+                            
+                            const checkInData = {
+                                check_in: checkInTime,
+                                date: checkInDate,
+                                attendance_from: 'web',
+                                check_in_location: 'Device',
+                            };
+                            
+                            console.log('[CHECK-IN] Calling check-in API with data:', checkInData);
+                            const checkInResult = await apiService.checkIn(checkInData);
+                            
+                            if (checkInResult.success) {
+                                console.log('[CHECK-IN] Check-in successful:', checkInResult.data);
+                                
+                                // Update user state
+                                setUser({ 
+                                    ...user, 
+                                    isCheckedIn: true, 
+                                    checkInTime: now 
+                                });
+                                
+                                // Stop camera
+                                stopCamera();
+                                
+                                // Navigate to dashboard
+                                setView(AppView.DASHBOARD);
+                            } else {
+                                const errorMessage = checkInResult.error || checkInResult.message || 'Check-in failed';
+                                console.error('[CHECK-IN] Check-in failed:', errorMessage);
+                                throw new Error(errorMessage);
+                            }
+                        }}
+                        onCheckOut={async (photoData: string) => {
+                            // Step 1: Stop task if running
+                            if (isTimerRunning) {
+                                await toggleTimer();
+                                // Wait a moment for the task to stop and save
+                                await new Promise(resolve => setTimeout(resolve, 500));
+                            }
+                            
+                            // Step 2: Call Check-Out API
+                            const now = new Date();
+                            const checkOutTime = now.toTimeString().slice(0, 5); // HH:mm format
+                            const checkOutDate = now.toISOString().split('T')[0]; // YYYY-MM-DD format
+                            
+                            const checkOutData = {
+                                check_out: checkOutTime,
+                                date: checkOutDate,
+                                attendance_from: 'web',
+                                // attendance_id is optional - API will auto-find if not provided
+                            };
+                            
+                            console.log('[CHECK-OUT] Calling check-out API with data:', checkOutData);
+                            const checkOutResult = await apiService.checkOut(checkOutData);
+                            
+                            if (checkOutResult.success) {
+                                console.log('[CHECK-OUT] Check-out successful:', checkOutResult.data);
+                                
+                                // Update user state
+                                setUser({ 
+                                    ...user, 
+                                    isCheckedIn: false, 
+                                    checkInTime: undefined 
+                                });
+                                
+                                // Stop tracking and set status to idle
+                                stopCamera();
+                                setUserStatus('idle');
+                                
+                                // Wait a moment for state to update
+                                await new Promise(resolve => setTimeout(resolve, 300));
+                                
+                                // Navigate to check-in page (not logout)
+                                // This will trigger mode change from CHECK_OUT to CHECK_IN
+                                setView(AppView.CHECK_IN_OUT);
+                                
+                                // Start camera for fresh check-in page after a short delay
+                                setTimeout(async () => {
+                                    try {
+                                        console.log('[CHECK-OUT] Starting camera for fresh check-in page...');
+                                        const stream = await startCamera();
+                                        if (stream) {
+                                            console.log('[CHECK-OUT] Camera started successfully for check-in');
+                                        }
+                                    } catch (error) {
+                                        console.error('[CHECK-OUT] Failed to start camera for check-in:', error);
+                                    }
+                                }, 500);
+                            } else {
+                                const errorMessage = checkOutResult.error || checkOutResult.message || 'Check-out failed';
+                                console.error('[CHECK-OUT] Check-out failed:', errorMessage);
+                                throw new Error(errorMessage);
+                            }
+                        }}
                         onStreamRequest={async () => { 
                             console.log('FaceAttendance: onStreamRequest called');
                             const stream = await startCamera();
@@ -1394,7 +1992,20 @@ const App: React.FC = () => {
                             await new Promise(resolve => setTimeout(resolve, 300));
                             console.log('FaceAttendance: Camera stream should be available now');
                         }}
-                        onCancel={() => user?.isCheckedIn ? setView(AppView.DASHBOARD) : setView(AppView.LOGIN)}
+                        onCancel={() => {
+                            // If user is checked in, go to dashboard
+                            // If not checked in but authenticated, stay on check-in (don't go to login)
+                            if (user?.isCheckedIn) {
+                                setView(AppView.DASHBOARD);
+                            } else if (authenticatedUser || user) {
+                                // User is authenticated but not checked in - stay on check-in screen
+                                // Don't go back to login
+                                setView(AppView.CHECK_IN_OUT);
+                            } else {
+                                // Not authenticated, go to login
+                                setView(AppView.LOGIN);
+                            }
+                        }}
                     />
                     </div>
                 </div>
@@ -1489,6 +2100,27 @@ const App: React.FC = () => {
     }
 
     // DASHBOARD VIEW
+    // Protect dashboard - user must be checked in to access
+    if (!user?.isCheckedIn) {
+        // User not checked in, redirect to check-in
+        return (
+            <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
+                <TitleBar />
+                <div className="flex-1 flex justify-center items-center">
+                    <div className="text-center">
+                        <p className="text-gray-400 mb-4">Please check in first to access the dashboard</p>
+                        <button
+                            onClick={() => setView(AppView.CHECK_IN_OUT)}
+                            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+                        >
+                            Go to Check In
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+    
     return (
         <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
             <TitleBar />
@@ -1504,7 +2136,12 @@ const App: React.FC = () => {
                                 onClick={() => setShowUserMenu(!showUserMenu)}
                                 className="relative focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-full"
                             >
-                                <img src={user?.avatar} alt="User" className="w-7 h-7 sm:w-8 sm:h-8 rounded-full border border-gray-600 hover:border-gray-500 transition-colors cursor-pointer" />
+                                <UserAvatar 
+                                    src={user?.avatar} 
+                                    alt="User" 
+                                    size="sm"
+                                    className="hover:border-gray-500 transition-colors cursor-pointer"
+                                />
                                 <div className={`absolute bottom-0 right-0 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full border-2 border-gray-800 ${isTimerRunning ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
                             </button>
                             
@@ -1519,10 +2156,14 @@ const App: React.FC = () => {
                                         {/* User Info Section */}
                                         <div className="p-4 border-b border-gray-700">
                                             <div className="flex items-center gap-3 mb-3">
-                                                <img src={user?.avatar} alt="User" className="w-10 h-10 rounded-full border border-gray-600" />
+                                                <UserAvatar 
+                                                    src={authenticatedUser?.avatar || user?.avatar} 
+                                                    alt="User" 
+                                                    size="md"
+                                                />
                                                 <div className="flex-1 min-w-0">
-                                                    <p className="text-sm font-semibold text-white truncate">{user?.name}</p>
-                                                    <p className="text-xs text-gray-400 truncate">{user?.id}</p>
+                                                    <p className="text-sm font-semibold text-white truncate">{authenticatedUser?.name || user?.name}</p>
+                                                    <p className="text-xs text-gray-400 truncate">{authenticatedUser?.email || user?.id}</p>
                                                 </div>
                                             </div>
                                             
@@ -1530,14 +2171,32 @@ const App: React.FC = () => {
                                             <div className="mt-3 pt-3 border-t border-gray-700">
                                                 <div className="flex items-center justify-between mb-2">
                                                     <span className="text-xs text-gray-500 uppercase font-bold">Workspace</span>
+                                                    {workspaces.length > 0 && (
+                                                        <span className="text-[10px] text-gray-500">({workspaces.length} available)</span>
+                                                    )}
                                                 </div>
                                                 <div className="flex items-center justify-between">
                                                     <div className="flex-1 min-w-0">
-                                                        <p className="text-sm font-medium text-white truncate">{currentWorkspace.name}</p>
-                                                        <div className="flex items-center gap-2 mt-1">
-                                                            <i className="fas fa-users text-[10px] text-gray-400"></i>
-                                                            <span className="text-xs text-gray-400">{currentWorkspace.memberCount} members</span>
-                                                        </div>
+                                                        {currentWorkspace ? (
+                                                            <>
+                                                                <p className="text-sm font-medium text-white truncate">{currentWorkspace.workspace_name}</p>
+                                                                <div className="flex items-center gap-2 mt-1">
+                                                                    {currentWorkspace.workspace_is_general && (
+                                                                        <span className="text-[10px] text-blue-400 bg-blue-500/20 px-1.5 py-0.5 rounded">General</span>
+                                                                    )}
+                                                                    {currentWorkspace.company_name && (
+                                                                        <span className="text-xs text-gray-400 truncate">{currentWorkspace.company_name}</span>
+                                                                    )}
+                                                                    {currentWorkspace.workspace_role && (
+                                                                        <span className="text-[10px] text-gray-500 capitalize">({currentWorkspace.workspace_role})</span>
+                                                                    )}
+                                                                </div>
+                                                            </>
+                                                        ) : workspaces.length > 0 ? (
+                                                            <p className="text-sm font-medium text-yellow-400">Select a workspace</p>
+                                                        ) : (
+                                                            <p className="text-sm font-medium text-gray-500">No Workspace</p>
+                                                        )}
                                                     </div>
                                                 </div>
                                             </div>
@@ -1549,32 +2208,78 @@ const App: React.FC = () => {
                                                 <span className="text-xs text-gray-500 uppercase font-bold">Switch Workspace</span>
                                             </div>
                                             <div className="space-y-1 max-h-48 overflow-y-auto custom-scrollbar">
-                                                {availableWorkspaces.map((workspace) => (
-                                                    <button
-                                                        key={workspace.id}
-                                                        onClick={() => {
-                                                            setCurrentWorkspace(workspace);
-                                                            setShowUserMenu(false);
-                                                        }}
-                                                        className={`w-full px-3 py-2.5 rounded-md text-xs font-medium transition-all flex items-center justify-between text-left ${
-                                                            currentWorkspace.id === workspace.id
-                                                                ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                                                                : 'text-gray-300 hover:bg-gray-700'
-                                                        }`}
-                                                    >
-                                                        <div className="flex-1 min-w-0">
-                                                            <p className="text-sm font-medium truncate">{workspace.name}</p>
-                                                            <div className="flex items-center gap-2 mt-0.5">
-                                                                <i className="fas fa-users text-[9px] text-gray-500"></i>
-                                                                <span className="text-[10px] text-gray-500">{workspace.memberCount} members</span>
+                                                {workspacesLoading ? (
+                                                    <div className="px-3 py-2 text-xs text-gray-400 flex items-center gap-2">
+                                                        <i className="fas fa-spinner fa-spin"></i>
+                                                        <span>Loading workspaces...</span>
+                                                    </div>
+                                                ) : workspaces.length === 0 ? (
+                                                    <div className="px-3 py-2 text-xs text-gray-400">
+                                                        {authStateData.isAuthenticated ? (
+                                                            <div>
+                                                                <p>No workspaces available</p>
+                                                                <p className="text-[10px] text-gray-500 mt-1">Check console logs for workspace data</p>
                                                             </div>
-                                                        </div>
-                                                        {currentWorkspace.id === workspace.id && (
-                                                            <i className="fas fa-check text-[10px] text-blue-400 ml-2 flex-shrink-0"></i>
+                                                        ) : (
+                                                            <p>Please authenticate to see workspaces</p>
                                                         )}
-                                                    </button>
-                                                ))}
+                                                    </div>
+                                                ) : (
+                                                    workspaces.map((workspace) => (
+                                                        <button
+                                                            key={workspace.workspace_id}
+                                                            onClick={async () => {
+                                                                const success = await authState.setCurrentWorkspace(workspace.workspace_id);
+                                                                if (success) {
+                                                                    setShowUserMenu(false);
+                                                                }
+                                                            }}
+                                                            className={`w-full px-3 py-2.5 rounded-md text-xs font-medium transition-all flex items-center justify-between text-left ${
+                                                                String(currentWorkspace?.workspace_id) === String(workspace.workspace_id)
+                                                                    ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                                                                    : 'text-gray-300 hover:bg-gray-700'
+                                                            }`}
+                                                        >
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="flex items-center gap-2">
+                                                                    <p className="text-sm font-medium truncate">{workspace.workspace_name}</p>
+                                                                    {(workspace.workspace_is_general === true || workspace.workspace_is_general === 1) && (
+                                                                        <span className="text-[9px] text-blue-400 bg-blue-500/20 px-1 py-0.5 rounded flex-shrink-0">General</span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="flex items-center gap-2 mt-0.5">
+                                                                    {workspace.company_name && (
+                                                                        <span className="text-[10px] text-gray-500 truncate">{workspace.company_name}</span>
+                                                                    )}
+                                                                    {workspace.workspace_role && (
+                                                                        <span className="text-[10px] text-gray-600 capitalize">• {workspace.workspace_role}</span>
+                                                                    )}
+                                                                    {(workspace.workspace_is_active === false || workspace.workspace_is_active === 0) && (
+                                                                        <span className="text-[10px] text-red-400">• Inactive</span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                            {String(currentWorkspace?.workspace_id) === String(workspace.workspace_id) && (
+                                                                <i className="fas fa-check text-[10px] text-blue-400 ml-2 flex-shrink-0"></i>
+                                                            )}
+                                                        </button>
+                                                    ))
+                                                )}
                                             </div>
+                                        </div>
+                                        
+                                        {/* Logout Section */}
+                                        <div className="p-2 border-t border-gray-700">
+                                            <button
+                                                onClick={handleLogout}
+                                                className="w-full px-3 py-2.5 rounded-md text-xs font-medium transition-all flex items-center gap-2 text-left text-red-400 hover:bg-red-900/20 hover:text-red-300"
+                                            >
+                                                <i className="fas fa-sign-out-alt text-[10px]"></i>
+                                                <span>Logout</span>
+                                            </button>
+                                            <p className="text-[10px] text-gray-500 mt-2 px-3">
+                                                Logout to switch accounts or unlink this device
+                                            </p>
                                         </div>
                                     </div>
                                 </>
@@ -1726,22 +2431,34 @@ const App: React.FC = () => {
                             <i className="fas fa-cog text-[10px] sm:text-xs"></i>
                         </button>
                         
-                        {/* Logout/Check Out Button - Last */}
-                        <button 
-                            onClick={async () => {
-                                // If timer is running, stop the task first
-                                if (isTimerRunning) {
-                                    await toggleTimer();
-                                    // Wait a moment for the task to stop and save
-                                    await new Promise(resolve => setTimeout(resolve, 500));
-                                }
-                                setView(AppView.CHECK_IN_OUT);
-                            }}
-                            className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-red-900/30 hover:bg-red-900/50 text-red-400 flex items-center justify-center transition-colors"
-                            title="Check Out"
-                        >
-                            <i className="fas fa-power-off text-[10px] sm:text-xs"></i>
-                        </button>
+                        {/* Check In/Out Button */}
+                        {user?.isCheckedIn ? (
+                            <button 
+                                onClick={async () => {
+                                    // If timer is running, stop the task first
+                                    if (isTimerRunning) {
+                                        await toggleTimer();
+                                        // Wait a moment for the task to stop and save
+                                        await new Promise(resolve => setTimeout(resolve, 500));
+                                    }
+                                    setView(AppView.CHECK_IN_OUT);
+                                }}
+                                className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-red-900/30 hover:bg-red-900/50 text-red-400 flex items-center justify-center transition-colors"
+                                title="Check Out"
+                            >
+                                <i className="fas fa-power-off text-[10px] sm:text-xs"></i>
+                            </button>
+                        ) : (
+                            <button 
+                                onClick={() => {
+                                    setView(AppView.CHECK_IN_OUT);
+                                }}
+                                className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-green-900/30 hover:bg-green-900/50 text-green-400 flex items-center justify-center transition-colors"
+                                title="Check In"
+                            >
+                                <i className="fas fa-sign-in-alt text-[10px] sm:text-xs"></i>
+                            </button>
+                        )}
                     </div>
                 </header>
 

@@ -3,7 +3,10 @@ import React, { useRef, useEffect, useState } from 'react';
 interface FaceAttendanceProps {
     mode: 'CHECK_IN' | 'CHECK_OUT';
     existingStream: MediaStream | null; // Passed from parent
-    onConfirm: (photoData: string) => void;
+    onConfirm: (photoData: string) => Promise<void> | void; // Can be async for API calls
+    onFaceValidated?: (photoData: string) => Promise<boolean>; // Face validation callback, returns true if validated
+    onCheckIn?: (photoData: string) => Promise<void>; // Check-in callback (separate from face validation)
+    onCheckOut?: (photoData: string) => Promise<void>; // Check-out callback (separate from face validation)
     onCancel: () => void;
     onStreamRequest: () => Promise<void>; // Request parent to start stream
 }
@@ -12,6 +15,9 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
     mode, 
     existingStream, 
     onConfirm, 
+    onFaceValidated,
+    onCheckIn,
+    onCheckOut,
     onCancel,
     onStreamRequest 
 }) => {
@@ -19,9 +25,23 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [captured, setCaptured] = useState<string | null>(null);
     const [analyzing, setAnalyzing] = useState(false);
+    const [verifying, setVerifying] = useState(false);
+    const [verificationError, setVerificationError] = useState<string | null>(null);
     const [cameraLoading, setCameraLoading] = useState(true);
     const [cameraError, setCameraError] = useState<string | null>(null);
     const streamRequestedRef = useRef(false);
+    
+    // Reset state when mode changes (e.g., from CHECK_OUT to CHECK_IN)
+    useEffect(() => {
+        // Reset all state when mode changes
+        setCaptured(null);
+        setAnalyzing(false);
+        setVerifying(false);
+        setVerificationError(null);
+        setFaceValidated(false);
+        setCheckingIn(false);
+        console.log('[FaceAttendance] State reset due to mode change:', mode);
+    }, [mode]);
 
     // Initialize camera stream when component mounts or stream changes
     useEffect(() => {
@@ -201,7 +221,22 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
         }
     }, [existingStream]);
 
-    const takePhoto = () => {
+    const [faceValidated, setFaceValidated] = useState(false);
+    const [checkingIn, setCheckingIn] = useState(false);
+
+    // Reset state when mode changes (e.g., from CHECK_OUT to CHECK_IN)
+    useEffect(() => {
+        // Reset all state when mode changes to ensure fresh start
+        setCaptured(null);
+        setAnalyzing(false);
+        setVerifying(false);
+        setVerificationError(null);
+        setFaceValidated(false);
+        setCheckingIn(false);
+        console.log('[FaceAttendance] State reset due to mode change:', mode);
+    }, [mode]);
+
+    const takePhoto = async () => {
         if (!videoRef.current || !canvasRef.current) return;
 
         const context = canvasRef.current.getContext('2d');
@@ -213,23 +248,171 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
             const data = canvasRef.current.toDataURL('image/png');
             setCaptured(data);
             setAnalyzing(true);
+            setVerifying(true); // Start verification immediately
+            setVerificationError(null);
+            setFaceValidated(false); // Reset face validation status
+            setCheckingIn(false);
 
-            // Simulate Face Analysis Delay
-            setTimeout(() => {
+            // Simulate initial face detection delay
+            setTimeout(async () => {
                 setAnalyzing(false);
-            }, 1500);
+                
+                // Automatically verify face after image is loaded
+                try {
+                    if (onFaceValidated) {
+                        // Use dedicated face validation callback
+                        const isValid = await onFaceValidated(data);
+                        if (isValid) {
+                            setFaceValidated(true);
+                            setVerifying(false);
+                        } else {
+                            setVerificationError('Face verification failed. Please try again.');
+                            setVerifying(false);
+                            setFaceValidated(false);
+                        }
+                    } else {
+                        // Fallback to onConfirm for backward compatibility
+                        await onConfirm(data);
+                        setFaceValidated(true);
+                        setVerifying(false);
+                    }
+                } catch (error: any) {
+                    // Handle error from face validation
+                    const errorMessage = error.message || 'Face verification failed';
+                    setVerificationError(errorMessage);
+                    setVerifying(false);
+                    setFaceValidated(false);
+                }
+            }, 1000);
         }
     };
 
-    const confirmAction = () => {
-        if (captured) {
-            onConfirm(captured);
+    const handleCheckIn = async () => {
+        if (!captured || !faceValidated || checkingIn) return;
+        
+        setCheckingIn(true);
+        setVerificationError(null);
+        
+        try {
+            if (onCheckIn) {
+                // Use dedicated check-in callback
+                await onCheckIn(captured);
+            } else {
+                // Fallback to onConfirm
+                await onConfirm(captured);
+            }
+        } catch (error: any) {
+            const errorMessage = error.message || 'Check-in failed';
+            setVerificationError(errorMessage);
+            setCheckingIn(false);
         }
     };
 
-    const retake = () => {
+    const handleCheckOut = async () => {
+        if (!captured || !faceValidated || checkingIn) return;
+        
+        setCheckingIn(true); // Reuse checkingIn state for check-out too
+        setVerificationError(null);
+        
+        try {
+            if (onCheckOut) {
+                // Use dedicated check-out callback
+                await onCheckOut(captured);
+            } else {
+                // Fallback to onConfirm
+                await onConfirm(captured);
+            }
+        } catch (error: any) {
+            const errorMessage = error.message || 'Check-out failed';
+            setVerificationError(errorMessage);
+            setCheckingIn(false);
+        }
+    };
+
+    const retake = async () => {
+        // Reset all state first
         setCaptured(null);
         setAnalyzing(false);
+        setVerifying(false);
+        setVerificationError(null);
+        setFaceValidated(false);
+        setCheckingIn(false);
+        setCameraError(null);
+        
+        // Wait a moment for state to reset
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Ensure camera stream is active and playing
+        const video = videoRef.current;
+        if (video && existingStream) {
+            // Check if stream is still live
+            const videoTracks = existingStream.getVideoTracks();
+            const hasLiveTracks = videoTracks.length > 0 && videoTracks.some(track => track.readyState === 'live');
+            
+            if (hasLiveTracks) {
+                // Stream is live, ensure video is playing
+                console.log('[RETAKE] Stream is live, ensuring video is playing...');
+                
+                // Force reattach stream to video element
+                video.srcObject = null;
+                await new Promise(resolve => setTimeout(resolve, 100));
+                video.srcObject = existingStream;
+                
+                // Ensure video is playing
+                try {
+                    if (video.paused) {
+                        await video.play();
+                        console.log('[RETAKE] Camera video resumed');
+                    }
+                    // Force video to be visible
+                    video.style.display = 'block';
+                    setCameraLoading(false);
+                } catch (error) {
+                    console.error('[RETAKE] Failed to play video:', error);
+                    setCameraError('Failed to restart camera. Please try again.');
+                    setCameraLoading(false);
+                }
+            } else {
+                // Stream is not live, request new stream
+                console.log('[RETAKE] Stream not live, requesting new stream...');
+                streamRequestedRef.current = false; // Reset flag to allow new request
+                setCameraLoading(true);
+                try {
+                    await onStreamRequest();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                } catch (error) {
+                    console.error('[RETAKE] Failed to request camera stream:', error);
+                    setCameraError('Failed to restart camera. Please try again.');
+                    setCameraLoading(false);
+                }
+            }
+        } else if (!existingStream) {
+            // No stream, request it
+            console.log('[RETAKE] No stream, requesting camera...');
+            streamRequestedRef.current = false;
+            setCameraLoading(true);
+            try {
+                await onStreamRequest();
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (error) {
+                console.error('[RETAKE] Failed to request camera stream:', error);
+                setCameraError('Failed to start camera. Please try again.');
+                setCameraLoading(false);
+            }
+        } else {
+            // Video element doesn't exist, request stream
+            console.log('[RETAKE] Video element not found, requesting stream...');
+            streamRequestedRef.current = false;
+            setCameraLoading(true);
+            try {
+                await onStreamRequest();
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (error) {
+                console.error('[RETAKE] Failed to request camera stream:', error);
+                setCameraError('Failed to start camera. Please try again.');
+                setCameraLoading(false);
+            }
+        }
     };
 
     return (
@@ -254,6 +437,7 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
                             playsInline 
                             muted 
                             className="w-full h-full object-cover transform scale-x-[-1]"
+                            style={{ display: 'block' }}
                         />
                         {/* Loading overlay */}
                         {cameraLoading && (
@@ -322,22 +506,42 @@ export const FaceAttendance: React.FC<FaceAttendanceProps> = ({
                      </button>
                 ) : analyzing ? (
                      <button disabled className="w-full bg-gray-700 text-gray-300 font-semibold py-3 sm:py-4 px-6 sm:px-8 rounded-lg cursor-wait text-base sm:text-lg">
-                        <i className="fas fa-circle-notch fa-spin mr-2"></i> <span>Verifying...</span>
+                        <i className="fas fa-circle-notch fa-spin mr-2"></i> <span>Processing image...</span>
+                     </button>
+                ) : verifying ? (
+                     <button disabled className="w-full bg-blue-700 text-blue-200 font-semibold py-3 sm:py-4 px-6 sm:px-8 rounded-lg cursor-wait text-base sm:text-lg">
+                        <i className="fas fa-circle-notch fa-spin mr-2"></i> <span>Verifying face...</span>
+                     </button>
+                ) : checkingIn ? (
+                     <button disabled className="w-full bg-green-700 text-green-200 font-semibold py-3 sm:py-4 px-6 sm:px-8 rounded-lg cursor-wait text-base sm:text-lg">
+                        <i className="fas fa-circle-notch fa-spin mr-2"></i> <span>{mode === 'CHECK_OUT' ? 'Checking out...' : 'Checking in...'}</span>
                      </button>
                 ) : (
-                    <div className="flex gap-2 sm:gap-3">
-                        <button 
-                            onClick={retake}
-                            className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-3 sm:py-4 rounded-lg text-base sm:text-lg"
-                        >
-                            Retake
-                        </button>
-                        <button 
-                            onClick={confirmAction}
-                            className="flex-1 bg-green-600 hover:bg-green-500 text-white font-semibold py-3 sm:py-4 rounded-lg text-base sm:text-lg"
-                        >
-                            Confirm {mode === 'CHECK_IN' ? 'In' : 'Out'}
-                        </button>
+                    <div className="flex flex-col gap-2 sm:gap-3">
+                        {verificationError && (
+                            <div className="w-full bg-red-900/50 border border-red-700 text-red-200 px-4 py-3 rounded-lg text-sm">
+                                <i className="fas fa-exclamation-triangle mr-2"></i>
+                                {verificationError}
+                            </div>
+                        )}
+                        {faceValidated && !verificationError ? (
+                            <button 
+                                onClick={mode === 'CHECK_OUT' ? handleCheckOut : handleCheckIn}
+                                disabled={checkingIn}
+                                className="w-full bg-green-600 hover:bg-green-500 text-white font-semibold py-3 sm:py-4 px-6 sm:px-8 rounded-lg text-base sm:text-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                <i className="fas fa-check-circle mr-2"></i>
+                                {mode === 'CHECK_OUT' ? 'Check Out' : 'Check In'}
+                            </button>
+                        ) : verificationError ? (
+                            <button 
+                                onClick={retake}
+                                className="w-full bg-gray-700 hover:bg-gray-600 text-white py-3 sm:py-4 rounded-lg text-base sm:text-lg"
+                            >
+                                <i className="fas fa-redo mr-2"></i>
+                                Retake Photo
+                            </button>
+                        ) : null}
                     </div>
                 )}
             </div>

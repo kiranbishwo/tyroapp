@@ -81,6 +81,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportData: (data) => ipcRenderer.invoke('export-data', data),
   deleteAllData: () => ipcRenderer.invoke('delete-all-data'),
   // Idle detection
-  getLastActivityTimestamp: () => ipcRenderer.invoke('get-last-activity-timestamp')
+  getLastActivityTimestamp: () => ipcRenderer.invoke('get-last-activity-timestamp'),
+  // API Sync
+  syncTaskTracking: (projectId, taskId) => ipcRenderer.invoke('sync-task-tracking', projectId, taskId),
+  syncAllTasks: () => ipcRenderer.invoke('sync-all-tasks'),
+  testApiConnection: () => ipcRenderer.invoke('test-api-connection'),
+  // OAuth Authentication
+  oauthAuthenticate: () => ipcRenderer.invoke('oauth-authenticate'),
+  oauthCheckStatus: () => ipcRenderer.invoke('oauth-check-status'),
+  oauthLogout: () => ipcRenderer.invoke('oauth-logout'),
+  oauthGetAccessToken: () => ipcRenderer.invoke('oauth-get-access-token'),
+  oauthGetLoginToken: () => ipcRenderer.invoke('oauth-get-login-token'),
+  // OAuth event listeners
+  onOAuthDeviceCode: (callback) => {
+    ipcRenderer.on('oauth-device-code', (_, data) => callback(data));
+  },
+  onOAuthSuccess: (callback) => {
+    ipcRenderer.on('oauth-authentication-success', (_, data) => callback(data));
+  },
+  removeOAuthListeners: () => {
+    ipcRenderer.removeAllListeners('oauth-device-code');
+    ipcRenderer.removeAllListeners('oauth-authentication-success');
+  },
+  // Listen for login token
+  onLoginToken: (callback) => {
+    ipcRenderer.on('oauth-login-token', (_, token) => callback(token));
+  },
+  // Listen for full response
+  onFullResponse: (callback) => {
+    ipcRenderer.on('oauth-full-response', (_, data) => callback(data));
+  }
 });
 

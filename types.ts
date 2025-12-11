@@ -13,6 +13,12 @@ export interface Settings {
     enableUrlTracking: boolean;
     enableScreenshotBlur: boolean;
     idleTimeThreshold: number; // minutes
+    // API Configuration
+    apiEnabled?: boolean;
+    apiBaseUrl?: string;
+    apiKey?: string;
+    apiSyncInterval?: number; // seconds
+    autoSync?: boolean;
 }
 
 export interface User {
@@ -21,6 +27,66 @@ export interface User {
     avatar: string;
     isCheckedIn: boolean;
     checkInTime?: Date;
+}
+
+// Authenticated User from API
+export interface AuthenticatedUser {
+    id: number;
+    company_id: number;
+    department_id: number | null;
+    department_name: string | null;
+    is_admin: boolean;
+    is_hr: boolean;
+    is_face_registered: boolean;
+    name: string;
+    email: string;
+    phone: string | null;
+    avatar: string | null;
+}
+
+// Workspace from API
+export interface Workspace {
+    tenant_id: string | null;
+    domain: string;
+    company_id: number;
+    workspace_id: string | number; // Can be UUID string or number
+    workspace_name: string;
+    workspace_slug: string;
+    workspace_description: string | null;
+    workspace_logo_url: string | null;
+    workspace_is_active: boolean | number; // Can be 1/0 or true/false
+    workspace_is_general: boolean | number; // Can be 1/0 or true/false
+    workspace_role: string;
+    workspace_joined_at: string | null;
+    company_name: string | null;
+    company_email: string | null;
+    company_phone: string | null;
+}
+
+// Auth Response from API
+export interface AuthResponse {
+    result: boolean;
+    message: string;
+    data: {
+        id: number;
+        company_id: number;
+        department_id: number | null;
+        department_name: string | null;
+        is_admin: boolean;
+        is_hr: boolean;
+        is_face_registered: boolean;
+        name: string;
+        email: string;
+        phone: string | null;
+        avatar: string | null;
+        workspaces: Workspace[];
+        token: string;
+        login_token: string;
+        token_type: string;
+        expires_at: string;
+    };
+    token?: string;
+    login_token?: string;
 }
 
 export interface Task {

@@ -1539,6 +1539,1078 @@ ipcMain.handle('delete-all-data', async () => {
   return true;
 });
 
+// ==================== API Sync IPC Handlers ====================
+
+// Test API connection
+ipcMain.handle('test-api-connection', async () => {
+  try {
+    const store = await initStore();
+    const settings = store.get('settings', {});
+    
+    if (!settings.apiEnabled || !settings.apiBaseUrl) {
+      return { success: false, error: 'API not enabled or base URL not set' };
+    }
+
+    // Dynamic import of axios (ES module)
+    const axiosModule = await import('axios');
+    const axios = axiosModule.default;
+    
+    // Try to get OAuth token first, fallback to API key
+    let authHeader = {};
+    try {
+      const keytar = require('keytar');
+      const accessToken = await keytar.getPassword('tyro-app', 'access_token');
+      if (accessToken) {
+        authHeader = { Authorization: `Bearer ${accessToken}` };
+      } else if (settings.apiKey) {
+        authHeader = { Authorization: `Bearer ${settings.apiKey}` };
+      }
+    } catch (e) {
+      // Fallback to API key if keytar fails
+      if (settings.apiKey) {
+        authHeader = { Authorization: `Bearer ${settings.apiKey}` };
+      }
+    }
+    
+    const response = await axios.get(`${settings.apiBaseUrl}/health`, {
+      timeout: 10000,
+      headers: authHeader,
+    });
+    
+    return { success: true };
+  } catch (error) {
+    return { 
+      success: false, 
+      error: error.message || 'Connection failed' 
+    };
+  }
+});
+
+// ==================== OAuth Device Flow IPC Handlers ====================
+
+// Track ongoing OAuth authentication attempts to prevent multiple simultaneous flows
+let ongoingOAuthAttempts = new Map();
+
+// OAuth Device Flow Authentication
+ipcMain.handle('oauth-authenticate', async (event) => {
+  const requestId = `${event.sender.id}-${Date.now()}`;
+  
+  try {
+    // Check if already authenticated
+    const keytar = require('keytar');
+    const existingToken = await keytar.getPassword('tyro-app', 'access_token');
+    if (existingToken) {
+      const status = await checkOAuthStatus();
+      if (status.authenticated) {
+        console.log('[OAUTH] Already authenticated, returning existing auth');
+        return {
+          success: true,
+          message: 'Already authenticated',
+          user: status.user,
+          workspaces: status.workspaces || [],
+          currentWorkspace: status.currentWorkspace || null,
+        };
+      }
+    }
+    
+    // Cancel any ongoing authentication attempts from this renderer
+    const senderId = event.sender.id.toString();
+    for (const [id, cancelFn] of ongoingOAuthAttempts.entries()) {
+      if (id.startsWith(senderId)) {
+        console.log('[OAUTH] Cancelling previous authentication attempt:', id);
+        cancelFn();
+        ongoingOAuthAttempts.delete(id);
+      }
+    }
+    
+    const store = await initStore();
+    const settings = store.get('settings', {});
+    
+    if (!settings.apiBaseUrl) {
+      return { success: false, error: 'API base URL not set' };
+    }
+
+    // Use base URL as-is (it should include full path like /api/v11)
+    // Remove trailing slash if present
+    let baseUrl = settings.apiBaseUrl.replace(/\/$/, '');
+    
+    // OAuth routes are at /api/auth (not versioned), but base URL might be /api/v11
+    // Remove /v11 or /vXX version prefix if present for OAuth endpoints
+    // This allows base URL to be http://tyrodesk.test:8000/api/v11 for other endpoints
+    // but OAuth will use http://tyrodesk.test:8000/api/auth/...
+    if (baseUrl.match(/\/v\d+$/)) {
+      // Remove version suffix (e.g., /v11) for OAuth endpoints
+      baseUrl = baseUrl.replace(/\/v\d+$/, '');
+      console.log('[OAUTH] Removed version prefix, using base URL:', baseUrl);
+    } else {
+      console.log('[OAUTH] Using base URL as-is:', baseUrl);
+    }
+    
+    // Dynamic imports
+    const axiosModule = await import('axios');
+    const axios = axiosModule.default;
+    const { shell } = require('electron');
+    // keytar already declared above at line 1600
+    
+    const SERVICE_NAME = 'tyro-app';
+    const ACCESS_TOKEN_KEY = 'access_token';
+    const REFRESH_TOKEN_KEY = 'refresh_token';
+    const USER_DATA_KEY = 'user_data';
+    
+    // Step 1: Start device flow
+    let deviceCodeData;
+    try {
+      // Append endpoint to base URL (base URL already includes /api/v11)
+      const startUrl = `${baseUrl}/auth/device/start`;
+      console.log('[OAUTH] Full URL being called:', startUrl);
+      console.log('[OAUTH] Base URL from settings:', settings.apiBaseUrl);
+      
+      const response = await axios.post(startUrl, {}, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000,
+      });
+      
+      if (response.status === 200 && response.data?.result === true) {
+        deviceCodeData = response.data.data;
+      } else {
+        throw new Error(response.data?.message || 'Failed to generate device code');
+      }
+    } catch (error) {
+      const startUrl = `${baseUrl}/auth/device/start`;
+      const errorMessage = error.response?.data?.message || error.message || 'Failed to start device flow';
+      const statusCode = error.response?.status;
+      const statusText = error.response?.statusText;
+      
+      console.error('[OAUTH] Error details:');
+      console.error('  Full URL:', startUrl);
+      console.error('  Status:', statusCode, statusText);
+      console.error('  Error message:', errorMessage);
+      console.error('  Response data:', error.response?.data);
+      
+      return {
+        success: false,
+        error: `Failed to call ${startUrl}: ${errorMessage}${statusCode ? ` (${statusCode} ${statusText})` : ''}`,
+      };
+    }
+    
+    // Step 2: Open browser
+    let browserOpened = false;
+    try {
+      await shell.openExternal(deviceCodeData.verification_url);
+      browserOpened = true;
+      console.log(`[OAUTH] Browser opened: ${deviceCodeData.verification_url}`);
+      console.log(`[OAUTH] User code: ${deviceCodeData.user_code}`);
+    } catch (error) {
+      console.warn('[OAUTH] Failed to open browser:', error);
+      // Continue anyway - user can open manually
+    }
+    
+    // Return device code info immediately so UI can display it
+    // Polling will continue in background via separate handler
+    event.sender.send('oauth-device-code', {
+      user_code: deviceCodeData.user_code,
+      verification_url: deviceCodeData.verification_url,
+      browser_opened: browserOpened,
+    });
+    
+    // Step 3: Poll for token
+    const maxAttempts = 120; // 10 minutes at 5 second intervals
+    const interval = deviceCodeData.interval || 5;
+    const startTime = Date.now();
+    const expirationTime = startTime + (deviceCodeData.expires_in || 600) * 1000;
+    let attempt = 0;
+    let cancelled = false;
+    
+    // Set up cancellation handler
+    const cancelHandler = () => {
+      cancelled = true;
+      console.log('[OAUTH] Authentication cancelled by new request');
+    };
+    ongoingOAuthAttempts.set(requestId, cancelHandler);
+    
+    // Define poll URL once (used in try and catch blocks)
+    const pollUrl = `${baseUrl}/auth/device/poll`;
+    
+    try {
+      while (attempt < maxAttempts && !cancelled) {
+      // Check if device code expired
+      if (Date.now() >= expirationTime) {
+        return {
+          success: false,
+          error: 'Device code has expired. Please try again.',
+        };
+      }
+      
+        // Check if cancelled before polling
+        if (cancelled) {
+          console.log('[OAUTH] Polling cancelled');
+          return {
+            success: false,
+            error: 'Authentication cancelled. Please try again.',
+          };
+        }
+        
+        attempt++;
+        
+        // Log every poll attempt for debugging
+        console.log(`[OAUTH] 🔄 Poll attempt ${attempt}/${maxAttempts} - Calling ${pollUrl}`);
+        console.log(`[OAUTH] Device code: ${deviceCodeData.device_code.substring(0, 20)}...`);
+        console.log(`[OAUTH] Interval: ${interval} seconds`);
+        
+        try {
+          const response = await axios.post(
+            pollUrl,
+            { device_code: deviceCodeData.device_code },
+            {
+              headers: { 'Content-Type': 'application/json' },
+              timeout: 30000,
+            }
+          );
+        
+        // Log response for debugging
+        console.log(`[OAUTH] ✅ Poll attempt ${attempt} response: Status ${response.status}, Result: ${response.data?.result}, Error: ${response.data?.error || 'none'}`);
+        if (response.data) {
+          console.log(`[OAUTH] Response data:`, JSON.stringify(response.data, null, 2));
+        }
+        
+        // Success - user authorized
+        if (response.status === 200 && response.data?.result === true) {
+          console.log('[OAUTH] ✅ Authentication successful!');
+          console.log('[OAUTH] Response data:', JSON.stringify(response.data, null, 2));
+          const data = response.data.data;
+          
+          // Extract tokens - prefer root level, fallback to data level
+          const jwtLoginToken = response.data.login_token || data.login_token;
+          const token = response.data.token || data.token; // Laravel token
+          
+          // Save full response data to localStorage via renderer
+          // Send full response data to renderer to save in localStorage
+          if (mainWindow) {
+            // Send login_token separately (for backward compatibility)
+            if (jwtLoginToken) {
+              mainWindow.webContents.send('oauth-login-token', jwtLoginToken);
+            }
+            // Send full response data
+            mainWindow.webContents.send('oauth-full-response', {
+              result: response.data.result,
+              message: response.data.message,
+              data: response.data.data,
+              token: response.data.token,
+              login_token: response.data.login_token,
+            });
+          }
+          
+          // Parse expires_at from string or calculate from expires_in
+          let expires_at = null;
+          if (data.expires_at) {
+            // Parse date string like "2025-12-14 20:28:43"
+            const expiresDate = new Date(data.expires_at.replace(' ', 'T'));
+            expires_at = expiresDate.getTime();
+          } else {
+            expires_at = Date.now() + (data.expires_in || 604800) * 1000;
+          }
+          
+          // Extract user data (all fields from data object)
+          const user = {
+            id: data.id,
+            company_id: data.company_id,
+            department_id: data.department_id,
+            department_name: data.department_name,
+            is_admin: data.is_admin,
+            is_hr: data.is_hr,
+            is_face_registered: data.is_face_registered,
+            name: data.name,
+            email: data.email,
+            phone: data.phone,
+            avatar: data.avatar,
+          };
+          
+          // Extract workspaces - check both data.workspaces and root level
+          let workspaces = data.workspaces || [];
+          
+          // Log full workspace data structure for debugging
+          console.log('[OAUTH] ========== WORKSPACE DATA DEBUG ==========');
+          console.log('[OAUTH] Workspaces array length:', workspaces.length);
+          console.log('[OAUTH] Workspaces from data.workspaces:', JSON.stringify(workspaces, null, 2));
+          console.log('[OAUTH] Full data object structure:', JSON.stringify(data, null, 2));
+          console.log('[OAUTH] ===========================================');
+          
+          if (workspaces.length > 0) {
+            console.log('[OAUTH] ✅ Workspaces received:', workspaces.length);
+            workspaces.forEach((ws, index) => {
+              console.log(`[OAUTH] Workspace ${index + 1}:`, {
+                id: ws.workspace_id,
+                name: ws.workspace_name,
+                company: ws.company_name,
+                general: ws.workspace_is_general,
+                role: ws.workspace_role,
+                active: ws.workspace_is_active,
+              });
+            });
+          } else {
+            console.warn('[OAUTH] ⚠️ No workspaces in response!');
+            console.log('[OAUTH] Checking if workspaces might be at root level...');
+            console.log('[OAUTH] response.data.workspaces:', response.data.workspaces);
+            console.log('[OAUTH] Full data object keys:', Object.keys(data));
+            
+            // Try to get workspaces from root level if not in data
+            if (response.data.workspaces && Array.isArray(response.data.workspaces)) {
+              workspaces = response.data.workspaces;
+              console.log('[OAUTH] Found workspaces at root level:', workspaces.length);
+            }
+          }
+          
+          // Select default workspace (general workspace or first one)
+          // Handle both boolean and number (1/0) for workspace_is_general
+          let currentWorkspace = workspaces.find(w => 
+            w.workspace_is_general === true || w.workspace_is_general === 1
+          ) || null;
+          if (!currentWorkspace && workspaces.length > 0) {
+            currentWorkspace = workspaces[0];
+          }
+          
+          if (currentWorkspace) {
+            console.log('[OAUTH] Selected workspace:', currentWorkspace.workspace_name, '(ID:', currentWorkspace.workspace_id, ')');
+          } else {
+            console.warn('[OAUTH] ⚠️ No workspace selected!');
+          }
+          
+          // Store metadata with user, workspaces, and current workspace
+          const metadata = {
+            token_type: data.token_type || 'Bearer',
+            expires_at,
+            user,
+            workspaces,
+            current_workspace_id: currentWorkspace ? currentWorkspace.workspace_id : null,
+          };
+          console.log('[OAUTH] Storing metadata with', workspaces.length, 'workspaces');
+          await keytar.setPassword(SERVICE_NAME, USER_DATA_KEY, JSON.stringify(metadata));
+          
+          // Send success notification with full data (include login_token and full response)
+          event.sender.send('oauth-authentication-success', {
+            user,
+            workspaces,
+            currentWorkspace,
+            token: token || jwtLoginToken, // Use token or fallback to login_token
+            login_token: jwtLoginToken, // Include JWT login_token
+            expires_at,
+            message: `Authenticated as ${user.name} (${user.email})`,
+            // Include full response data
+            fullResponse: {
+              result: response.data.result,
+              message: response.data.message,
+              data: response.data.data,
+              token: response.data.token,
+              login_token: response.data.login_token,
+            },
+          });
+          
+          // Clean up cancellation handler before returning
+          ongoingOAuthAttempts.delete(requestId);
+          
+          return {
+            success: true,
+            message: `Authenticated as ${user.name} (${user.email})`,
+            user,
+            workspaces,
+            currentWorkspace,
+            token: token || jwtLoginToken, // Use token or fallback to login_token
+            expires_at,
+          };
+        }
+        
+        // Check if we got 200 but result is false (shouldn't happen, but log it)
+        if (response.status === 200 && response.data?.result === false) {
+          console.warn('[OAUTH] ⚠️ Got 200 but result is false:', response.data);
+          const errorMsg = response.data?.message || 'Authentication failed';
+          return {
+            success: false,
+            error: errorMsg,
+          };
+        }
+        
+        // Authorization pending - continue polling
+        if (response.status === 202 || response.data?.error === 'authorization_pending') {
+          console.log(`[OAUTH] ⏳ Still waiting for authorization (attempt ${attempt}/${maxAttempts})...`);
+          console.log(`[OAUTH] ⏳ Waiting ${interval} seconds before next poll...`);
+          await new Promise(resolve => setTimeout(resolve, interval * 1000));
+          console.log(`[OAUTH] ⏳ Wait complete, continuing to next poll...`);
+          continue;
+        }
+        
+        // Other errors
+        const errorMsg = response.data?.message || 'Authentication failed';
+        console.error('[OAUTH] Poll error:', errorMsg);
+        console.error('[OAUTH] Poll URL:', pollUrl);
+        console.error('[OAUTH] Response status:', response.status);
+        console.error('[OAUTH] Response data:', response.data);
+        
+        return {
+          success: false,
+          error: `Failed at ${pollUrl}: ${errorMsg} (${response.status})`,
+        };
+      } catch (error) {
+        // Use pollUrl defined above
+        
+        if (error.response) {
+          const status = error.response.status;
+          const data = error.response.data;
+          
+          if (status === 410 || data?.error === 'expired_token') {
+            console.error('[OAUTH] Device code expired');
+            return {
+              success: false,
+              error: 'Device code has expired. Please try again.',
+            };
+          }
+          
+          if (status === 400 || data?.error === 'code_already_used') {
+            console.error('[OAUTH] Device code already used');
+            console.error('[OAUTH] This usually means the device code was verified but polling missed it, or a new auth attempt started');
+            // Don't return immediately - this might be from a previous attempt
+            // Instead, suggest the user might already be authenticated or should try again
+            return {
+              success: false,
+              error: 'Device code has already been used. This may mean you\'re already authenticated, or you need to start a fresh authentication flow. Please check if you\'re logged in, or try again.',
+              code_already_used: true,
+            };
+          }
+          
+          if (status === 404) {
+            const errorMsg = data?.message || 'Route not found';
+            console.error('[OAUTH] 404 Error at:', pollUrl);
+            console.error('[OAUTH] Error message:', errorMsg);
+            console.error('[OAUTH] Response data:', data);
+            return {
+              success: false,
+              error: `Route not found: ${pollUrl} - ${errorMsg}`,
+            };
+          }
+          
+          if (status === 202 || data?.error === 'authorization_pending') {
+            console.log(`[OAUTH] ⏳ Still waiting for authorization (attempt ${attempt}/${maxAttempts})...`);
+            console.log(`[OAUTH] ⏳ Waiting ${interval} seconds before next poll...`);
+            await new Promise(resolve => setTimeout(resolve, interval * 1000));
+            console.log(`[OAUTH] ⏳ Wait complete, continuing to next poll...`);
+            continue;
+          }
+          
+          // Other HTTP errors
+          const errorMsg = data?.message || error.message || 'Unknown error';
+          console.error('[OAUTH] HTTP Error:', status, errorMsg);
+          console.error('[OAUTH] URL:', pollUrl);
+          console.error('[OAUTH] Response:', data);
+        } else {
+          // Network error
+          console.error('[OAUTH] Network error:', error.message);
+          console.error('[OAUTH] URL:', pollUrl);
+        }
+        
+        // Network error - retry after interval (only if not cancelled)
+        if (!cancelled) {
+          console.log(`[OAUTH] ⚠️ Network error, will retry in ${interval} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, interval * 1000));
+          console.log(`[OAUTH] ⚠️ Retry wait complete, continuing...`);
+        }
+      }
+    }
+      
+      // Clean up cancellation handler
+      ongoingOAuthAttempts.delete(requestId);
+      
+      // Timeout
+      if (!cancelled) {
+        return {
+          success: false,
+          error: 'Authentication timeout. Please try again.',
+        };
+      } else {
+        return {
+          success: false,
+          error: 'Authentication cancelled. Please try again.',
+        };
+      }
+    } catch (error) {
+      // Clean up cancellation handler on error
+      ongoingOAuthAttempts.delete(requestId);
+      throw error;
+    }
+  } catch (error) {
+    // Clean up cancellation handler
+    ongoingOAuthAttempts.delete(requestId);
+    return {
+      success: false,
+      error: error.message || 'Authentication failed',
+    };
+  }
+});
+
+// Helper function to check OAuth status (extracted from oauth-check-status handler)
+async function checkOAuthStatus() {
+  try {
+    const keytar = require('keytar');
+    const accessToken = await keytar.getPassword('tyro-app', 'access_token');
+    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+    
+    if (!accessToken) {
+      return { authenticated: false };
+    }
+    
+    let user = null;
+    let workspaces = [];
+    let currentWorkspace = null;
+    let expires_at = null;
+    
+    if (userDataStr) {
+      try {
+        const metadata = JSON.parse(userDataStr);
+        user = metadata.user;
+        workspaces = metadata.workspaces || [];
+        expires_at = metadata.expires_at;
+        
+        console.log('[OAUTH] Loaded', workspaces.length, 'workspaces from storage');
+        if (workspaces.length > 0) {
+          console.log('[OAUTH] Workspace names:', workspaces.map(w => w.workspace_name || w.name || 'Unknown').join(', '));
+        }
+        
+        // Get current workspace
+        if (metadata.current_workspace_id) {
+          currentWorkspace = workspaces.find(w => w.workspace_id === metadata.current_workspace_id) || null;
+          if (currentWorkspace) {
+            console.log('[OAUTH] Found current workspace by ID:', currentWorkspace.workspace_name);
+          }
+        }
+        
+        // Fallback to general workspace or first one
+        if (!currentWorkspace) {
+          currentWorkspace = workspaces.find(w => w.workspace_is_general) || null;
+          if (currentWorkspace) {
+            console.log('[OAUTH] Using general workspace:', currentWorkspace.workspace_name);
+          }
+        }
+        if (!currentWorkspace && workspaces.length > 0) {
+          currentWorkspace = workspaces[0];
+          console.log('[OAUTH] Using first workspace:', currentWorkspace.workspace_name);
+        }
+      } catch (e) {
+        console.error('[OAUTH] Error parsing user data:', e);
+        console.error('[OAUTH] User data string:', userDataStr.substring(0, 200));
+      }
+    }
+    
+    // Check if token is expired
+    const isExpired = expires_at && Date.now() >= expires_at;
+    
+    return {
+      authenticated: !isExpired,
+      user,
+      workspaces,
+      currentWorkspace,
+      expires_at,
+    };
+  } catch (error) {
+    return { authenticated: false, error: error.message };
+  }
+}
+
+// Check OAuth authentication status
+ipcMain.handle('oauth-check-status', async () => {
+  try {
+    const keytar = require('keytar');
+    const accessToken = await keytar.getPassword('tyro-app', 'access_token');
+    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+    
+    if (!accessToken) {
+      return { authenticated: false };
+    }
+    
+    let user = null;
+    let workspaces = [];
+    let currentWorkspace = null;
+    let expires_at = null;
+    
+    if (userDataStr) {
+      try {
+        const metadata = JSON.parse(userDataStr);
+        user = metadata.user;
+        workspaces = metadata.workspaces || [];
+        expires_at = metadata.expires_at;
+        
+        // Get current workspace
+        if (metadata.current_workspace_id) {
+          currentWorkspace = workspaces.find(w => w.workspace_id === metadata.current_workspace_id) || null;
+        }
+        
+        // Fallback to general workspace or first one
+        if (!currentWorkspace) {
+          currentWorkspace = workspaces.find(w => w.workspace_is_general) || null;
+        }
+        if (!currentWorkspace && workspaces.length > 0) {
+          currentWorkspace = workspaces[0];
+        }
+      } catch (e) {
+        console.error('[OAUTH] Error parsing user data:', e);
+        // Ignore parse errors
+      }
+    }
+    
+    // Check if token is expired
+    const isExpired = expires_at && Date.now() >= expires_at;
+    
+    return {
+      authenticated: !isExpired,
+      user,
+      workspaces,
+      currentWorkspace,
+      expires_at,
+    };
+  } catch (error) {
+    return { authenticated: false, error: error.message };
+  }
+});
+
+// OAuth Logout
+ipcMain.handle('oauth-logout', async () => {
+  try {
+    const keytar = require('keytar');
+    await keytar.deletePassword('tyro-app', 'access_token');
+    await keytar.deletePassword('tyro-app', 'refresh_token');
+    await keytar.deletePassword('tyro-app', 'user_data');
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Set current workspace
+ipcMain.handle('oauth-set-workspace', async (event, workspaceId) => {
+  try {
+    const keytar = require('keytar');
+    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+    
+    if (!userDataStr) {
+      return { success: false, error: 'No user data found' };
+    }
+    
+    try {
+      const metadata = JSON.parse(userDataStr);
+      const workspaces = metadata.workspaces || [];
+      
+      // Verify workspace exists (handle both string and number IDs)
+      const workspace = workspaces.find(w => 
+        String(w.workspace_id) === String(workspaceId)
+      );
+      if (!workspace) {
+        return { success: false, error: `Workspace ${workspaceId} not found` };
+      }
+      
+      // Update current workspace
+      metadata.current_workspace_id = workspaceId;
+      await keytar.setPassword('tyro-app', 'user_data', JSON.stringify(metadata));
+      
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: 'Failed to parse user data' };
+    }
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Device logout API call
+ipcMain.handle('oauth-device-logout', async (event) => {
+  try {
+    const keytar = require('keytar');
+    const store = await initStore();
+    const settings = store.get('settings', {});
+    
+    if (!settings.apiBaseUrl) {
+      return { success: false, error: 'API base URL not set' };
+    }
+    
+    // Get login_token from storage
+    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+    let loginToken = null;
+    
+    if (userDataStr) {
+      try {
+        const metadata = JSON.parse(userDataStr);
+        // Try to get login_token from stored data
+        // It might be in the token field or we need to get it from access_token
+        loginToken = await keytar.getPassword('tyro-app', 'access_token');
+      } catch (e) {
+        console.error('[OAUTH] Error parsing user data for logout:', e);
+      }
+    }
+    
+    if (!loginToken) {
+      return { success: false, error: 'No authentication token found' };
+    }
+    
+    // Use base URL as-is (it should include full path like /api/v11)
+    let baseUrl = settings.apiBaseUrl.replace(/\/$/, '');
+    
+    // Remove version suffix for OAuth endpoints
+    if (baseUrl.match(/\/v\d+$/)) {
+      baseUrl = baseUrl.replace(/\/v\d+$/, '');
+    }
+    
+    const logoutUrl = `${baseUrl}/auth/device/logout`;
+    console.log('[OAUTH] Calling logout API:', logoutUrl);
+    
+    const axiosModule = await import('axios');
+    const axios = axiosModule.default;
+    
+    const response = await axios.post(
+      logoutUrl,
+      {},
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${loginToken}`,
+        },
+        timeout: 30000,
+      }
+    );
+    
+    if (response.status === 200 && response.data?.result === true) {
+      console.log('[OAUTH] ✅ Device logout successful:', response.data.message);
+      return {
+        success: true,
+        message: response.data.message || 'Logged out and device unlinked successfully',
+      };
+    } else {
+      console.warn('[OAUTH] ⚠️ Logout API returned unexpected response:', response.data);
+      return {
+        success: false,
+        error: response.data?.message || 'Logout failed',
+      };
+    }
+  } catch (error) {
+    console.error('[OAUTH] Error calling logout API:', error);
+    
+    if (error.response) {
+      const status = error.response.status;
+      const data = error.response.data;
+      
+      if (status === 401) {
+        return {
+          success: false,
+          error: 'Unauthorized - token may be expired',
+        };
+      }
+      
+      return {
+        success: false,
+        error: data?.message || `Logout failed (${status})`,
+      };
+    }
+    
+    return {
+      success: false,
+      error: error.message || 'Failed to call logout API',
+    };
+  }
+});
+
+// Get OAuth access token (for API service in renderer)
+ipcMain.handle('oauth-get-access-token', async () => {
+  try {
+    const keytar = require('keytar');
+    const accessToken = await keytar.getPassword('tyro-app', 'access_token');
+    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+    
+    if (!accessToken) {
+      return { token: null };
+    }
+    
+    // Check if expired
+    let isExpired = false;
+    if (userDataStr) {
+      try {
+        const metadata = JSON.parse(userDataStr);
+        if (metadata.expires_at && Date.now() >= metadata.expires_at) {
+          isExpired = true;
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+    
+    return {
+      token: isExpired ? null : accessToken,
+      expired: isExpired,
+    };
+  } catch (error) {
+    return { token: null, error: error.message };
+  }
+});
+
+// Get OAuth login token (JWT token with workspace info, for workspace-specific APIs)
+ipcMain.handle('oauth-get-login-token', async () => {
+  try {
+    const keytar = require('keytar');
+    // login_token (JWT) is stored as refresh_token
+    const loginToken = await keytar.getPassword('tyro-app', 'refresh_token');
+    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+    
+    // Validate that we have a JWT token (starts with 'eyJ' and has 3 segments)
+    let validJWT = false;
+    if (loginToken) {
+      const parts = loginToken.split('.');
+      validJWT = loginToken.startsWith('eyJ') && parts.length === 3;
+      if (!validJWT) {
+        console.warn('[OAUTH] refresh_token is not a valid JWT, checking access_token');
+      }
+    }
+    
+    // If refresh_token is not a valid JWT, try access_token
+    let tokenToUse = loginToken;
+    if (!validJWT) {
+      const accessToken = await keytar.getPassword('tyro-app', 'access_token');
+      if (accessToken) {
+        const parts = accessToken.split('.');
+        const isJWT = accessToken.startsWith('eyJ') && parts.length === 3;
+        if (isJWT) {
+          tokenToUse = accessToken;
+          console.log('[OAUTH] Using access_token as JWT login_token');
+        } else {
+          console.warn('[OAUTH] Neither token is a valid JWT. access_token:', accessToken?.substring(0, 20) + '...');
+        }
+      }
+    } else {
+      console.log('[OAUTH] Using refresh_token as JWT login_token');
+    }
+    
+    if (!tokenToUse) {
+      return { token: null, error: 'No token found' };
+    }
+    
+    // Check if expired
+    let isExpired = false;
+    if (userDataStr) {
+      try {
+        const metadata = JSON.parse(userDataStr);
+        if (metadata.expires_at && Date.now() >= metadata.expires_at) {
+          isExpired = true;
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+    
+    return {
+      token: isExpired ? null : tokenToUse,
+      expired: isExpired,
+    };
+  } catch (error) {
+    return { token: null, error: error.message };
+  }
+});
+
+// Sync single task tracking data to API
+ipcMain.handle('sync-task-tracking', async (event, projectId, taskId) => {
+  try {
+    const store = await initStore();
+    const settings = store.get('settings', {});
+    
+    if (!settings.apiEnabled || !settings.apiBaseUrl) {
+      return { success: false, error: 'API not enabled' };
+    }
+
+    // Load task tracking data
+    const taskData = loadTaskTrackingDataFromFile(projectId, taskId);
+    if (!taskData) {
+      return { success: false, error: 'Task data not found' };
+    }
+
+    // Dynamic import of axios
+    const axiosModule = await import('axios');
+    const axios = axiosModule.default;
+    
+    // Prepare data for API
+    const apiData = {
+      taskId: taskData.metadata.taskId,
+      projectId: taskData.metadata.projectId,
+      taskName: taskData.metadata.taskName,
+      projectName: taskData.metadata.projectName,
+      metadata: taskData.metadata,
+      trackingData: taskData.trackingData,
+    };
+
+    // Get OAuth token or fallback to API key
+    let authHeader = {};
+    try {
+      const keytar = require('keytar');
+      const accessToken = await keytar.getPassword('tyro-app', 'access_token');
+      if (accessToken) {
+        // Check if expired
+        const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+        let isExpired = false;
+        if (userDataStr) {
+          try {
+            const metadata = JSON.parse(userDataStr);
+            if (metadata.expires_at && Date.now() >= metadata.expires_at) {
+              isExpired = true;
+            }
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
+        if (!isExpired) {
+          authHeader = { Authorization: `Bearer ${accessToken}` };
+        } else if (settings.apiKey) {
+          authHeader = { Authorization: `Bearer ${settings.apiKey}` };
+        }
+      } else if (settings.apiKey) {
+        authHeader = { Authorization: `Bearer ${settings.apiKey}` };
+      }
+    } catch (e) {
+      // Fallback to API key if keytar fails
+      if (settings.apiKey) {
+        authHeader = { Authorization: `Bearer ${settings.apiKey}` };
+      }
+    }
+    
+    // Send to API
+    const response = await axios.post(
+      `${settings.apiBaseUrl}/tracking/tasks/${projectId}/${taskId}`,
+      apiData,
+      {
+        timeout: 30000,
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader,
+        },
+      }
+    );
+
+    return { success: true };
+  } catch (error) {
+    console.error('[API-SYNC] Error syncing task:', error);
+    return { 
+      success: false, 
+      error: error.response?.data?.message || error.message || 'Sync failed' 
+    };
+  }
+});
+
+// Sync all tasks to API
+ipcMain.handle('sync-all-tasks', async () => {
+  try {
+    const store = await initStore();
+    const settings = store.get('settings', {});
+    
+    if (!settings.apiEnabled || !settings.apiBaseUrl) {
+      return { success: false, error: 'API not enabled', synced: 0, errors: 0 };
+    }
+
+    // Get all today's tasks - need to call the function directly
+    const projectRoot = path.join(__dirname, '..');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    
+    if (!fs.existsSync(trackingDataPath)) {
+      return { success: true, synced: 0, errors: 0 };
+    }
+
+    // Find all task files
+    const taskFiles = findAllTaskFiles(trackingDataPath);
+    
+    if (taskFiles.length === 0) {
+      return { success: true, synced: 0, errors: 0 };
+    }
+
+    // Dynamic import of axios
+    const axiosModule = await import('axios');
+    const axios = axiosModule.default;
+
+    let synced = 0;
+    let errors = 0;
+
+    // Sync each task
+    for (const taskFile of taskFiles) {
+      try {
+        const taskData = loadTaskTrackingDataFromFile(taskFile.projectId, taskFile.taskId);
+        if (!taskData) {
+          errors++;
+          continue;
+        }
+
+        const apiData = {
+          taskId: taskData.metadata.taskId,
+          projectId: taskData.metadata.projectId,
+          taskName: taskData.metadata.taskName,
+          projectName: taskData.metadata.projectName,
+          metadata: taskData.metadata,
+          trackingData: taskData.trackingData,
+        };
+
+        // Get OAuth token or fallback to API key
+        let authHeader = {};
+        try {
+          const keytar = require('keytar');
+          const accessToken = await keytar.getPassword('tyro-app', 'access_token');
+          if (accessToken) {
+            // Check if expired
+            const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+            let isExpired = false;
+            if (userDataStr) {
+              try {
+                const metadata = JSON.parse(userDataStr);
+                if (metadata.expires_at && Date.now() >= metadata.expires_at) {
+                  isExpired = true;
+                }
+              } catch (e) {
+                // Ignore parse errors
+              }
+            }
+            if (!isExpired) {
+              authHeader = { Authorization: `Bearer ${accessToken}` };
+            } else if (settings.apiKey) {
+              authHeader = { Authorization: `Bearer ${settings.apiKey}` };
+            }
+          } else if (settings.apiKey) {
+            authHeader = { Authorization: `Bearer ${settings.apiKey}` };
+          }
+        } catch (e) {
+          // Fallback to API key if keytar fails
+          if (settings.apiKey) {
+            authHeader = { Authorization: `Bearer ${settings.apiKey}` };
+          }
+        }
+        
+        await axios.post(
+          `${settings.apiBaseUrl}/tracking/tasks/${taskFile.projectId}/${taskFile.taskId}`,
+          apiData,
+          {
+            timeout: 30000,
+            headers: {
+              'Content-Type': 'application/json',
+              ...authHeader,
+            },
+          }
+        );
+
+        synced++;
+      } catch (error) {
+        console.error(`[API-SYNC] Error syncing task ${taskFile.taskId}:`, error);
+        errors++;
+      }
+    }
+
+    return { success: true, synced, errors };
+  } catch (error) {
+    console.error('[API-SYNC] Error syncing all tasks:', error);
+    return { 
+      success: false, 
+      error: error.message || 'Sync failed',
+      synced: 0,
+      errors: 0
+    };
+  }
+});
+
 // Screenshot capture handler (no screen share needed)
 ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
   try {

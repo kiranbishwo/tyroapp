@@ -82,6 +82,26 @@ declare global {
             // Data management
             exportData: (data: any) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
             deleteAllData: () => Promise<boolean>;
+            
+            // API Sync
+            syncTaskTracking: (projectId: string, taskId: string) => Promise<{ success: boolean; error?: string }>;
+            syncAllTasks: () => Promise<{ success: boolean; synced: number; errors: number; error?: string }>;
+            testApiConnection: () => Promise<{ success: boolean; error?: string }>;
+            
+            // OAuth Authentication
+            oauthAuthenticate: () => Promise<{ success: boolean; error?: string; message?: string; user?: any; workspaces?: any[]; currentWorkspace?: any; token?: string; expires_at?: number }>;
+            oauthCheckStatus: () => Promise<{ authenticated: boolean; user?: any; workspaces?: any[]; currentWorkspace?: any; expires_at?: number; error?: string }>;
+            oauthLogout: () => Promise<{ success: boolean; error?: string }>;
+            oauthDeviceLogout: () => Promise<{ success: boolean; message?: string; error?: string }>;
+            oauthGetAccessToken: () => Promise<{ token: string | null; expired?: boolean; error?: string }>;
+            oauthGetLoginToken: () => Promise<{ token: string | null; expired?: boolean; error?: string }>;
+            oauthSetWorkspace: (workspaceId: string | number) => Promise<{ success: boolean; error?: string }>;
+            // OAuth event listeners
+            onOAuthDeviceCode: (callback: (data: { user_code: string; verification_url: string; browser_opened: boolean }) => void) => void;
+            onOAuthSuccess: (callback: (data: { user: any; workspaces?: any[]; currentWorkspace?: any; token?: string; expires_at?: number; message: string; fullResponse?: any }) => void) => void;
+            onLoginToken: (callback: (token: string) => void) => void;
+            onFullResponse: (callback: (data: any) => void) => void;
+            removeOAuthListeners: () => void;
         };
     }
 }

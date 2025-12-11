@@ -18,7 +18,9 @@
   "dependencies": {
     "@google/genai": "^1.30.0",
     "active-win": "^9.0.0",
+    "axios": "^1.7.7",
     "electron-store": "^10.1.0",
+    "keytar": "^7.9.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "uiohook-napi": "^1.5.4"
