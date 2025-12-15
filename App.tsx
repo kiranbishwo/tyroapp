@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { User, AppView, Project, TimeEntry, Settings, ActivityLog, Task, AuthenticatedUser, Workspace } from './types';
 import { FaceAttendance } from './components/FaceAttendance';
 import { ScreenLogger } from './components/ScreenLogger';
@@ -17,55 +17,7 @@ import { apiService } from './services/apiService';
 
 // Electron API types are defined in types/electron.d.ts
 
-// Mock Data with Projects and Tasks
-const MOCK_TASKS: Task[] = [
-    // Web Development tasks
-    { id: 't1', name: 'Fix login bug', projectId: '1', completed: false, description: 'Fix authentication issue on login page' },
-    { id: 't2', name: 'Implement dark mode', projectId: '1', completed: false, description: 'Add dark theme toggle' },
-    { id: 't3', name: 'Optimize database queries', projectId: '1', completed: false, description: 'Improve query performance' },
-    { id: 't4', name: 'Write unit tests', projectId: '1', completed: true, description: 'Add test coverage' },
-    
-    // Internal Audit tasks
-    { id: 't5', name: 'Review Q4 financials', projectId: '2', completed: false, description: 'Audit quarterly financial statements' },
-    { id: 't6', name: 'Compliance check', projectId: '2', completed: false, description: 'Verify regulatory compliance' },
-    { id: 't7', name: 'Risk assessment', projectId: '2', completed: false, description: 'Evaluate potential risks' },
-    
-    // UI/UX Design tasks
-    { id: 't8', name: 'Design dashboard mockup', projectId: '3', completed: false, description: 'Create new dashboard design' },
-    { id: 't9', name: 'User flow diagrams', projectId: '3', completed: false, description: 'Map user journey' },
-    { id: 't10', name: 'Prototype mobile app', projectId: '3', completed: true, description: 'Mobile app wireframes' },
-    
-    // Meeting tasks
-    { id: 't11', name: 'Team standup', projectId: '4', completed: false, description: 'Daily team sync' },
-    { id: 't12', name: 'Client presentation', projectId: '4', completed: false, description: 'Present project progress' },
-];
-
-const MOCK_PROJECTS: Project[] = [
-    { 
-        id: '1', 
-        name: 'Web Development', 
-        color: '#60A5FA',
-        tasks: MOCK_TASKS.filter(t => t.projectId === '1')
-    },
-    { 
-        id: '2', 
-        name: 'Internal Audit', 
-        color: '#F472B6',
-        tasks: MOCK_TASKS.filter(t => t.projectId === '2')
-    },
-    { 
-        id: '3', 
-        name: 'UI/UX Design', 
-        color: '#34D399',
-        tasks: MOCK_TASKS.filter(t => t.projectId === '3')
-    },
-    { 
-        id: '4', 
-        name: 'Meeting', 
-        color: '#FBBF24',
-        tasks: MOCK_TASKS.filter(t => t.projectId === '4')
-    },
-];
+// Mock data removed - now using dynamic API data
 
 const INITIAL_USER: User = {
     id: 'u1',
@@ -78,7 +30,10 @@ const App: React.FC = () => {
     // State
     const [user, setUser] = useState<User | null>(null);
     const [view, setView] = useState<AppView>(AppView.LOGIN);
-    const [projects] = useState<Project[]>(MOCK_PROJECTS);
+    const [projects, setProjects] = useState<Project[]>([]);
+    const [tasks, setTasks] = useState<Task[]>([]);
+    const [projectsLoading, setProjectsLoading] = useState(false);
+    const [tasksLoading, setTasksLoading] = useState(false);
     const [timeEntries, setTimeEntries] = useState<TimeEntry[]>([]);
     const [insightsTaskFilter, setInsightsTaskFilter] = useState<string | undefined>(undefined);
     const [insightsProjectFilter, setInsightsProjectFilter] = useState<string | undefined>(undefined);
@@ -118,6 +73,12 @@ const App: React.FC = () => {
     const [showUserMenu, setShowUserMenu] = useState(false);
     const [workspacesLoading, setWorkspacesLoading] = useState(false);
     
+    // Sync State
+    const [isSyncing, setIsSyncing] = useState(false);
+    const [syncStatus, setSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
+    const [syncMessage, setSyncMessage] = useState<string>('');
+    const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
+    
     // Today's tasks (for restoration and continuation)
     const [todayTasks, setTodayTasks] = useState<Array<{
         projectId: string;
@@ -139,9 +100,835 @@ const App: React.FC = () => {
 
     // Get current task and project names
     const currentProject = projects.find(p => p.id === selectedProjectId);
-    const currentTask = currentProject?.tasks?.find(t => t.id === selectedTaskId);
+    const currentTask = tasks.find(t => t.id === selectedTaskId && t.projectId === selectedProjectId);
     const currentTaskName = currentTask?.name;
     const currentProjectName = currentProject?.name;
+
+    // Fetch projects from API
+    const fetchProjects = async (workspaceId?: string) => {
+        // Check authentication directly from authState (more reliable than authStateData)
+        const isAuthenticated = authState.isAuthenticated();
+        if (!isAuthenticated) {
+            console.log('[PROJECTS] Not authenticated, skipping fetch');
+            return;
+        }
+
+        setProjectsLoading(true);
+        try {
+            const params: { workspace_id?: string; search?: string } = {};
+            if (workspaceId) {
+                params.workspace_id = workspaceId;
+            } else if (currentWorkspace?.workspace_id) {
+                params.workspace_id = currentWorkspace.workspace_id.toString();
+            } else {
+                // Try to get workspace from authState directly
+                const workspace = authState.getCurrentWorkspace();
+                if (workspace?.workspace_id) {
+                    params.workspace_id = workspace.workspace_id.toString();
+                }
+            }
+
+            if (!params.workspace_id) {
+                console.warn('[PROJECTS] No workspace ID available, fetching without workspace filter');
+            }
+
+            console.log('[PROJECTS] Fetching projects with params:', params);
+            const response = await apiService.getProjects(params);
+
+            if (response.success && response.data) {
+                // Transform API response to Project format
+                const transformedProjects: Project[] = response.data.map((p: any) => ({
+                    id: p.id.toString(),
+                    name: p.name,
+                    color: getProjectColor(p.id), // Generate color based on ID
+                    description: p.description,
+                    status: p.status,
+                    priority: p.priority_status,
+                    progress: p.progress,
+                }));
+
+                setProjects(transformedProjects);
+                console.log('[PROJECTS] ✅ Loaded', transformedProjects.length, 'projects');
+            } else {
+                console.error('[PROJECTS] Failed to fetch:', response.error);
+                // Fallback to empty array
+                setProjects([]);
+            }
+        } catch (error) {
+            console.error('[PROJECTS] Error fetching projects:', error);
+            setProjects([]);
+        } finally {
+            setProjectsLoading(false);
+        }
+    };
+
+    // Fetch tasks from API
+    const fetchTasks = async (projectId?: string, workspaceId?: string) => {
+        // Check authentication directly from authState (more reliable than authStateData)
+        const isAuthenticated = authState.isAuthenticated();
+        if (!isAuthenticated) {
+            console.log('[TASKS] Not authenticated, skipping fetch');
+            return;
+        }
+
+        setTasksLoading(true);
+        try {
+            const params: { project_id?: string; workspace_id?: string; search?: string } = {};
+            if (projectId) {
+                params.project_id = projectId;
+            }
+            if (workspaceId) {
+                params.workspace_id = workspaceId;
+            } else if (currentWorkspace?.workspace_id) {
+                params.workspace_id = currentWorkspace.workspace_id.toString();
+            } else {
+                // Try to get workspace from authState directly
+                const workspace = authState.getCurrentWorkspace();
+                if (workspace?.workspace_id) {
+                    params.workspace_id = workspace.workspace_id.toString();
+                }
+            }
+
+            if (!params.workspace_id) {
+                console.warn('[TASKS] No workspace ID available, fetching without workspace filter');
+            }
+
+            console.log('[TASKS] Fetching tasks with params:', params);
+            const response = await apiService.getTasks(params);
+
+            if (response.success && response.data) {
+                // Transform API response to Task format
+                const transformedTasks: Task[] = response.data.map((t: any) => ({
+                    id: t.id.toString(),
+                    name: t.name,
+                    projectId: t.project_id.toString(),
+                    completed: t.status_id === 27 || t.status === 'Completed', // Adjust based on your status mapping
+                    description: t.description,
+                }));
+
+                setTasks(transformedTasks);
+                console.log('[TASKS] ✅ Loaded', transformedTasks.length, 'tasks');
+            } else {
+                console.error('[TASKS] Failed to fetch:', response.error);
+                // Fallback to empty array
+                setTasks([]);
+            }
+        } catch (error) {
+            console.error('[TASKS] Error fetching tasks:', error);
+            setTasks([]);
+        } finally {
+            setTasksLoading(false);
+        }
+    };
+
+    // Helper function to generate consistent colors for projects
+    const getProjectColor = (projectId: string | number): string => {
+        const colors = ['#60A5FA', '#F472B6', '#34D399', '#FBBF24', '#A78BFA', '#FB7185', '#4ADE80', '#FCD34D'];
+        const id = typeof projectId === 'string' ? parseInt(projectId) || 0 : projectId;
+        return colors[id % colors.length];
+    };
+
+    // Update projects with their tasks when tasks are loaded
+    useEffect(() => {
+        if (tasks.length > 0 && projects.length > 0) {
+            setProjects(prevProjects => 
+                prevProjects.map(project => ({
+                    ...project,
+                    tasks: tasks.filter(task => task.projectId === project.id)
+                }))
+            );
+        }
+    }, [tasks]);
+
+    // Fetch projects and tasks when authenticated and workspace is available
+    useEffect(() => {
+        if (authStateData.isAuthenticated && currentWorkspace) {
+            const workspaceId = currentWorkspace.workspace_id.toString();
+            console.log('[APP] Fetching projects and tasks for workspace:', workspaceId);
+            fetchProjects(workspaceId);
+            fetchTasks(undefined, workspaceId);
+        } else if (!authStateData.isAuthenticated) {
+            // Clear projects and tasks when logged out
+            setProjects([]);
+            setTasks([]);
+        }
+    }, [authStateData.isAuthenticated, currentWorkspace?.workspace_id]);
+
+    // Upload tracking file for a task
+    const uploadTrackingFileForTask = async (projectId: string, taskId: string) => {
+        console.log(`[UPLOAD-TASK] ========================================`);
+        console.log(`[UPLOAD-TASK] 🚀 Starting upload for task ${taskId} (project: ${projectId})`);
+        console.log(`[UPLOAD-TASK] 📋 Parameters:`, { projectId, taskId, timestamp: new Date().toISOString() });
+        
+        // Check authentication using multiple methods (more reliable)
+        const isAuthFromState = authState.isAuthenticated();
+        const hasLoginToken = !!localStorage.getItem('login_token');
+        const isUserCheckedIn = user?.isCheckedIn || false;
+        const isAuthenticated = isAuthFromState || hasLoginToken || isUserCheckedIn;
+        
+        console.log(`[UPLOAD-TASK] 🔐 Authentication check:`, {
+            isAuthFromState,
+            hasLoginToken,
+            isUserCheckedIn,
+            isAuthenticated,
+            hasElectronAPI: !!window.electronAPI,
+            hasLoadTaskTrackingData: !!window.electronAPI?.loadTaskTrackingData,
+        });
+        
+        if (!isAuthenticated || !window.electronAPI?.loadTaskTrackingData) {
+            const error = 'Not authenticated or API not available';
+            console.error(`[UPLOAD-TASK] ❌ ${error}`);
+            return { success: false, error };
+        }
+
+        try {
+            // Verify login token is available
+            const loginToken = localStorage.getItem('login_token');
+            if (!loginToken) {
+                const error = 'No authentication token found. Please check in again.';
+                console.error(`[UPLOAD-TASK] ❌ ${error}`);
+                return { success: false, error };
+            }
+            console.log(`[UPLOAD-TASK] ✅ login_token found (length: ${loginToken.length})`);
+
+            // Load tracking data from file (load today's data)
+            console.log(`[UPLOAD-TASK] 📋 Step 1: Loading tracking data from file...`);
+            const taskData = await window.electronAPI.loadTaskTrackingData(projectId, taskId, 'today');
+            if (!taskData) {
+                const error = 'No tracking data found';
+                console.log(`[UPLOAD-TASK] ⚠️ ${error} for task ${taskId}`);
+                return { success: false, error };
+            }
+            console.log(`[UPLOAD-TASK] ✅ Tracking data loaded successfully`);
+
+            // Log raw data from file
+            console.log('[UPLOAD] 📦 Raw data loaded from file:', {
+                version: taskData.version,
+                metadata: taskData.metadata,
+                trackingDataKeys: Object.keys(taskData.trackingData || {}),
+                activityLogsCount: taskData.trackingData?.activityLogs?.length || 0,
+                activeWindowsCount: taskData.trackingData?.activeWindows?.length || 0,
+                screenshotsCount: taskData.trackingData?.screenshots?.length || 0,
+                webcamPhotosCount: taskData.trackingData?.webcamPhotos?.length || 0,
+                urlHistoryCount: taskData.trackingData?.urlHistory?.length || 0,
+                summary: taskData.trackingData?.summary,
+            });
+
+            // Ensure the data matches the expected format from the API documentation
+            const formattedData = {
+                version: taskData.version || '1.0.0',
+                metadata: {
+                    createdAt: taskData.metadata?.createdAt || new Date().toISOString(),
+                    lastUpdated: taskData.metadata?.lastUpdated || new Date().toISOString(),
+                    taskId: taskData.metadata?.taskId || taskId,
+                    projectId: taskData.metadata?.projectId || projectId,
+                    taskName: taskData.metadata?.taskName || 'Unknown Task',
+                    projectName: taskData.metadata?.projectName || 'Unknown Project',
+                    currentSessionStart: taskData.metadata?.currentSessionStart || null,
+                },
+                trackingData: {
+                    activityLogs: taskData.trackingData?.activityLogs || [],
+                    windowTracking: taskData.trackingData?.activeWindows || [],
+                    screenshots: taskData.trackingData?.screenshots || [],
+                    webcamPhotos: taskData.trackingData?.webcamPhotos || [],
+                    urlHistory: taskData.trackingData?.urlHistory || [],
+                    summary: taskData.trackingData?.summary || {
+                        totalTime: 0,
+                        totalKeystrokes: 0,
+                        totalMouseClicks: 0,
+                        totalScreenshots: 0,
+                        totalWebcamPhotos: 0,
+                        totalUrls: 0,
+                        totalActivityLogs: 0,
+                        firstActivity: null,
+                        lastActivity: new Date().toISOString(),
+                    },
+                },
+            };
+
+            // Log formatted data structure
+            console.log('[UPLOAD] 📋 Formatted data structure:', {
+                version: formattedData.version,
+                metadata: formattedData.metadata,
+                trackingData: {
+                    activityLogsCount: formattedData.trackingData.activityLogs.length,
+                    windowTrackingCount: formattedData.trackingData.windowTracking.length,
+                    screenshotsCount: formattedData.trackingData.screenshots.length,
+                    webcamPhotosCount: formattedData.trackingData.webcamPhotos.length,
+                    urlHistoryCount: formattedData.trackingData.urlHistory.length,
+                    summary: formattedData.trackingData.summary,
+                },
+            });
+
+            // Log sample activity log entry (first one)
+            if (formattedData.trackingData.activityLogs.length > 0) {
+                console.log('[UPLOAD] 📝 Sample activity log entry (first):', formattedData.trackingData.activityLogs[0]);
+            }
+
+            // Log sample window tracking entry (first one)
+            if (formattedData.trackingData.windowTracking.length > 0) {
+                console.log('[UPLOAD] 🪟 Sample window tracking entry (first):', formattedData.trackingData.windowTracking[0]);
+            }
+
+            // Log sample screenshot entry (first one)
+            if (formattedData.trackingData.screenshots.length > 0) {
+                const firstScreenshot = formattedData.trackingData.screenshots[0];
+                console.log('[UPLOAD] 📸 Sample screenshot entry (first):', {
+                    id: firstScreenshot.id,
+                    timestamp: firstScreenshot.timestamp,
+                    isBlurred: firstScreenshot.isBlurred,
+                    dataUrlLength: firstScreenshot.dataUrl?.length || 0,
+                    dataUrlPreview: firstScreenshot.dataUrl?.substring(0, 100) || 'N/A',
+                });
+            }
+
+            // Log sample webcam photo entry (first one)
+            if (formattedData.trackingData.webcamPhotos.length > 0) {
+                const firstWebcam = formattedData.trackingData.webcamPhotos[0];
+                console.log('[UPLOAD] 📷 Sample webcam photo entry (first):', {
+                    id: firstWebcam.id,
+                    timestamp: firstWebcam.timestamp,
+                    dataUrlLength: firstWebcam.dataUrl?.length || 0,
+                    dataUrlPreview: firstWebcam.dataUrl?.substring(0, 100) || 'N/A',
+                });
+            }
+
+            // Convert to JSON string (minified, no pretty printing to reduce size)
+            console.log('[UPLOAD-TASK] 📋 Step 2: Converting data to JSON string...');
+            const jsonString = JSON.stringify(formattedData);
+            const originalSize = new Blob([jsonString]).size;
+            console.log('[UPLOAD-TASK] 📄 Original JSON size:', originalSize, 'bytes (', (originalSize / 1024 / 1024).toFixed(2), 'MB)');
+
+            // Compress the JSON using gzip if CompressionStream is available
+            let file: File;
+            let finalSize = originalSize;
+            
+            console.log('[UPLOAD-TASK] 📋 Step 3: Creating file (with compression if available)...');
+            console.log('[UPLOAD-TASK] 📋 CompressionStream available:', typeof CompressionStream !== 'undefined');
+            
+            // For small files (< 1MB), skip compression to avoid hanging
+            const shouldCompress = typeof CompressionStream !== 'undefined' && originalSize > 1024 * 1024; // Only compress if > 1MB
+            console.log('[UPLOAD-TASK] 📋 Should compress:', shouldCompress, '(file size:', originalSize, 'bytes)');
+            
+            try {
+                if (shouldCompress) {
+                    console.log('[UPLOAD-TASK] 🔄 Starting compression...');
+                    // Use CompressionStream API (available in modern browsers)
+                    const stream = new CompressionStream('gzip');
+                    const writer = stream.writable.getWriter();
+                    const reader = stream.readable.getReader();
+                    
+                    // Write JSON string to compression stream
+                    console.log('[UPLOAD-TASK] 📤 Writing to compression stream...');
+                    const encoder = new TextEncoder();
+                    const jsonBytes = encoder.encode(jsonString);
+                    await writer.write(jsonBytes);
+                    await writer.close();
+                    console.log('[UPLOAD-TASK] ✅ Finished writing to compression stream');
+                    
+                    // Read compressed data
+                    console.log('[UPLOAD-TASK] 📥 Reading compressed data...');
+                    const chunks: Uint8Array[] = [];
+                    let done = false;
+                    let chunkCount = 0;
+                    while (!done) {
+                        const { value, done: streamDone } = await reader.read();
+                        done = streamDone;
+                        if (value) {
+                            chunks.push(value);
+                            chunkCount++;
+                        }
+                    }
+                    console.log('[UPLOAD-TASK] ✅ Read', chunkCount, 'chunks from compression stream');
+                    
+                    // Combine chunks
+                    console.log('[UPLOAD-TASK] 🔄 Combining chunks...');
+                    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+                    const compressed = new Uint8Array(totalLength);
+                    let offset = 0;
+                    for (const chunk of chunks) {
+                        compressed.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+                    
+                    finalSize = compressed.length;
+                    const compressionRatio = ((1 - finalSize / originalSize) * 100).toFixed(1);
+                    console.log('[UPLOAD-TASK] ✅ Compressed size:', finalSize, 'bytes (', (finalSize / 1024 / 1024).toFixed(2), 'MB)');
+                    console.log('[UPLOAD-TASK] 📊 Compression ratio:', compressionRatio + '% reduction');
+                    
+                    // Create compressed file
+                    console.log('[UPLOAD-TASK] 📦 Creating compressed file...');
+                    const compressedBlob = new Blob([compressed], { type: 'application/gzip' });
+                    file = new File([compressedBlob], `${taskId}.json.gz`, { type: 'application/gzip' });
+                    console.log('[UPLOAD-TASK] ✅ Compressed file created:', file.name, file.size, 'bytes');
+                } else {
+                    // Fallback: use minified JSON without compression
+                    console.log('[UPLOAD-TASK] ⚠️ Skipping compression (file too small or CompressionStream unavailable), sending uncompressed JSON');
+                    const blob = new Blob([jsonString], { type: 'application/json' });
+                    file = new File([blob], `${taskId}.json`, { type: 'application/json' });
+                    console.log('[UPLOAD-TASK] ✅ Uncompressed file created:', file.name, file.size, 'bytes');
+                }
+            } catch (compressionError: any) {
+                console.error('[UPLOAD-TASK] ❌ Compression failed, using uncompressed:', compressionError);
+                console.error('[UPLOAD-TASK] 📋 Compression error details:', {
+                    name: compressionError.name,
+                    message: compressionError.message,
+                    stack: compressionError.stack,
+                });
+                // Fallback to uncompressed
+                const blob = new Blob([jsonString], { type: 'application/json' });
+                file = new File([blob], `${taskId}.json`, { type: 'application/json' });
+                console.log('[UPLOAD-TASK] ✅ Fallback uncompressed file created:', file.name, file.size, 'bytes');
+            }
+            
+            console.log('[UPLOAD-TASK] 📋 Final file details:', {
+                name: file.name,
+                type: file.type,
+                size: file.size,
+                sizeMB: (file.size / 1024 / 1024).toFixed(2),
+            });
+
+            // Check if file is still too large (PHP limit is typically 40MB)
+            const MAX_FILE_SIZE = 35 * 1024 * 1024; // 35MB (safety margin below 40MB PHP limit)
+            if (file.size > MAX_FILE_SIZE) {
+                console.warn('[UPLOAD] ⚠️ File still too large after compression:', file.size, 'bytes');
+                console.log('[UPLOAD] 📸 Removing screenshots and webcam photos to reduce size...');
+                
+                // Create a version without screenshots/webcam photos
+                const dataWithoutMedia = {
+                    ...formattedData,
+                    trackingData: {
+                        ...formattedData.trackingData,
+                        screenshots: [], // Remove screenshots
+                        webcamPhotos: [], // Remove webcam photos
+                        summary: {
+                            ...formattedData.trackingData.summary,
+                            // Keep counts for reference
+                            totalScreenshots: formattedData.trackingData.screenshots.length,
+                            totalWebcamPhotos: formattedData.trackingData.webcamPhotos.length,
+                        }
+                    }
+                };
+                
+                const jsonStringNoMedia = JSON.stringify(dataWithoutMedia);
+                const sizeNoMedia = new Blob([jsonStringNoMedia]).size;
+                console.log('[UPLOAD] 📄 Size without media:', sizeNoMedia, 'bytes (', (sizeNoMedia / 1024 / 1024).toFixed(2), 'MB)');
+                
+                // Try compressing the version without media
+                try {
+                    if (typeof CompressionStream !== 'undefined') {
+                        const stream = new CompressionStream('gzip');
+                        const writer = stream.writable.getWriter();
+                        const reader = stream.readable.getReader();
+                        
+                        const encoder = new TextEncoder();
+                        const jsonBytes = encoder.encode(jsonStringNoMedia);
+                        await writer.write(jsonBytes);
+                        await writer.close();
+                        
+                        const chunks: Uint8Array[] = [];
+                        let done = false;
+                        while (!done) {
+                            const { value, done: streamDone } = await reader.read();
+                            done = streamDone;
+                            if (value) {
+                                chunks.push(value);
+                            }
+                        }
+                        
+                        const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+                        const compressed = new Uint8Array(totalLength);
+                        let offset = 0;
+                        for (const chunk of chunks) {
+                            compressed.set(chunk, offset);
+                            offset += chunk.length;
+                        }
+                        
+                        const compressedBlob = new Blob([compressed], { type: 'application/gzip' });
+                        file = new File([compressedBlob], `${taskId}.json.gz`, { type: 'application/gzip' });
+                        console.log('[UPLOAD] ✅ Compressed size without media:', file.size, 'bytes (', (file.size / 1024 / 1024).toFixed(2), 'MB)');
+                    } else {
+                        const blob = new Blob([jsonStringNoMedia], { type: 'application/json' });
+                        file = new File([blob], `${taskId}.json`, { type: 'application/json' });
+                    }
+                } catch (error) {
+                    console.error('[UPLOAD] ❌ Failed to compress without media, using uncompressed:', error);
+                    const blob = new Blob([jsonStringNoMedia], { type: 'application/json' });
+                    file = new File([blob], `${taskId}.json`, { type: 'application/json' });
+                }
+                
+                if (file.size > MAX_FILE_SIZE) {
+                    console.error('[UPLOAD] ❌ File still too large even without media:', file.size, 'bytes');
+                    return { 
+                        success: false, 
+                        error: `File too large (${(file.size / 1024 / 1024).toFixed(2)}MB). Maximum allowed: ${(MAX_FILE_SIZE / 1024 / 1024).toFixed(2)}MB` 
+                    };
+                }
+            }
+
+            // Get workspace ID
+            console.log('[UPLOAD-TASK] 📋 Step 4: Preparing upload parameters...');
+            const workspaceId = currentWorkspace?.workspace_id?.toString();
+            console.log('[UPLOAD-TASK] 📋 Upload parameters:', { 
+                projectId, 
+                taskId, 
+                workspaceId: workspaceId || 'not provided', 
+                fileSize: file.size,
+                fileSizeMB: (file.size / 1024 / 1024).toFixed(2),
+                originalSize: originalSize,
+                originalSizeMB: (originalSize / 1024 / 1024).toFixed(2),
+                compressionRatio: originalSize > 0 ? ((1 - file.size / originalSize) * 100).toFixed(1) + '%' : 'N/A',
+                fileName: file.name,
+                fileType: file.type,
+            });
+
+            // Upload using API
+            console.log(`[UPLOAD-TASK] 📋 Step 5: Calling apiService.uploadTrackingFile...`);
+            console.log(`[UPLOAD-TASK] 📋 Upload parameters:`, {
+                projectId,
+                taskId,
+                workspaceId: workspaceId || 'not provided',
+                fileSize: file.size,
+                fileName: file instanceof File ? file.name : 'blob',
+                fileType: file.type,
+            });
+            
+            const response = await apiService.uploadTrackingFile(projectId, taskId, file, workspaceId);
+            
+            console.log(`[UPLOAD-TASK] 📋 API Response received:`, JSON.stringify(response, null, 2));
+            
+            if (response.success) {
+                const message = response.message || response.data?.message || 'Tracking data queued for processing';
+                console.log(`[UPLOAD-TASK] ✅ Successfully uploaded tracking file for task ${taskId}`);
+                console.log(`[UPLOAD-TASK] 📋 Response message: ${message}`);
+                console.log(`[UPLOAD-TASK] 📋 Response data:`, JSON.stringify(response.data, null, 2));
+                console.log(`[UPLOAD-TASK] ℹ️  Note: File is queued for background processing. Processing typically takes 5-30 seconds.`);
+                console.log(`[UPLOAD-TASK] ========================================`);
+                return { success: true, data: response.data, message };
+            } else {
+                console.error(`[UPLOAD-TASK] ❌ Failed to upload tracking file for task ${taskId}`);
+                console.error(`[UPLOAD-TASK] 📋 Error: ${response.error}`);
+                console.error(`[UPLOAD-TASK] 📋 Full response:`, JSON.stringify(response, null, 2));
+                console.log(`[UPLOAD-TASK] ========================================`);
+                return { success: false, error: response.error };
+            }
+        } catch (error: any) {
+            console.error(`[UPLOAD-TASK] ❌ Exception occurred while uploading task ${taskId}`);
+            console.error(`[UPLOAD-TASK] 📋 Error name:`, error.name);
+            console.error(`[UPLOAD-TASK] 📋 Error message:`, error.message);
+            console.error(`[UPLOAD-TASK] 📋 Error stack:`, error.stack);
+            console.error(`[UPLOAD-TASK] 📋 Full error details:`, {
+                name: error.name,
+                message: error.message,
+                response: error.response?.data,
+                status: error.response?.status,
+                statusText: error.response?.statusText,
+                headers: error.response?.headers,
+                config: {
+                    url: error.config?.url,
+                    method: error.config?.method,
+                    baseURL: error.config?.baseURL,
+                },
+            });
+            console.log(`[UPLOAD-TASK] ========================================`);
+            return { success: false, error: error.message || 'Upload failed' };
+        }
+    };
+
+    // Upload all today's tracking files (memoized with useCallback to prevent useEffect re-runs)
+    const uploadAllTrackingFiles = useCallback(async (showStatus: boolean = false) => {
+        // CRITICAL: Log immediately to verify function is called
+        console.log('[UPLOAD] ========================================');
+        console.log('[UPLOAD] 🔄 uploadAllTrackingFiles STARTED - FUNCTION CALLED!');
+        console.log('[UPLOAD] 📋 Parameters:', { showStatus, timestamp: new Date().toISOString() });
+        console.log('[UPLOAD] 📋 Function context:', {
+            hasWindow: typeof window !== 'undefined',
+            hasLocalStorage: typeof localStorage !== 'undefined',
+            hasElectronAPI: !!window?.electronAPI,
+        });
+        console.log('[UPLOAD] ========================================');
+        
+        // Check authentication using multiple methods (more reliable)
+        const isAuthFromState = authState.isAuthenticated();
+        const hasLoginToken = !!localStorage.getItem('login_token');
+        const isUserCheckedIn = user?.isCheckedIn || false;
+        
+        console.log('[UPLOAD] 🔐 Authentication checks:', {
+            isAuthFromState,
+            hasLoginToken,
+            isUserCheckedIn,
+            authStateDataIsAuth: authStateData.isAuthenticated,
+            hasElectronAPI: !!window.electronAPI,
+            hasGetTodayTasks: !!window.electronAPI?.getTodayTasks,
+            currentWorkspace: currentWorkspace?.workspace_id || 'none',
+        });
+
+        // Allow upload if user is checked in OR authenticated OR has login token
+        const isAuthenticated = isAuthFromState || hasLoginToken || isUserCheckedIn;
+        
+        if (!isAuthenticated || !window.electronAPI?.getTodayTasks) {
+            const errorMsg = 'Not authenticated or API not available';
+            console.error('[UPLOAD] ❌', errorMsg, {
+                isAuthFromState,
+                hasLoginToken,
+                isUserCheckedIn,
+                authStateDataIsAuth: authStateData.isAuthenticated,
+                hasElectronAPI: !!window.electronAPI,
+                hasGetTodayTasks: !!window.electronAPI?.getTodayTasks,
+            });
+            if (showStatus) {
+                setSyncStatus('error');
+                setSyncMessage(errorMsg);
+                setIsSyncing(false);
+            }
+            return;
+        }
+
+        if (showStatus) {
+            setIsSyncing(true);
+            setSyncStatus('idle');
+            setSyncMessage('Starting sync...');
+        }
+
+        try {
+            // Verify login token before starting
+            const loginToken = localStorage.getItem('login_token');
+            console.log('[UPLOAD] Token check:', {
+                hasToken: !!loginToken,
+                tokenLength: loginToken?.length || 0,
+            });
+            if (!loginToken) {
+                const errorMsg = 'No authentication token found. Please check in again.';
+                console.error('[UPLOAD] ❌', errorMsg);
+                if (showStatus) {
+                    setSyncStatus('error');
+                    setSyncMessage(errorMsg);
+                    setIsSyncing(false);
+                }
+                return;
+            }
+
+            console.log('[UPLOAD] 📋 Step 1: Getting today\'s tasks from Electron...');
+            const todayTasks = await window.electronAPI.getTodayTasks();
+            console.log('[UPLOAD] 📋 Today\'s tasks received:', JSON.stringify(todayTasks, null, 2));
+            console.log('[UPLOAD] 📊 Task count:', todayTasks.length);
+            
+            if (todayTasks.length === 0) {
+                const msg = 'No tasks to upload';
+                console.log('[UPLOAD] ⚠️', msg);
+                if (showStatus) {
+                    setSyncStatus('success');
+                    setSyncMessage('No tasks to sync');
+                    setIsSyncing(false);
+                    setLastSyncTime(new Date());
+                }
+                return;
+            }
+
+            console.log(`[UPLOAD] 📋 Step 2: Starting upload of ${todayTasks.length} tracking file(s)...`);
+            if (showStatus) {
+                setSyncMessage(`Syncing ${todayTasks.length} task(s)...`);
+            }
+
+            let successCount = 0;
+            let errorCount = 0;
+            const errors: string[] = [];
+
+            for (let i = 0; i < todayTasks.length; i++) {
+                const task = todayTasks[i];
+                console.log(`[UPLOAD] ========================================`);
+                console.log(`[UPLOAD] 📤 Task ${i + 1}/${todayTasks.length}: ${task.taskId} (project: ${task.projectId})`);
+                console.log(`[UPLOAD] 📋 Task details:`, JSON.stringify(task, null, 2));
+                
+                try {
+                    console.log(`[UPLOAD] 🔄 Calling uploadTrackingFileForTask...`);
+                    const result = await uploadTrackingFileForTask(task.projectId, task.taskId);
+                    console.log(`[UPLOAD] 📋 Task ${task.taskId} upload result:`, JSON.stringify(result, null, 2));
+                    
+                    if (result.success) {
+                        successCount++;
+                        console.log(`[UPLOAD] ✅ Task ${task.taskId} uploaded successfully!`);
+                        console.log(`[UPLOAD] 📋 Response message: ${result.message || 'No message'}`);
+                    } else {
+                        errorCount++;
+                        const errorMsg = `Task ${task.taskId}: ${result.error || 'Unknown error'}`;
+                        errors.push(errorMsg);
+                        console.error(`[UPLOAD] ❌ Task ${task.taskId} failed:`, errorMsg);
+                        console.error(`[UPLOAD] 📋 Full error details:`, result);
+                    }
+                } catch (taskError: any) {
+                    errorCount++;
+                    const errorMsg = `Task ${task.taskId}: ${taskError.message || 'Exception occurred'}`;
+                    errors.push(errorMsg);
+                    console.error(`[UPLOAD] ❌ Task ${task.taskId} exception:`, taskError);
+                    console.error(`[UPLOAD] 📋 Exception stack:`, taskError.stack);
+                    console.error(`[UPLOAD] 📋 Exception details:`, {
+                        name: taskError.name,
+                        message: taskError.message,
+                        response: taskError.response?.data,
+                        status: taskError.response?.status,
+                    });
+                }
+                console.log(`[UPLOAD] ========================================`);
+            }
+
+            const summary = `${successCount} succeeded, ${errorCount} failed`;
+            console.log(`[UPLOAD] ========================================`);
+            console.log(`[UPLOAD] ✅ Upload complete: ${summary}`);
+            console.log(`[UPLOAD] 📊 Success count: ${successCount}`);
+            console.log(`[UPLOAD] 📊 Error count: ${errorCount}`);
+            if (errors.length > 0) {
+                console.log(`[UPLOAD] 📋 Errors:`, errors);
+            }
+            console.log(`[UPLOAD] ========================================`);
+
+            if (showStatus) {
+                if (errorCount === 0) {
+                    setSyncStatus('success');
+                    setSyncMessage(`Successfully synced ${successCount} task(s)`);
+                } else if (successCount > 0) {
+                    setSyncStatus('error');
+                    setSyncMessage(`${successCount} succeeded, ${errorCount} failed`);
+                } else {
+                    setSyncStatus('error');
+                    setSyncMessage(`All uploads failed: ${errors[0] || 'Unknown error'}`);
+                }
+                setIsSyncing(false);
+                setLastSyncTime(new Date());
+                
+                // Clear status message after 3 seconds
+                setTimeout(() => {
+                    setSyncStatus('idle');
+                    setSyncMessage('');
+                }, 3000);
+            }
+        } catch (error: any) {
+            const errorMsg = error.message || 'Upload failed';
+            console.error('[UPLOAD] Error uploading tracking files:', error);
+            if (showStatus) {
+                setSyncStatus('error');
+                setSyncMessage(errorMsg);
+                setIsSyncing(false);
+            }
+        }
+    }, [authStateData.isAuthenticated, currentWorkspace?.workspace_id]); // Removed user?.isCheckedIn - checked inside function
+
+    // Store upload function in ref to prevent useEffect re-runs
+    const uploadAllTrackingFilesRef = useRef(uploadAllTrackingFiles);
+    uploadAllTrackingFilesRef.current = uploadAllTrackingFiles;
+
+    // Periodic upload of tracking files (every 1 minute)
+    useEffect(() => {
+        console.log('[AUTO-SYNC] 🔍 useEffect triggered - checking conditions...');
+        console.log('[AUTO-SYNC] 📋 Auth state:', {
+            isAuthenticated: authStateData.isAuthenticated,
+            workspaceId: currentWorkspace?.workspace_id || 'none',
+            hasUploadFunction: typeof uploadAllTrackingFilesRef.current === 'function',
+            timestamp: new Date().toISOString()
+        });
+
+        if (!authStateData.isAuthenticated) {
+            console.log('[AUTO-SYNC] ⏸️ Auto-sync disabled: Not authenticated');
+            return;
+        }
+
+        console.log('[AUTO-SYNC] ✅ Auto-sync ENABLED - setting up intervals');
+        console.log('[AUTO-SYNC] ⏱️ Initial sync: 30 seconds');
+        console.log('[AUTO-SYNC] ⏱️ Periodic sync: Every 60 seconds (1 minute)');
+
+        let initialTimeout: NodeJS.Timeout | null = null;
+        let interval: NodeJS.Timeout | null = null;
+
+        // Initial upload after 30 seconds (to allow some data to accumulate)
+        initialTimeout = setTimeout(() => {
+            console.log('[AUTO-SYNC] 🚀 Initial sync triggered (30 seconds after auth)');
+            console.log('[AUTO-SYNC] 📞 Calling uploadAllTrackingFiles(false)...');
+            uploadAllTrackingFilesRef.current(false).catch(err => {
+                console.error('[AUTO-SYNC] ❌ Initial sync failed:', err);
+            });
+        }, 30000); // 30 seconds
+        console.log('[AUTO-SYNC] ✅ Initial timeout set:', initialTimeout);
+
+        // Then upload every 1 minute
+        interval = setInterval(() => {
+            console.log('[AUTO-SYNC] ========================================');
+            console.log('[AUTO-SYNC] 🔄 Periodic sync triggered (every 1 minute)');
+            console.log('[AUTO-SYNC] ⏰ Current time:', new Date().toISOString());
+            console.log('[AUTO-SYNC] 📞 Calling uploadAllTrackingFiles(false)...');
+            uploadAllTrackingFilesRef.current(false).catch(err => {
+                console.error('[AUTO-SYNC] ❌ Periodic sync failed:', err);
+            });
+        }, 60000); // 1 minute
+        console.log('[AUTO-SYNC] ✅ Periodic interval set:', interval);
+        console.log('[AUTO-SYNC] ✅ Interval ID:', interval);
+
+        // Verify interval is actually set
+        console.log('[AUTO-SYNC] 🔍 Verification:', {
+            hasInitialTimeout: !!initialTimeout,
+            hasInterval: !!interval,
+            intervalType: typeof interval,
+            nextSyncIn: '60 seconds'
+        });
+
+        return () => {
+            console.log('[AUTO-SYNC] 🛑 Auto-sync stopped (cleanup)');
+            console.log('[AUTO-SYNC] 🛑 Clearing timeout:', initialTimeout);
+            console.log('[AUTO-SYNC] 🛑 Clearing interval:', interval);
+            if (initialTimeout) {
+                clearTimeout(initialTimeout);
+            }
+            if (interval) {
+                clearInterval(interval);
+            }
+        };
+    }, [authStateData.isAuthenticated, currentWorkspace?.workspace_id]); // Removed uploadAllTrackingFiles from deps - using ref instead
+
+    // Fetch current status on mount and when authenticated
+    useEffect(() => {
+        if (authStateData.isAuthenticated) {
+            const loadCurrentStatus = async () => {
+                try {
+                    const response = await apiService.getCurrentStatus();
+                    if (response.success && response.data) {
+                        const status = response.data.status;
+                        if (status && ['idle', 'working', 'break', 'meeting', 'away'].includes(status)) {
+                            setUserStatus(status as UserStatus);
+                            console.log('[STATUS] Loaded current status:', status);
+                        }
+                    }
+                } catch (error) {
+                    console.error('[STATUS] Error loading current status:', error);
+                }
+            };
+            loadCurrentStatus();
+        }
+    }, [authStateData.isAuthenticated]);
+
+    // Update status on API when user status changes
+    useEffect(() => {
+        if (authStateData.isAuthenticated && userStatus) {
+            const updateStatus = async () => {
+                try {
+                    const workspaceId = currentWorkspace?.workspace_id?.toString();
+                    await apiService.updateStatus({
+                        status: userStatus,
+                        workspace_id: workspaceId,
+                        metadata: {
+                            task_id: selectedTaskId || undefined,
+                            project_id: selectedProjectId || undefined,
+                        },
+                    });
+                    console.log('[STATUS] Updated status to:', userStatus);
+                } catch (error) {
+                    console.error('[STATUS] Error updating status:', error);
+                }
+            };
+            
+            // Debounce status updates to avoid too many API calls
+            const timeoutId = setTimeout(updateStatus, 500);
+            return () => clearTimeout(timeoutId);
+        }
+    }, [userStatus, selectedTaskId, selectedProjectId, currentWorkspace?.workspace_id]);
 
     // Surveillance Hook - Only active if user has consented AND status is working
     const { 
@@ -192,10 +979,252 @@ const App: React.FC = () => {
         });
     }, [timeEntries.length]); // Only recalculate when entries count changes, not on every render
 
-    // Initialize auth state on mount
+    // Initialize auth state on mount - check authentication BEFORE showing login page
     useEffect(() => {
         const initAuth = async () => {
             setWorkspacesLoading(true);
+            
+            // FIRST: Check localStorage for authentication data (fastest check)
+            const loginToken = localStorage.getItem('login_token');
+            const authFullResponse = localStorage.getItem('auth_full_response');
+            
+            if (loginToken || authFullResponse) {
+                console.log('[APP] Found authentication data in localStorage');
+                
+                try {
+                    let userData = null;
+                    let workspaces = [];
+                    let currentWorkspace = null;
+                    
+                    if (authFullResponse) {
+                        try {
+                            const fullResponse = JSON.parse(authFullResponse);
+                            
+                            // Handle different response structures
+                            // Structure 1: { result: true, data: { ... } }
+                            // Structure 2: { data: { ... } }
+                            // Structure 3: Direct data object
+                            if (fullResponse.data) {
+                                userData = fullResponse.data;
+                                workspaces = fullResponse.data.workspaces || [];
+                            } else if (fullResponse.workspaces) {
+                                // Direct workspaces array
+                                userData = fullResponse;
+                                workspaces = fullResponse.workspaces || [];
+                            } else {
+                                // Try root level
+                                userData = fullResponse;
+                                workspaces = [];
+                            }
+                            
+                            // Find current workspace - prefer general workspace
+                            if (workspaces.length > 0) {
+                                currentWorkspace = workspaces.find((w: any) => 
+                                    w.workspace_is_general === true || w.workspace_is_general === 1
+                                ) || workspaces[0];
+                                
+                                console.log('[APP] Found workspace from localStorage:', {
+                                    workspaceName: currentWorkspace.workspace_name,
+                                    domain: currentWorkspace.domain,
+                                    isGeneral: currentWorkspace.workspace_is_general
+                                });
+                            } else {
+                                console.warn('[APP] ⚠️ No workspaces found in localStorage auth_full_response');
+                            }
+                        } catch (parseError) {
+                            console.error('[APP] Error parsing auth_full_response from localStorage:', parseError);
+                            // Continue with other checks
+                        }
+                    }
+                    
+                    // If we have user data from localStorage, restore state immediately
+                    if (userData && userData.id) {
+                        console.log('[APP] ✅ Restoring authentication from localStorage');
+                        
+                        const authenticatedUser: AuthenticatedUser = {
+                            id: userData.id,
+                            name: userData.name,
+                            email: userData.email,
+                            avatar: userData.avatar,
+                            company_id: userData.company_id,
+                            department_id: userData.department_id,
+                            department_name: userData.department_name,
+                            is_admin: userData.is_admin,
+                            is_hr: userData.is_hr,
+                            is_face_registered: userData.is_face_registered,
+                            phone: userData.phone,
+                        };
+                        
+                        // Ensure we have a current workspace
+                        if (!currentWorkspace && workspaces.length > 0) {
+                            // Try to find general workspace or use first one
+                            currentWorkspace = workspaces.find((w: any) => 
+                                w.workspace_is_general === true || w.workspace_is_general === 1
+                            ) || workspaces[0];
+                            console.log('[APP] Selected workspace from localStorage:', {
+                                name: currentWorkspace?.workspace_name,
+                                domain: currentWorkspace?.domain,
+                                id: currentWorkspace?.workspace_id
+                            });
+                        }
+                        
+                        // Validate workspace has domain
+                        if (currentWorkspace && !currentWorkspace.domain) {
+                            console.warn('[APP] ⚠️ Workspace found but no domain property');
+                            // Try to get from workspaces_detailed if available in JWT token
+                            if (userData.workspaces_detailed && userData.workspaces_detailed.length > 0) {
+                                const detailedWorkspace = userData.workspaces_detailed.find((w: any) => 
+                                    w.workspace_id === currentWorkspace.workspace_id || w.tenant_id === currentWorkspace.tenant_id
+                                );
+                                if (detailedWorkspace && detailedWorkspace.domain) {
+                                    currentWorkspace.domain = detailedWorkspace.domain;
+                                    console.log('[APP] ✅ Extracted domain from workspaces_detailed:', detailedWorkspace.domain);
+                                }
+                            }
+                        }
+                        
+                        // Parse full response for authState
+                        let fullResponseParsed = null;
+                        try {
+                            if (authFullResponse) {
+                                fullResponseParsed = JSON.parse(authFullResponse);
+                            }
+                        } catch (error) {
+                            console.error('[APP] Error parsing fullResponse for authState:', error);
+                        }
+                        
+                        // Update auth state with workspace
+                        authState.setAuthData(
+                            authenticatedUser,
+                            workspaces as Workspace[],
+                            loginToken || '',
+                            Date.now() + 604800000, // 7 days default
+                            currentWorkspace?.workspace_id,
+                            fullResponseParsed // Include full response
+                        );
+                        
+                        // Update user state immediately
+                        setAuthenticatedUser(authenticatedUser);
+                        setWorkspaces(workspaces as Workspace[]);
+                        if (currentWorkspace) {
+                            setCurrentWorkspace(currentWorkspace as Workspace);
+                            console.log('[APP] ✅ Current workspace set:', {
+                                name: currentWorkspace.workspace_name,
+                                domain: currentWorkspace.domain,
+                                id: currentWorkspace.workspace_id
+                            });
+                            
+                            // Verify domain is set
+                            if (!currentWorkspace.domain) {
+                                console.error('[APP] ❌ CRITICAL: Workspace domain is missing!');
+                                console.error('[APP] Workspace object:', currentWorkspace);
+                            }
+                        } else {
+                            console.warn('[APP] ⚠️ No workspace available after restoring from localStorage');
+                        }
+                        
+                        // Set user data
+                        setUser({
+                            id: authenticatedUser.id.toString(),
+                            name: authenticatedUser.name,
+                            avatar: authenticatedUser.avatar || 'https://picsum.photos/100/100',
+                            isCheckedIn: false,
+                        });
+                        
+                        // Verify workspace domain is available
+                        let workspaceDomain = authState.getWorkspaceDomain();
+                        if (!workspaceDomain) {
+                            console.warn('[APP] ⚠️ Workspace domain not available from authState, checking directly...');
+                            
+                            // Try to get domain directly from currentWorkspace
+                            if (currentWorkspace && currentWorkspace.domain) {
+                                workspaceDomain = currentWorkspace.domain;
+                                console.log('[APP] ✅ Got workspace domain directly from currentWorkspace:', workspaceDomain);
+                                
+                                // Force update authState with workspace domain
+                                if (authState.getState().isAuthenticated) {
+                                    try {
+                                        authState.setAuthData(
+                                            authenticatedUser,
+                                            workspaces as Workspace[],
+                                            loginToken || '',
+                                            Date.now() + 604800000,
+                                            currentWorkspace.workspace_id,
+                                            fullResponseParsed
+                                        );
+                                        console.log('[APP] ✅ Re-set authState with workspace domain');
+                                    } catch (error) {
+                                        console.error('[APP] Error re-setting authState:', error);
+                                    }
+                                }
+                            } else {
+                                console.error('[APP] ⚠️ Workspace domain not available after restore!');
+                                console.error('[APP] Current workspace:', currentWorkspace);
+                                console.error('[APP] Workspaces:', workspaces);
+                                console.error('[APP] Full response structure:', fullResponseParsed);
+                            }
+                        } else {
+                            console.log('[APP] ✅ Workspace domain available:', workspaceDomain);
+                        }
+                        
+                        // Redirect to check-in page IMMEDIATELY - don't show login page
+                        console.log('[APP] Redirecting to check-in page (restored from localStorage)');
+                        setView(AppView.CHECK_IN_OUT);
+                        setWorkspacesLoading(false);
+                        return; // Don't continue with other checks
+                    }
+                } catch (error) {
+                    console.error('[APP] Error parsing localStorage auth data:', error);
+                    // Continue with other checks if localStorage parse fails
+                }
+            }
+            
+            // SECOND: Check authentication status from main process (keytar)
+            if (window.electronAPI) {
+                try {
+                    const status = await window.electronAPI.oauthCheckStatus();
+                    if (status.authenticated && status.user) {
+                        console.log('[APP] ✅ User is already authenticated on app load (from keytar)');
+                        // Update auth state immediately
+                        if (status.user && status.workspaces) {
+                            authState.setAuthData(
+                                status.user as AuthenticatedUser,
+                                status.workspaces as Workspace[],
+                                '', // Token is stored in main process
+                                status.expires_at || Date.now() + 604800000,
+                                status.currentWorkspace?.workspace_id
+                            );
+                        }
+                        
+                        // Update user state immediately
+                        setAuthenticatedUser(status.user as AuthenticatedUser);
+                        setWorkspaces(status.workspaces as Workspace[] || []);
+                        if (status.currentWorkspace) {
+                            setCurrentWorkspace(status.currentWorkspace as Workspace);
+                        }
+                        
+                        // Set user data
+                        setUser({
+                            id: status.user.id.toString(),
+                            name: status.user.name,
+                            avatar: status.user.avatar || 'https://picsum.photos/100/100',
+                            isCheckedIn: false,
+                        });
+                        
+                        // Redirect to check-in page IMMEDIATELY - don't show login page
+                        console.log('[APP] Redirecting to check-in page (already authenticated)');
+                        setView(AppView.CHECK_IN_OUT);
+                        setWorkspacesLoading(false);
+                        return; // Don't continue with authState.initialize() if already authenticated
+                    } else {
+                        console.log('[APP] User is not authenticated, showing login page');
+                    }
+                } catch (error) {
+                    console.error('[APP] Error checking auth status on init:', error);
+                }
+            }
+            
+            // If not authenticated, initialize authState normally
             await authState.initialize();
             setWorkspacesLoading(false);
             
@@ -224,7 +1253,7 @@ const App: React.FC = () => {
                     console.warn('[APP] ⚠️ No workspaces in auth state but user is authenticated!');
                 }
                 
-                // If authenticated and user data available, update local user state and navigate to dashboard
+                // If authenticated and user data available, update local user state and navigate
                 if (state.isAuthenticated && state.user) {
                     setUser({
                         id: state.user.id.toString(),
@@ -233,8 +1262,9 @@ const App: React.FC = () => {
                         isCheckedIn: false,
                     });
                     
-                    // If on login view and authenticated, go to check-in view
+                    // If on login view and authenticated, go to check-in view IMMEDIATELY
                     if (view === AppView.LOGIN) {
+                        console.log('[APP] Redirecting from login to check-in (authenticated)');
                         setView(AppView.CHECK_IN_OUT);
                     }
                 }
@@ -414,28 +1444,76 @@ const App: React.FC = () => {
                 setElapsedSeconds(0);
             }
             
-            // Call device logout API first (unlinks device from server)
-            if (window.electronAPI?.oauthDeviceLogout) {
-                try {
-                    const deviceLogoutResult = await window.electronAPI.oauthDeviceLogout();
-                    if (deviceLogoutResult.success) {
-                        console.log('[APP] ✅ Device unlinked from server:', deviceLogoutResult.message);
-                    } else {
-                        console.warn('[APP] ⚠️ Device logout API failed:', deviceLogoutResult.error);
-                        // Continue with local logout even if API call fails
+            // STEP 1: Call device logout API FIRST (unlinks device from server)
+            // According to documentation: POST /api/V11/auth/device/logout
+            // Uses JWT Token (login_token) from localStorage as Bearer token
+            // Works from ANY domain (main or subdomain)
+            // WAIT for success response before proceeding with local logout
+            let deviceLogoutSuccess = false;
+            
+            // Get login_token (Bearer token) from localStorage
+            // According to documentation, this is the Bearer token to use for logout API
+            let bearerToken = localStorage.getItem('login_token');
+            
+            if (!bearerToken) {
+                // Try to get from auth_full_response as fallback
+                const authFullResponse = localStorage.getItem('auth_full_response');
+                if (authFullResponse) {
+                    try {
+                        const parsed = JSON.parse(authFullResponse);
+                        // Try multiple paths: login_token, data.login_token
+                        bearerToken = parsed.login_token || parsed.data?.login_token || null;
+                    } catch (e) {
+                        console.error('[APP] Error parsing auth_full_response:', e);
                     }
-                } catch (error) {
-                    console.error('[APP] Error calling device logout API:', error);
-                    // Continue with local logout even if API call fails
                 }
             }
+            
+            console.log('[APP] Using login_token (Bearer token) for logout:', bearerToken ? `${bearerToken.substring(0, 20)}...` : 'not found');
+            
+            if (window.electronAPI?.oauthDeviceLogout) {
+                try {
+                    console.log('[APP] Calling device logout API on main domain...');
+                    // Pass the login_token (Bearer token) to the main process
+                    const deviceLogoutResult = await window.electronAPI.oauthDeviceLogout(bearerToken);
+                    
+                    if (deviceLogoutResult.success) {
+                        console.log('[APP] ✅ Device logout API success:', deviceLogoutResult.message);
+                        deviceLogoutSuccess = true;
+                    } else {
+                        console.error('[APP] ❌ Device logout API failed:', deviceLogoutResult.error);
+                        // Don't proceed with logout if API fails
+                        alert(`Logout failed: ${deviceLogoutResult.error || 'Device logout API returned an error'}. Please try again.`);
+                        return; // Exit - don't clear localStorage or logout
+                    }
+                } catch (error: any) {
+                    console.error('[APP] ❌ Error calling device logout API:', error);
+                    // Don't proceed with logout if API call throws error
+                    const errorMessage = error?.message || error?.error || 'Failed to call device logout API';
+                    alert(`Logout failed: ${errorMessage}. Please try again.`);
+                    return; // Exit - don't clear localStorage or logout
+                }
+            } else {
+                console.warn('[APP] ⚠️ oauthDeviceLogout API not available');
+                // If API is not available, we can't proceed safely
+                alert('Logout API is not available. Please try again.');
+                return; // Exit - don't clear localStorage or logout
+            }
+            
+            // STEP 2: Only proceed with local logout if device logout API was successful
+            if (!deviceLogoutSuccess) {
+                console.error('[APP] ❌ Device logout API did not succeed, aborting logout');
+                return; // Don't proceed
+            }
+            
+            console.log('[APP] Device logout API succeeded, proceeding with local logout...');
             
             // Clear tokens from local storage (keytar)
             if (window.electronAPI?.oauthLogout) {
                 try {
                     const result = await window.electronAPI.oauthLogout();
                     if (result.success) {
-                        console.log('[APP] ✅ Tokens cleared from storage');
+                        console.log('[APP] ✅ Tokens cleared from keytar storage');
                     } else {
                         console.warn('[APP] ⚠️ Local logout failed:', result.error);
                     }
@@ -444,9 +1522,14 @@ const App: React.FC = () => {
                 }
             }
             
-            // Clear localStorage (login_token)
+            // Clear localStorage (login_token, device codes, etc.)
             localStorage.removeItem('login_token');
-            console.log('[APP] ✅ Cleared login_token from localStorage');
+            localStorage.removeItem('device_token');
+            localStorage.removeItem('device_code');
+            localStorage.removeItem('user_code');
+            localStorage.removeItem('device_code_data');
+            localStorage.removeItem('auth_full_response');
+            console.log('[APP] ✅ Cleared all auth data from localStorage');
             
             // Clear auth state
             authState.clearAuth();
@@ -464,9 +1547,8 @@ const App: React.FC = () => {
             console.log('[APP] ✅ Logout complete - ready for new login');
         } catch (error) {
             console.error('[APP] Error during logout:', error);
-            // Still navigate to login even if logout fails
-            setView(AppView.LOGIN);
-            setShowUserMenu(false);
+            // Don't navigate to login if logout process failed
+            alert('An error occurred during logout. Please try again.');
         }
     };
 
@@ -916,14 +1998,50 @@ const App: React.FC = () => {
                             // Second check: Is the video element receiving the stream and has valid dimensions?
                             const video = hiddenCamVideoRef.current;
                             
-                            // Wait for video to have valid dimensions (stream is flowing)
+                            // Ensure video is playing (required for metadata to load)
+                            if (video.paused) {
+                                console.log('Video is paused, attempting to play...');
+                                try {
+                                    await video.play();
+                                    console.log('Video play() called successfully');
+                                } catch (playError) {
+                                    console.warn('Video play() failed (may be autoplay blocked):', playError);
+                                }
+                            }
+                            
+                            // Wait for metadata to load using event listener (more reliable than polling)
+                            const waitForMetadata = new Promise<void>((resolve) => {
+                                if (video.readyState >= 2 && video.videoWidth >= 100 && video.videoHeight >= 100) {
+                                    resolve();
+                                    return;
+                                }
+                                
+                                const onLoadedMetadata = () => {
+                                    if (video.videoWidth >= 100 && video.videoHeight >= 100) {
+                                        video.removeEventListener('loadedmetadata', onLoadedMetadata);
+                                        resolve();
+                                    }
+                                };
+                                
+                                video.addEventListener('loadedmetadata', onLoadedMetadata);
+                                
+                                // Fallback timeout after 5 seconds
+                                setTimeout(() => {
+                                    video.removeEventListener('loadedmetadata', onLoadedMetadata);
+                                    resolve();
+                                }, 5000);
+                            });
+                            
+                            await waitForMetadata;
+                            
+                            // Additional polling wait for dimensions (in case event didn't fire)
                             let attempts = 0;
-                            const maxAttempts = 15; // Wait up to 3 seconds
+                            const maxAttempts = 25; // Wait up to 5 seconds total
                             while (attempts < maxAttempts && (video.videoWidth < 100 || video.videoHeight < 100 || video.readyState < 2)) {
                                 await new Promise(resolve => setTimeout(resolve, 200));
                                 attempts++;
                                 if (attempts % 5 === 0) {
-                                    console.log(`Waiting for video element to receive stream... (attempt ${attempts}/${maxAttempts}, dimensions: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState})`);
+                                    console.log(`Waiting for video element to receive stream... (attempt ${attempts}/${maxAttempts}, dimensions: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}, paused: ${video.paused})`);
                                 }
                             }
                             
@@ -932,14 +2050,33 @@ const App: React.FC = () => {
                                 cameraReady = true;
                                 console.log(`Camera ready: stream tracks live, video element ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
                             } else {
-                                console.error('Video element not ready after waiting (needed to capture photo):', {
-                                    videoWidth: video.videoWidth,
-                                    videoHeight: video.videoHeight,
-                                    readyState: video.readyState,
-                                    srcObject: !!video.srcObject,
-                                    hasLiveTracks: hasLiveTracks,
-                                    attempts: attempts
-                                });
+                                // Last attempt: try to force play and reload
+                                console.warn('Video still not ready, attempting final recovery...');
+                                try {
+                                    video.pause();
+                                    video.srcObject = null;
+                                    await new Promise(resolve => setTimeout(resolve, 100));
+                                    video.srcObject = activeCameraStream;
+                                    await video.play();
+                                    await new Promise(resolve => setTimeout(resolve, 1000));
+                                    
+                                    if (video.videoWidth >= 100 && video.videoHeight >= 100 && video.readyState >= 2) {
+                                        cameraReady = true;
+                                        console.log(`Camera ready after recovery: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
+                                    } else {
+                                        console.error('Video element not ready after waiting and recovery attempt:', {
+                                            videoWidth: video.videoWidth,
+                                            videoHeight: video.videoHeight,
+                                            readyState: video.readyState,
+                                            srcObject: !!video.srcObject,
+                                            hasLiveTracks: hasLiveTracks,
+                                            paused: video.paused,
+                                            attempts: attempts
+                                        });
+                                    }
+                                } catch (recoveryError) {
+                                    console.error('Recovery attempt failed:', recoveryError);
+                                }
                             }
                         }
                     } else if (needsWebcam) {
@@ -1252,7 +2389,7 @@ const App: React.FC = () => {
             const endTime = new Date();
             const start = startTime ? new Date(startTime) : new Date();
             
-            const selectedTask = MOCK_TASKS.find(t => t.id === selectedTaskId);
+            const selectedTask = tasks.find(t => t.id === selectedTaskId);
             const taskName = selectedTask?.name || description || '(No description)';
             
             // Calculate current session duration
@@ -1327,7 +2464,7 @@ const App: React.FC = () => {
                 
                 // If task is not in today's list, add it now
                 if (!taskAlreadyListed) {
-                    const selectedTask = MOCK_TASKS.find(t => t.id === selectedTaskId);
+                    const selectedTask = tasks.find(t => t.id === selectedTaskId);
                     const taskName = selectedTask?.name || description || '(No description)';
                     const now = new Date();
                     
@@ -1426,6 +2563,23 @@ const App: React.FC = () => {
                     // Stop camera
                     stopCamera();
                     
+                    // Fetch projects and tasks after successful check-in
+                    // Get workspace from authState directly (more reliable)
+                    const workspace = authState.getCurrentWorkspace();
+                    const workspaceId = workspace?.workspace_id?.toString() || currentWorkspace?.workspace_id?.toString();
+                    
+                    if (workspaceId) {
+                        console.log('[CHECK-IN] Fetching projects and tasks after check-in...', { workspaceId });
+                        // Use Promise.all to fetch both in parallel
+                        await Promise.all([
+                            fetchProjects(workspaceId),
+                            fetchTasks(undefined, workspaceId)
+                        ]);
+                        console.log('[CHECK-IN] ✅ Projects and tasks fetched successfully');
+                    } else {
+                        console.warn('[CHECK-IN] ⚠️ No workspace ID available, cannot fetch projects/tasks');
+                    }
+                    
                     // Navigate to dashboard
                     setView(AppView.DASHBOARD);
                 } else {
@@ -1480,6 +2634,13 @@ const App: React.FC = () => {
 
     // OAuth login handler
     const handleOAuthLogin = async () => {
+        // CRITICAL: Don't start OAuth if already authenticated
+        if (authenticatedUser) {
+            console.log('[APP] ⚠️ handleOAuthLogin called but user is already authenticated, redirecting...');
+            setView(AppView.CHECK_IN_OUT);
+            return;
+        }
+        
         if (!window.electronAPI) {
             setLoginOAuthStatus('Electron API not available');
             return;
@@ -1504,6 +2665,68 @@ const App: React.FC = () => {
             });
         }
 
+        // Check if user is already authenticated BEFORE starting new OAuth flow
+        // This prevents "code_already_used" error
+        try {
+            console.log('[APP] Checking authentication status before starting OAuth...');
+            const status = await window.electronAPI.oauthCheckStatus();
+            console.log('[APP] Auth check result:', {
+                authenticated: status.authenticated,
+                hasUser: !!status.user,
+                hasWorkspaces: !!status.workspaces,
+                workspacesCount: status.workspaces?.length || 0
+            });
+            
+            if (status.authenticated && status.user) {
+                console.log('[APP] ✅ User is already authenticated, skipping OAuth flow completely');
+                // Update auth state
+                if (status.user && status.workspaces) {
+                    authState.setAuthData(
+                        status.user as AuthenticatedUser,
+                        status.workspaces as Workspace[],
+                        '', // Token is stored in main process
+                        status.expires_at || Date.now() + 604800000,
+                        status.currentWorkspace?.workspace_id
+                    );
+                }
+                
+                // Update user state
+                setAuthenticatedUser(status.user as AuthenticatedUser);
+                setWorkspaces(status.workspaces as Workspace[] || []);
+                if (status.currentWorkspace) {
+                    setCurrentWorkspace(status.currentWorkspace as Workspace);
+                }
+                
+                // Set user data
+                setUser({
+                    id: status.user.id.toString(),
+                    name: status.user.name,
+                    avatar: status.user.avatar || 'https://picsum.photos/100/100',
+                    isCheckedIn: false,
+                });
+                
+                // Clear status and redirect IMMEDIATELY
+                setLoginOAuthStatus('');
+                setLoginAuthenticating(false);
+                
+                // Redirect IMMEDIATELY - no setTimeout delay
+                if (user?.isCheckedIn) {
+                    console.log('[APP] Already authenticated and checked in, redirecting to dashboard');
+                    setView(AppView.DASHBOARD);
+                } else {
+                    console.log('[APP] Already authenticated but not checked in, redirecting to check-in page');
+                    setView(AppView.CHECK_IN_OUT);
+                }
+                return; // CRITICAL: Don't start new OAuth flow - exit function immediately
+            } else {
+                console.log('[APP] User is NOT authenticated, proceeding with OAuth flow');
+            }
+        } catch (error) {
+            console.error('[APP] Error checking auth status:', error);
+            // If check fails, we can't be sure if authenticated, so proceed with OAuth
+            // But log the error for debugging
+        }
+
         setLoginAuthenticating(true);
         setLoginDeviceCode(null);
         setLoginOAuthStatus('Starting authentication...');
@@ -1512,6 +2735,32 @@ const App: React.FC = () => {
         if (window.electronAPI.onOAuthDeviceCode) {
             window.electronAPI.onOAuthDeviceCode((data) => {
                 setLoginDeviceCode(data);
+                
+                // Store device_code and user_code in localStorage
+                if (data.device_code) {
+                    localStorage.setItem('device_code', data.device_code);
+                    console.log('[APP] Saved device_code to localStorage');
+                }
+                if (data.user_code) {
+                    localStorage.setItem('user_code', data.user_code);
+                    console.log('[APP] Saved user_code to localStorage');
+                }
+                
+                // Store device code data with expiration
+                if (data.device_code && data.expires_in) {
+                    const deviceCodeData = {
+                        device_code: data.device_code,
+                        user_code: data.user_code,
+                        verification_url: data.verification_url,
+                        expires_in: data.expires_in,
+                        interval: data.interval || 5,
+                        generated_at: Date.now(),
+                        expires_at: Date.now() + (data.expires_in * 1000), // Convert to milliseconds
+                    };
+                    localStorage.setItem('device_code_data', JSON.stringify(deviceCodeData));
+                    console.log('[APP] Saved device_code_data to localStorage with expiration');
+                }
+                
                 if (data.browser_opened) {
                     setLoginOAuthStatus(`Browser opened! Enter code: ${data.user_code}`);
                 } else {
@@ -1520,12 +2769,24 @@ const App: React.FC = () => {
             });
         }
 
+        // Generate and store device ID if not exists
+        let deviceId = localStorage.getItem('device_id');
+        if (!deviceId) {
+            // Generate a unique device ID
+            deviceId = `device_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+            localStorage.setItem('device_id', deviceId);
+            console.log('[APP] Generated new device ID:', deviceId);
+        } else {
+            console.log('[APP] Using existing device ID:', deviceId);
+        }
+
         // Listen for login_token from main process and save to localStorage
         if (window.electronAPI && window.electronAPI.onLoginToken) {
             window.electronAPI.onLoginToken((token: string) => {
                 if (token) {
                     localStorage.setItem('login_token', token);
-                    console.log('[APP] Saved login_token to localStorage');
+                    localStorage.setItem('device_token', token); // Store as device_token too
+                    console.log('[APP] Saved login_token and device_token to localStorage');
                 }
             });
         }
@@ -1540,6 +2801,16 @@ const App: React.FC = () => {
                     // Also save login_token separately for backward compatibility
                     if (fullResponse.login_token) {
                         localStorage.setItem('login_token', fullResponse.login_token);
+                        localStorage.setItem('device_token', fullResponse.login_token); // Store as device_token too
+                    }
+                    
+                    // Store device ID with auth data
+                    if (deviceId) {
+                        const authData = {
+                            ...fullResponse,
+                            device_id: deviceId
+                        };
+                        localStorage.setItem('auth_full_response', JSON.stringify(authData));
                     }
                 }
             });
@@ -1547,20 +2818,34 @@ const App: React.FC = () => {
 
         if (window.electronAPI.onOAuthSuccess) {
             window.electronAPI.onOAuthSuccess(async (data) => {
-                setLoginOAuthStatus(`✓ Authenticated as ${data.user.name || data.user.email}`);
+                // Don't show status message - redirect immediately instead
                 setLoginAuthenticating(false);
                 setLoginDeviceCode(null);
+                setLoginOAuthStatus(''); // Clear any existing status
                 
-                // Save full response data to localStorage
+                // Generate and store device ID if not exists
+                let deviceId = localStorage.getItem('device_id');
+                if (!deviceId) {
+                    deviceId = `device_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+                    localStorage.setItem('device_id', deviceId);
+                    console.log('[APP] Generated new device ID:', deviceId);
+                }
+                
+                // Save full response data to localStorage with device ID
                 if (data.fullResponse) {
-                    localStorage.setItem('auth_full_response', JSON.stringify(data.fullResponse));
-                    console.log('[APP] Saved full auth response to localStorage from OAuth success');
+                    const authData = {
+                        ...data.fullResponse,
+                        device_id: deviceId
+                    };
+                    localStorage.setItem('auth_full_response', JSON.stringify(authData));
+                    console.log('[APP] Saved full auth response to localStorage from OAuth success (with device_id)');
                 }
                 
                 // Save login_token to localStorage if available (for backward compatibility)
                 if (data.login_token) {
                     localStorage.setItem('login_token', data.login_token);
-                    console.log('[APP] Saved login_token to localStorage from OAuth success');
+                    localStorage.setItem('device_token', data.login_token); // Store as device_token too
+                    console.log('[APP] Saved login_token and device_token to localStorage from OAuth success');
                 }
                 
                 // Update auth state with full data
@@ -1626,17 +2911,26 @@ const App: React.FC = () => {
                 }
                 console.log('[APP] ===========================================');
                 
+                // Update user state immediately
+                setAuthenticatedUser(data.user as AuthenticatedUser);
+                setWorkspaces(data.workspaces as Workspace[] || []);
+                if (data.currentWorkspace) {
+                    setCurrentWorkspace(data.currentWorkspace as Workspace);
+                }
+                
                 // After OAuth success, go to check-in screen first
                 // User must check in before accessing dashboard
-                if (view === AppView.LOGIN) {
-                    setTimeout(() => {
-                        // Check if user is already checked in (from previous session)
-                        if (user?.isCheckedIn) {
-                            setView(AppView.DASHBOARD);
-                        } else {
-                            setView(AppView.CHECK_IN_OUT);
-                        }
-                    }, 500);
+                // Clear the status message and redirect IMMEDIATELY
+                setLoginOAuthStatus(''); // Clear status message
+                setLoginAuthenticating(false);
+                
+                // Redirect IMMEDIATELY - no setTimeout delay
+                if (user?.isCheckedIn) {
+                    console.log('[APP] User already checked in, redirecting to dashboard');
+                    setView(AppView.DASHBOARD);
+                } else {
+                    console.log('[APP] User not checked in, redirecting to check-in page');
+                    setView(AppView.CHECK_IN_OUT);
                 }
                 
                 // Clean up listeners
@@ -1666,27 +2960,24 @@ const App: React.FC = () => {
                 
                 // After OAuth success, go to check-in screen first
                 // User must check in before accessing dashboard
-                if (view === AppView.LOGIN) {
-                    setTimeout(() => {
-                        // Check if user is already checked in (from previous session)
-                        if (user?.isCheckedIn) {
-                            setView(AppView.DASHBOARD);
-                        } else {
-                            setView(AppView.CHECK_IN_OUT);
-                        }
-                    }, 500);
+                // Redirect IMMEDIATELY - no setTimeout delay
+                if (user?.isCheckedIn) {
+                    console.log('[APP] User already checked in, redirecting to dashboard');
+                    setView(AppView.DASHBOARD);
+                } else {
+                    console.log('[APP] User not checked in, redirecting to check-in page');
+                    setView(AppView.CHECK_IN_OUT);
                 }
             } else if (result.error && !loginDeviceCode) {
                 // Handle "code_already_used" - check if already authenticated
                 if ((result as any).code_already_used) {
+                    console.log('[APP] Device code already used, checking if user is already authenticated...');
                     // Check current auth status
                     try {
                         const status = await window.electronAPI.oauthCheckStatus();
                         if (status.authenticated && status.user) {
-                            setLoginOAuthStatus(`✓ Already authenticated as ${status.user.name || status.user.email}`);
-                            setLoginAuthenticating(false);
-                            
-                            // Update auth state
+                            console.log('[APP] ✅ User is already authenticated, redirecting...');
+                            // Update auth state first
                             if (status.user && status.workspaces) {
                                 authState.setAuthData(
                                     status.user as AuthenticatedUser,
@@ -1697,24 +2988,45 @@ const App: React.FC = () => {
                                 );
                             }
                             
+                            // Update user state
+                            setAuthenticatedUser(status.user as AuthenticatedUser);
+                            setWorkspaces(status.workspaces as Workspace[] || []);
+                            if (status.currentWorkspace) {
+                                setCurrentWorkspace(status.currentWorkspace as Workspace);
+                            }
+                            
+                            // Clear status message and redirect immediately
+                            setLoginOAuthStatus(''); // Clear status message
+                            setLoginAuthenticating(false);
+                            
                             // Go to check-in screen first
                             // User must check in before accessing dashboard
-                            setTimeout(() => {
-                                if (user?.isCheckedIn) {
-                                    setView(AppView.DASHBOARD);
-                                } else {
-                                    setView(AppView.CHECK_IN_OUT);
-                                }
-                            }, 500);
-                            return;
+                            // Redirect IMMEDIATELY - no setTimeout delay
+                            if (user?.isCheckedIn) {
+                                console.log('[APP] Already authenticated and checked in, redirecting to dashboard');
+                                setView(AppView.DASHBOARD);
+                            } else {
+                                console.log('[APP] Already authenticated but not checked in, redirecting to check-in page');
+                                setView(AppView.CHECK_IN_OUT);
+                            }
+                            return; // Don't show error message
+                        } else {
+                            // Not authenticated, show error and allow retry
+                            console.log('[APP] ⚠️ Device code already used but user is not authenticated');
+                            setLoginOAuthStatus(`✗ Device code already used. Please try again.`);
+                            setLoginAuthenticating(false);
                         }
                     } catch (checkError) {
-                        console.error('Error checking auth status:', checkError);
+                        console.error('[APP] Error checking auth status:', checkError);
+                        // Show error but allow retry
+                        setLoginOAuthStatus(`✗ ${result.error}. Please try again.`);
+                        setLoginAuthenticating(false);
                     }
+                } else {
+                    // Other errors
+                    setLoginOAuthStatus(`✗ ${result.error}`);
+                    setLoginAuthenticating(false);
                 }
-                
-                setLoginOAuthStatus(`✗ ${result.error}`);
-                setLoginAuthenticating(false);
             }
         } catch (error: any) {
             setLoginOAuthStatus(`✗ Authentication failed: ${error.message}`);
@@ -1727,11 +3039,22 @@ const App: React.FC = () => {
         }
     };
 
-    // Protect login view - if user is already checked in and authenticated, go to dashboard
-    if (view === AppView.LOGIN && user?.isCheckedIn && authenticatedUser) {
-        // User is checked in and authenticated, redirect to dashboard
-        setTimeout(() => setView(AppView.DASHBOARD), 0);
-        return null;
+    // Protect login view - if user is already authenticated, redirect immediately
+    // Don't show login page if already authenticated
+    // Also check localStorage as fallback
+    const loginToken = localStorage.getItem('login_token');
+    const authFullResponse = localStorage.getItem('auth_full_response');
+    const isAuthenticatedFromStorage = !!(loginToken || authFullResponse);
+    
+    if (view === AppView.LOGIN && (authenticatedUser || isAuthenticatedFromStorage)) {
+        console.log('[APP] User is authenticated (from state or localStorage), redirecting from login page');
+        // Redirect based on check-in status
+        if (user?.isCheckedIn) {
+            setView(AppView.DASHBOARD);
+        } else {
+            setView(AppView.CHECK_IN_OUT);
+        }
+        return null; // Don't render login page
     }
     
     if (view === AppView.LOGIN) {
@@ -1752,13 +3075,18 @@ const App: React.FC = () => {
                     {/* OAuth Browser Login Button */}
                     <button
                         onClick={handleOAuthLogin}
-                        disabled={loginAuthenticating}
+                        disabled={loginAuthenticating || !!authenticatedUser}
                         className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-lg shadow-md transition-all flex items-center justify-center gap-3 mb-4"
                     >
                         {loginAuthenticating ? (
                             <>
                                 <i className="fas fa-spinner fa-spin"></i>
                                 <span>{loginDeviceCode ? 'Waiting for authorization...' : 'Opening browser...'}</span>
+                            </>
+                        ) : authenticatedUser ? (
+                            <>
+                                <i className="fas fa-check-circle"></i>
+                                <span>Already Authenticated</span>
                             </>
                         ) : (
                             <>
@@ -1912,6 +3240,14 @@ const App: React.FC = () => {
                                 // Stop camera
                                 stopCamera();
                                 
+                                // Fetch projects and tasks after successful check-in
+                                if (currentWorkspace) {
+                                    const workspaceId = currentWorkspace.workspace_id.toString();
+                                    console.log('[CHECK-IN] Fetching projects and tasks after check-in...');
+                                    await fetchProjects(workspaceId);
+                                    await fetchTasks(undefined, workspaceId);
+                                }
+                                
                                 // Navigate to dashboard
                                 setView(AppView.DASHBOARD);
                             } else {
@@ -2023,14 +3359,14 @@ const App: React.FC = () => {
                     <InsightsDashboard 
                         logs={activityLogs}
                         projects={projects}
-                        tasks={MOCK_TASKS}
+                        tasks={tasks}
                         onClose={() => {
                             setView(AppView.DASHBOARD);
                             setInsightsTaskFilter(undefined);
                         }}
                         filterTaskId={insightsTaskFilter}
                         filterProjectId={insightsProjectFilter || (insightsTaskFilter ? (() => {
-                            const task = MOCK_TASKS.find(t => t.id === insightsTaskFilter);
+                            const task = tasks.find(t => t.id === insightsTaskFilter);
                             return task ? task.projectId : undefined;
                         })() : undefined)}
                         filterTimeEntries={insightsTaskFilter ? timeEntries
@@ -2431,6 +3767,59 @@ const App: React.FC = () => {
                             <i className="fas fa-cog text-[10px] sm:text-xs"></i>
                         </button>
                         
+                        {/* Sync Button */}
+                        {user?.isCheckedIn && (
+                            <button 
+                                onClick={async () => {
+                                    console.log('[SYNC BUTTON] 🔵 Sync button clicked!');
+                                    console.log('[SYNC BUTTON] 📋 uploadAllTrackingFiles function exists:', typeof uploadAllTrackingFiles);
+                                    try {
+                                        console.log('[SYNC BUTTON] 🚀 Calling uploadAllTrackingFiles(true)...');
+                                        await uploadAllTrackingFiles(true);
+                                        console.log('[SYNC BUTTON] ✅ uploadAllTrackingFiles completed');
+                                    } catch (error: any) {
+                                        console.error('[SYNC BUTTON] ❌ Error calling uploadAllTrackingFiles:', error);
+                                        console.error('[SYNC BUTTON] 📋 Error details:', {
+                                            message: error.message,
+                                            stack: error.stack,
+                                            name: error.name,
+                                        });
+                                        setSyncStatus('error');
+                                        setSyncMessage(error.message || 'Sync failed');
+                                        setIsSyncing(false);
+                                    }
+                                }}
+                                disabled={isSyncing}
+                                className={`w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center transition-colors relative ${
+                                    isSyncing 
+                                        ? 'bg-blue-900/50 text-blue-400 cursor-not-allowed' 
+                                        : syncStatus === 'success'
+                                        ? 'bg-green-900/30 hover:bg-green-900/50 text-green-400'
+                                        : syncStatus === 'error'
+                                        ? 'bg-red-900/30 hover:bg-red-900/50 text-red-400'
+                                        : 'bg-blue-900/30 hover:bg-blue-900/50 text-blue-400'
+                                }`}
+                                title={
+                                    isSyncing 
+                                        ? 'Syncing...' 
+                                        : syncStatus === 'success' && lastSyncTime
+                                        ? `Last synced: ${lastSyncTime.toLocaleTimeString()}`
+                                        : syncStatus === 'error'
+                                        ? syncMessage || 'Sync failed'
+                                        : 'Sync tracking data to server'
+                                }
+                            >
+                                {isSyncing ? (
+                                    <i className="fas fa-spinner fa-spin text-[10px] sm:text-xs"></i>
+                                ) : (
+                                    <i className="fas fa-sync-alt text-[10px] sm:text-xs"></i>
+                                )}
+                                {syncStatus === 'success' && !isSyncing && (
+                                    <div className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                                )}
+                            </button>
+                        )}
+                        
                         {/* Check In/Out Button */}
                         {user?.isCheckedIn ? (
                             <button 
@@ -2477,7 +3866,7 @@ const App: React.FC = () => {
                                 {(() => {
                                     // Get the most recent time entry with a task
                                     const lastEntry = timeEntries.find(e => e.taskId);
-                                    const lastTask = lastEntry?.taskId ? MOCK_TASKS.find(t => t.id === lastEntry.taskId) : null;
+                                    const lastTask = lastEntry?.taskId ? tasks.find(t => t.id === lastEntry.taskId) : null;
                                     const lastProject = lastEntry ? projects.find(p => p.id === lastEntry.projectId) : null;
                                     
                                     // Get unique recent tasks from today's entries
@@ -2489,7 +3878,7 @@ const App: React.FC = () => {
                                     
                                     const recentTasks = recentEntries
                                         .map(e => {
-                                            const task = MOCK_TASKS.find(t => t.id === e.taskId);
+                                            const task = tasks.find(t => t.id === e.taskId);
                                             const project = projects.find(p => p.id === e.projectId);
                                             return task && project ? { task, project, entry: e } : null;
                                         })
@@ -2670,8 +4059,32 @@ const App: React.FC = () => {
 
                                 <div className="mb-4">
                                     <h3 className="text-white text-xs sm:text-sm font-semibold mb-2 sm:mb-3">Select Project</h3>
-                                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 sm:gap-3">
-                                        {projects.map(project => (
+                                    {projectsLoading ? (
+                                        <div className="text-center py-8 text-gray-400">
+                                            <i className="fas fa-spinner fa-spin text-2xl mb-2 block"></i>
+                                            <span className="text-xs">Loading projects...</span>
+                                        </div>
+                                    ) : projects.length === 0 ? (
+                                        <div className="text-center py-8 text-gray-400">
+                                            <i className="fas fa-folder-open text-2xl mb-2 block opacity-50"></i>
+                                            <span className="text-xs">No projects available</span>
+                                            <button
+                                                onClick={() => {
+                                                    const workspaceId = currentWorkspace?.workspace_id?.toString() || authState.getCurrentWorkspace()?.workspace_id?.toString();
+                                                    if (workspaceId) {
+                                                        fetchProjects(workspaceId);
+                                                        fetchTasks(undefined, workspaceId);
+                                                    }
+                                                }}
+                                                className="mt-3 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded-lg transition-colors"
+                                            >
+                                                <i className="fas fa-sync-alt mr-2"></i>
+                                                Refresh Projects
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 sm:gap-3">
+                                            {projects.map(project => (
                                             <button
                                                 key={project.id}
                                                 onClick={() => {
@@ -2695,8 +4108,9 @@ const App: React.FC = () => {
                                                     {project.tasks?.filter(t => !t.completed).length || 0} tasks
                                                 </span>
                                             </button>
-                                        ))}
-                                    </div>
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -2782,12 +4196,12 @@ const App: React.FC = () => {
                                     </div>
                                     <p className="text-white text-sm sm:text-base font-medium mb-1 truncate">
                                         {(() => {
-                                            const task = MOCK_TASKS.find(t => t.id === selectedTaskId);
+                                            const task = tasks.find(t => t.id === selectedTaskId);
                                             return task?.name || description || 'No task selected';
                                         })()}
                                     </p>
                                     {(() => {
-                                        const task = MOCK_TASKS.find(t => t.id === selectedTaskId);
+                                        const task = tasks.find(t => t.id === selectedTaskId);
                                         // Calculate total time spent on this task today
                                         const today = new Date();
                                         today.setHours(0, 0, 0, 0);
@@ -2935,7 +4349,7 @@ const App: React.FC = () => {
                                 
                                 return uniqueTasks.map((group, index) => {
                                     const project = projects.find(p => p.id === group.projectId);
-                                    const task = group.taskId ? MOCK_TASKS.find(t => t.id === group.taskId) : null;
+                                    const task = group.taskId ? tasks.find(t => t.id === group.taskId) : null;
                                     const isCurrentlySelected = selectedTaskId === group.taskId && !isTimerRunning;
                                     const isCurrentlyRunning = selectedTaskId === group.taskId && isTimerRunning;
                                     
@@ -3086,6 +4500,103 @@ const App: React.FC = () => {
             )}
         </div>
     );
+
+    // Expose API test function to browser console for testing
+    useEffect(() => {
+        if (typeof window !== 'undefined') {
+            (window as any).testAPIs = async () => {
+                console.log('🧪 Testing All APIs...');
+                console.log('='.repeat(60));
+                
+                // Test Projects API
+                console.log('\n📋 Testing Projects API...');
+                try {
+                    const workspaceId = currentWorkspace?.workspace_id?.toString();
+                    const projectsResponse = await apiService.getProjects({ workspace_id: workspaceId });
+                    if (projectsResponse.success) {
+                        console.log(`✅ GET /api/vue/backend/v1/projects - Success (${projectsResponse.data?.length || 0} projects)`);
+                    } else {
+                        console.log(`❌ GET /api/vue/backend/v1/projects - Failed: ${projectsResponse.error}`);
+                    }
+                } catch (error: any) {
+                    console.log(`❌ GET /api/vue/backend/v1/projects - Error: ${error.message}`);
+                }
+                
+                // Test Tasks API
+                console.log('\n📝 Testing Tasks API...');
+                try {
+                    const workspaceId = currentWorkspace?.workspace_id?.toString();
+                    const tasksResponse = await apiService.getTasks({ workspace_id: workspaceId });
+                    if (tasksResponse.success) {
+                        console.log(`✅ GET /api/vue/backend/v1/tasks - Success (${tasksResponse.data?.length || 0} tasks)`);
+                    } else {
+                        console.log(`❌ GET /api/vue/backend/v1/tasks - Failed: ${tasksResponse.error}`);
+                    }
+                } catch (error: any) {
+                    console.log(`❌ GET /api/vue/backend/v1/tasks - Error: ${error.message}`);
+                }
+                
+                // Test Status Management API
+                console.log('\n🔄 Testing Status Management API...');
+                try {
+                    const currentStatusResponse = await apiService.getCurrentStatus();
+                    if (currentStatusResponse.success) {
+                        const status = currentStatusResponse.data?.status || 'No active status';
+                        console.log(`✅ GET /api/vue/backend/v1/status/current - Success (Status: ${status})`);
+                    } else {
+                        console.log(`❌ GET /api/vue/backend/v1/status/current - Failed: ${currentStatusResponse.error}`);
+                    }
+                } catch (error: any) {
+                    console.log(`❌ GET /api/vue/backend/v1/status/current - Error: ${error.message}`);
+                }
+                
+                try {
+                    const statusHistoryResponse = await apiService.getStatusHistory({
+                        start_date: '2025-01-01',
+                        end_date: new Date().toISOString().split('T')[0],
+                    });
+                    if (statusHistoryResponse.success) {
+                        console.log(`✅ GET /api/vue/backend/v1/status/history - Success (${statusHistoryResponse.data?.length || 0} records)`);
+                    } else {
+                        console.log(`❌ GET /api/vue/backend/v1/status/history - Failed: ${statusHistoryResponse.error}`);
+                    }
+                } catch (error: any) {
+                    console.log(`❌ GET /api/vue/backend/v1/status/history - Error: ${error.message}`);
+                }
+                
+                // Test Tracking Data API
+                console.log('\n📊 Testing Tracking Data API...');
+                if (tasks.length > 0 && projects.length > 0) {
+                    const testProject = projects[0];
+                    const testTask = tasks.find(t => t.projectId === testProject.id) || tasks[0];
+                    
+                    if (testTask) {
+                        try {
+                            const trackingListResponse = await apiService.listTrackingData({
+                                project_id: testTask.projectId,
+                                task_id: testTask.id,
+                            });
+                            if (trackingListResponse.success) {
+                                console.log(`✅ GET /api/vue/backend/v1/tracking-data - Success (${trackingListResponse.data?.length || 0} records)`);
+                            } else {
+                                console.log(`⚠️  GET /api/vue/backend/v1/tracking-data - Failed: ${trackingListResponse.error} (may need valid data)`);
+                            }
+                        } catch (error: any) {
+                            console.log(`❌ GET /api/vue/backend/v1/tracking-data - Error: ${error.message}`);
+                        }
+                    }
+                } else {
+                    console.log('⚠️  Skipping tracking data tests - no projects/tasks loaded');
+                }
+                
+                console.log('\n' + '='.repeat(60));
+                console.log('✅ API Testing Complete!');
+                console.log('💡 Check the results above for each API endpoint.');
+            };
+            
+            console.log('💡 To test all APIs, run: testAPIs()');
+        }
+    }, [currentWorkspace, projects, tasks]);
 };
 
 export default App;

@@ -47,6 +47,7 @@ export function updateApiConfig(config: Partial<ApiConfig>): ApiConfig {
 
 /**
  * API Endpoints
+ * Base path: /api/vue/backend/v1
  */
 export const API_ENDPOINTS = {
     // Authentication
@@ -59,34 +60,44 @@ export const API_ENDPOINTS = {
         DEVICE_START: '/auth/device/start',
         DEVICE_POLL: '/auth/device/poll',
     },
-    // Tasks
+    // Projects API (v1)
+    PROJECTS: {
+        LIST: '/vue/backend/v1/projects',
+        CREATE: '/vue/backend/v1/projects',
+        GET: (projectId: string) => `/vue/backend/v1/projects/${projectId}`,
+        UPDATE: (projectId: string) => `/vue/backend/v1/projects/${projectId}`,
+        DELETE: (projectId: string) => `/vue/backend/v1/projects/${projectId}`,
+    },
+    // Tasks API (v1)
     TASKS: {
-        LIST: '/tasks',
-        CREATE: '/tasks',
-        GET: (taskId: string) => `/tasks/${taskId}`,
-        UPDATE: (taskId: string) => `/tasks/${taskId}`,
-        DELETE: (taskId: string) => `/tasks/${taskId}`,
+        LIST: '/vue/backend/v1/tasks',
+        CREATE: '/vue/backend/v1/tasks',
+        GET: (taskId: string) => `/vue/backend/v1/tasks/${taskId}`,
+        UPDATE: (taskId: string) => `/vue/backend/v1/tasks/${taskId}`,
+        DELETE: (taskId: string) => `/vue/backend/v1/tasks/${taskId}`,
         SYNC: '/tasks/sync',
     },
-    // Projects
-    PROJECTS: {
-        LIST: '/projects',
-        CREATE: '/projects',
-        GET: (projectId: string) => `/projects/${projectId}`,
-        UPDATE: (projectId: string) => `/projects/${projectId}`,
-        DELETE: (projectId: string) => `/projects/${projectId}`,
+    // Tracking Data API (v1)
+    TRACKING: {
+        SYNC: '/tracking/sync',
+        TASK: (projectId: string, taskId: string) => `/tracking/tasks/${projectId}/${taskId}`,
+        PROJECT: (projectId: string) => `/tracking/projects/${projectId}`,
+        // New v1 endpoints
+        UPLOAD_FILE: '/vue/backend/v1/tracking-files/upload',
+        LIST: '/vue/backend/v1/tracking-data',
+        GET_BY_ID: (id: number) => `/vue/backend/v1/tracking-data/${id}`,
+    },
+    // Status Management API (v1)
+    STATUS: {
+        UPDATE: '/vue/backend/v1/status/update',
+        CURRENT: '/vue/backend/v1/status/current',
+        HISTORY: '/vue/backend/v1/status/history',
     },
     // Activity Logs
     ACTIVITY: {
         LOGS: '/activity/logs',
         SYNC: '/activity/sync',
         BATCH: '/activity/batch',
-    },
-    // Tracking Data
-    TRACKING: {
-        SYNC: '/tracking/sync',
-        TASK: (projectId: string, taskId: string) => `/tracking/tasks/${projectId}/${taskId}`,
-        PROJECT: (projectId: string) => `/tracking/projects/${projectId}`,
     },
     // Screenshots
     SCREENSHOTS: {
@@ -114,5 +125,12 @@ export const API_ENDPOINTS = {
             ? `/vue/backend/attendance/check-out/${attendanceId}` 
             : '/vue/backend/attendance/check-out',
         STATUS: '/vue/backend/attendance/status',
+    },
+    // Tracking Images API (v1)
+    TRACKING_IMAGES: {
+        UPLOAD: '/vue/backend/v1/tracking-images/upload',
+        LIST: '/vue/backend/v1/tracking-images',
+        GET_BY_BATCH: (batchId: string) => `/vue/backend/v1/tracking-images/batch/${batchId}`,
+        DELETE: (id: number) => `/vue/backend/v1/tracking-images/${id}`,
     },
 } as const;

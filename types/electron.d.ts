@@ -23,6 +23,7 @@ declare global {
             getCurrentTaskTracking: () => Promise<any | null>;
             addActivityLogToTask: (activityLog: any) => Promise<boolean>;
             addWebcamPhotoToTask: (photoDataUrl: string) => Promise<boolean>;
+            deleteTrackingImage: (imageId: number) => Promise<{ success: boolean; error?: string; message?: string }>;
             saveTaskTrackingData: (projectId?: string, taskId?: string, taskName?: string, projectName?: string) => Promise<boolean>;
             loadTaskTrackingData: (projectId: string, taskId: string, dateFilter?: 'today' | 'all') => Promise<any | null>;
             getProjectTasksTracking: (projectId: string) => Promise<any[]>;
@@ -92,13 +93,13 @@ declare global {
             oauthAuthenticate: () => Promise<{ success: boolean; error?: string; message?: string; user?: any; workspaces?: any[]; currentWorkspace?: any; token?: string; expires_at?: number }>;
             oauthCheckStatus: () => Promise<{ authenticated: boolean; user?: any; workspaces?: any[]; currentWorkspace?: any; expires_at?: number; error?: string }>;
             oauthLogout: () => Promise<{ success: boolean; error?: string }>;
-            oauthDeviceLogout: () => Promise<{ success: boolean; message?: string; error?: string }>;
+            oauthDeviceLogout: (token?: string) => Promise<{ success: boolean; message?: string; error?: string }>;
             oauthGetAccessToken: () => Promise<{ token: string | null; expired?: boolean; error?: string }>;
             oauthGetLoginToken: () => Promise<{ token: string | null; expired?: boolean; error?: string }>;
             oauthSetWorkspace: (workspaceId: string | number) => Promise<{ success: boolean; error?: string }>;
             // OAuth event listeners
-            onOAuthDeviceCode: (callback: (data: { user_code: string; verification_url: string; browser_opened: boolean }) => void) => void;
-            onOAuthSuccess: (callback: (data: { user: any; workspaces?: any[]; currentWorkspace?: any; token?: string; expires_at?: number; message: string; fullResponse?: any }) => void) => void;
+            onOAuthDeviceCode: (callback: (data: { device_code?: string; user_code: string; verification_url: string; browser_opened: boolean; expires_in?: number; interval?: number }) => void) => void;
+            onOAuthSuccess: (callback: (data: { user: any; workspaces?: any[]; currentWorkspace?: any; token?: string; login_token?: string; expires_at?: number; message: string; fullResponse?: any }) => void) => void;
             onLoginToken: (callback: (token: string) => void) => void;
             onFullResponse: (callback: (data: any) => void) => void;
             removeOAuthListeners: () => void;

@@ -178,10 +178,19 @@ let currentTaskId = null; // Track current task ID
 let currentProjectId = null; // Track current project ID
 let taskMetadata = new Map(); // Map<taskKey, { taskName: string, projectName: string }>
 let taskFilePaths = new Map(); // Map<taskKey, filePath> - Track file path for each task
+let currentWorkspaceId = 'default'; // Track current workspace ID for file paths
 
 // Real-time save management: debounced saves to avoid too many file writes
 let saveTimers = new Map(); // Map<taskKey, NodeJS.Timeout>
 const SAVE_DEBOUNCE_MS = 2000; // Save 2 seconds after last change (real-time feel)
+
+// Upload deduplication: prevent multiple simultaneous uploads of the same image
+let activeUploads = new Map(); // Map<uploadKey, Promise<fileUrl>>
+const getUploadKey = (imageBuffer, imageType, projectId, taskId) => {
+  // Create a simple hash from buffer (first 100 bytes + size + type + task)
+  const bufferHash = imageBuffer.slice(0, 100).toString('base64').substring(0, 20);
+  return `${imageType}_${projectId}_${taskId}_${imageBuffer.length}_${bufferHash}`;
+};
 
 // TaskTrackingData structure
 // {
@@ -383,9 +392,95 @@ const normalizeUrl = (url) => {
 
 // ==================== JSON File Storage Functions ====================
 
+// Helper function to update current workspace ID from storage (async)
+const updateCurrentWorkspaceId = async () => {
+  try {
+    const keytar = require('keytar');
+    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+    
+    if (userDataStr) {
+      const metadata = JSON.parse(userDataStr);
+      const workspaces = metadata.workspaces || [];
+      let workspace = null;
+      
+      // Get current workspace
+      if (metadata.current_workspace_id) {
+        workspace = workspaces.find(w => 
+          String(w.workspace_id) === String(metadata.current_workspace_id)
+        ) || null;
+      }
+      
+      // Fallback to general workspace or first one
+      if (!workspace) {
+        workspace = workspaces.find(w => w.workspace_is_general) || null;
+      }
+      if (!workspace && workspaces.length > 0) {
+        workspace = workspaces[0];
+      }
+      
+      if (workspace && workspace.workspace_id) {
+        const newWorkspaceId = String(workspace.workspace_id);
+        if (currentWorkspaceId !== newWorkspaceId) {
+          currentWorkspaceId = newWorkspaceId;
+          console.log(`[TASK-PATH] Updated workspace ID to: ${currentWorkspaceId}`);
+        }
+        return newWorkspaceId;
+      }
+    }
+  } catch (error) {
+    console.error('[TASK-PATH] Error updating workspace ID:', error);
+  }
+  
+  // Ensure currentWorkspaceId is always a valid string (never null)
+  if (!currentWorkspaceId || currentWorkspaceId === null || currentWorkspaceId === undefined) {
+    currentWorkspaceId = 'default';
+    console.log('[TASK-PATH] Using default workspace ID (no workspace found or error occurred)');
+  }
+  return currentWorkspaceId;
+};
+
 // Get path for task tracking data file - ONE FILE PER TASK (not per session)
 // Files are saved in project directory: {projectRoot}/tracking-data/{workspaceId}/{date}/{projectId}/{taskId}.json
-const getTaskDataPath = (projectId, taskId, workspaceId = 'default') => {
+const getTaskDataPath = (projectId, taskId, workspaceId = null) => {
+  // Validate required parameters
+  if (!projectId || projectId === null || projectId === undefined) {
+    console.error('[TASK-PATH] ❌ projectId is null/undefined');
+    projectId = 'unknown';
+  }
+  if (!taskId || taskId === null || taskId === undefined) {
+    console.error('[TASK-PATH] ❌ taskId is null/undefined');
+    taskId = 'unknown';
+  }
+  
+  // Ensure currentWorkspaceId is never null (defensive check)
+  if (!currentWorkspaceId || currentWorkspaceId === null || currentWorkspaceId === undefined) {
+    currentWorkspaceId = 'default';
+    console.warn('[TASK-PATH] ⚠️ currentWorkspaceId was null, resetting to "default"');
+  }
+  
+  // Use provided workspace ID, or fall back to cached current workspace ID, or 'default' as last resort
+  let finalWorkspaceId = workspaceId;
+  if (!finalWorkspaceId || finalWorkspaceId === null || finalWorkspaceId === undefined) {
+    finalWorkspaceId = currentWorkspaceId;
+  }
+  
+  // Ensure we always have a valid string (never null or undefined)
+  if (!finalWorkspaceId || finalWorkspaceId === null || finalWorkspaceId === undefined) {
+    finalWorkspaceId = 'default';
+    console.warn('[TASK-PATH] ⚠️ Workspace ID is null/undefined, using "default" as fallback');
+  }
+  
+  // Ensure it's a string (handle edge cases like empty string)
+  finalWorkspaceId = String(finalWorkspaceId).trim();
+  if (!finalWorkspaceId || finalWorkspaceId === '') {
+    finalWorkspaceId = 'default';
+    console.warn('[TASK-PATH] ⚠️ Workspace ID is empty, using "default" as fallback');
+  }
+  
+  // Convert projectId and taskId to strings
+  projectId = String(projectId || 'unknown');
+  taskId = String(taskId || 'unknown');
+  
   // Get project root directory (one level up from electron folder)
   const projectRoot = path.join(__dirname, '..');
   
@@ -394,18 +489,28 @@ const getTaskDataPath = (projectId, taskId, workspaceId = 'default') => {
   const dateStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
   
   // New structure: workspace_id/YYYY-MM-DD/project_id/taskid.json
-  const dataDir = path.join(projectRoot, 'tracking-data', workspaceId, dateStr, projectId || 'unknown');
+  const dataDir = path.join(projectRoot, 'tracking-data', finalWorkspaceId, dateStr, projectId);
   
   // Create directory if it doesn't exist
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
     if (isDev) {
       console.log(`[TASK-PATH] Created tracking-data directory: ${dataDir}`);
+      console.log(`[TASK-PATH] Using workspace ID: ${finalWorkspaceId}`);
     }
   }
   
   // ONE FILE PER TASK - use taskId as filename
-  return path.join(dataDir, `${taskId}.json`);
+  const filePath = path.join(dataDir, `${taskId}.json`);
+  
+  // Final validation - ensure all path components are valid
+  if (!filePath || filePath.includes('null') || filePath.includes('undefined')) {
+    console.error('[TASK-PATH] ❌ Invalid file path generated:', filePath);
+    console.error('[TASK-PATH] Components:', { finalWorkspaceId, dateStr, projectId, taskId });
+    throw new Error(`Invalid file path: workspaceId=${finalWorkspaceId}, projectId=${projectId}, taskId=${taskId}`);
+  }
+  
+  return filePath;
 };
 
 // Helper function to recursively find all task JSON files in new structure
@@ -484,7 +589,11 @@ const findAllTaskFiles = (trackingDataPath) => {
 // Migration function to move files from old structure to new structure
 // Old: tracking-data/project_id/taskid.json
 // New: tracking-data/workspace_id/YYYY-MM-DD/project_id/taskid.json
-const migrateTrackingDataStructure = (workspaceId = 'default') => {
+const migrateTrackingDataStructure = (workspaceId = null) => {
+  // Get workspace ID if not provided
+  if (!workspaceId) {
+    workspaceId = getCurrentWorkspaceId();
+  }
   try {
     const projectRoot = path.join(__dirname, '..');
     const trackingDataPath = path.join(projectRoot, 'tracking-data');
@@ -957,8 +1066,21 @@ const saveTaskTrackingDataToFile = (projectId, taskId, taskName = null, projectN
       },
       trackingData: {
         activityLogs: taskData.activityLogs || [],
-        screenshots: taskData.screenshots || [],
-        webcamPhotos: taskData.webcamPhotos || [],
+        screenshots: (taskData.screenshots || []).map(s => ({
+          id: s.id,
+          timestamp: s.timestamp,
+          fileUrl: s.fileUrl,
+          isBlurred: s.isBlurred !== undefined ? s.isBlurred : false,
+          taskId: s.taskId,
+          projectId: s.projectId
+        })), // Ensure all screenshots have fileUrl
+        webcamPhotos: (taskData.webcamPhotos || []).map(p => ({
+          id: p.id,
+          timestamp: p.timestamp,
+          fileUrl: p.fileUrl,
+          taskId: p.taskId,
+          projectId: p.projectId
+        })), // Ensure all webcam photos have fileUrl
         urlHistory: taskData.urlHistory || [],
         activeWindows: activeWindowsWithTime,
         summary: {
@@ -1010,7 +1132,27 @@ const saveTaskTrackingDataToFile = (projectId, taskId, taskName = null, projectN
       console.log(`[TASK-SAVE] 📁 File location: ${filePath}`);
       console.log(`[TASK-SAVE] 📊 Current session: ${taskData.keystrokes} keystrokes, ${taskData.mouseClicks} clicks`);
       console.log(`[TASK-SAVE] 📊 Total cumulative: ${totalKeystrokes} keystrokes, ${totalMouseClicks} clicks`);
-      console.log(`[TASK-SAVE] 📊 Data: ${taskData.activityLogs?.length || 0} logs, ${taskData.screenshots?.length || 0} screenshots, ${activeWindowsWithTime.length} windows`);
+      console.log(`[TASK-SAVE] 📊 Data: ${taskData.activityLogs?.length || 0} logs, ${taskData.screenshots?.length || 0} screenshots, ${taskData.webcamPhotos?.length || 0} webcam photos, ${activeWindowsWithTime.length} windows`);
+      
+      // Debug: Log screenshot details
+      if (taskData.screenshots && taskData.screenshots.length > 0) {
+        console.log(`[TASK-SAVE] 📸 Screenshots being saved:`);
+        taskData.screenshots.forEach((ss, idx) => {
+          console.log(`[TASK-SAVE] 📸   [${idx + 1}] id=${ss.id}, fileUrl=${ss.fileUrl ? ss.fileUrl.substring(0, 60) + '...' : 'MISSING'}, timestamp=${ss.timestamp}`);
+        });
+      } else {
+        console.warn(`[TASK-SAVE] ⚠️ No screenshots in taskData.screenshots array!`);
+      }
+      
+      // Debug: Log webcam photos details
+      if (taskData.webcamPhotos && taskData.webcamPhotos.length > 0) {
+        console.log(`[TASK-SAVE] 📷 Webcam photos being saved:`);
+        taskData.webcamPhotos.forEach((photo, idx) => {
+          console.log(`[TASK-SAVE] 📷   [${idx + 1}] id=${photo.id}, fileUrl=${photo.fileUrl ? photo.fileUrl.substring(0, 60) + '...' : 'MISSING'}, timestamp=${photo.timestamp}`);
+        });
+      } else {
+        console.log(`[TASK-SAVE] ℹ️ No webcam photos in taskData.webcamPhotos array`);
+      }
     } else {
       console.log(`[TASK-SAVE] ✅ Saved tracking data for task ${taskId}`);
       console.log(`[TASK-SAVE] 📁 File location: ${filePath}`);
@@ -1614,13 +1756,23 @@ ipcMain.handle('oauth-authenticate', async (event) => {
     }
     
     // Cancel any ongoing authentication attempts from this renderer
+    // This prevents multiple OAuth flows from running simultaneously
     const senderId = event.sender.id.toString();
+    let cancelledCount = 0;
     for (const [id, cancelFn] of ongoingOAuthAttempts.entries()) {
       if (id.startsWith(senderId)) {
-        console.log('[OAUTH] Cancelling previous authentication attempt:', id);
-        cancelFn();
+        console.log('[OAUTH] ⚠️ Cancelling previous authentication attempt:', id);
+        try {
+          cancelFn();
+          cancelledCount++;
+        } catch (cancelError) {
+          console.error('[OAUTH] Error cancelling attempt:', cancelError);
+        }
         ongoingOAuthAttempts.delete(id);
       }
+    }
+    if (cancelledCount > 0) {
+      console.log(`[OAUTH] ✅ Cancelled ${cancelledCount} previous authentication attempt(s)`);
     }
     
     const store = await initStore();
@@ -1708,10 +1860,18 @@ ipcMain.handle('oauth-authenticate', async (event) => {
     // Return device code info immediately so UI can display it
     // Polling will continue in background via separate handler
     event.sender.send('oauth-device-code', {
+      device_code: deviceCodeData.device_code, // Include device_code for localStorage
       user_code: deviceCodeData.user_code,
       verification_url: deviceCodeData.verification_url,
       browser_opened: browserOpened,
+      expires_in: deviceCodeData.expires_in,
+      interval: deviceCodeData.interval,
     });
+    
+    // Log device code for debugging
+    console.log('[OAUTH] Device code generated and sent to renderer');
+    console.log('[OAUTH] Device code (first 20 chars):', deviceCodeData.device_code.substring(0, 20) + '...');
+    console.log('[OAUTH] User code:', deviceCodeData.user_code);
     
     // Step 3: Poll for token
     const maxAttempts = 120; // 10 minutes at 5 second intervals
@@ -1781,7 +1941,10 @@ ipcMain.handle('oauth-authenticate', async (event) => {
           
           // Extract tokens - prefer root level, fallback to data level
           const jwtLoginToken = response.data.login_token || data.login_token;
-          const token = response.data.token || data.token; // Laravel token
+          const sanctumToken = response.data.token || data.token; // Sanctum token (Laravel token) - used for device logout
+          
+          // Also store token in a variable for later use (alias for clarity)
+          const token = sanctumToken; // Use sanctumToken as token for storage
           
           // Save full response data to localStorage via renderer
           // Send full response data to renderer to save in localStorage
@@ -1871,6 +2034,13 @@ ipcMain.handle('oauth-authenticate', async (event) => {
           
           if (currentWorkspace) {
             console.log('[OAUTH] Selected workspace:', currentWorkspace.workspace_name, '(ID:', currentWorkspace.workspace_id, ')');
+            
+            // Update cached workspace ID for file paths
+            const newWorkspaceId = String(currentWorkspace.workspace_id);
+            if (currentWorkspaceId !== newWorkspaceId) {
+              currentWorkspaceId = newWorkspaceId;
+              console.log(`[OAUTH] Updated cached workspace ID to: ${currentWorkspaceId}`);
+            }
           } else {
             console.warn('[OAUTH] ⚠️ No workspace selected!');
           }
@@ -1886,12 +2056,29 @@ ipcMain.handle('oauth-authenticate', async (event) => {
           console.log('[OAUTH] Storing metadata with', workspaces.length, 'workspaces');
           await keytar.setPassword(SERVICE_NAME, USER_DATA_KEY, JSON.stringify(metadata));
           
+          // Store Sanctum token (for device logout API)
+          // Device logout API requires Sanctum token, not JWT login_token
+          if (sanctumToken) {
+            await keytar.setPassword(SERVICE_NAME, ACCESS_TOKEN_KEY, sanctumToken);
+            console.log('[OAUTH] ✅ Stored Sanctum token for device logout API');
+          } else {
+            console.warn('[OAUTH] ⚠️ No Sanctum token to store (token field missing from response)');
+            console.warn('[OAUTH] Response data keys:', Object.keys(response.data));
+            console.warn('[OAUTH] Data keys:', data ? Object.keys(data) : 'data is null');
+          }
+          
+          // Store JWT login_token (for workspace API calls)
+          if (jwtLoginToken) {
+            await keytar.setPassword(SERVICE_NAME, REFRESH_TOKEN_KEY, jwtLoginToken);
+            console.log('[OAUTH] ✅ Stored JWT login_token');
+          }
+          
           // Send success notification with full data (include login_token and full response)
           event.sender.send('oauth-authentication-success', {
             user,
             workspaces,
             currentWorkspace,
-            token: token || jwtLoginToken, // Use token or fallback to login_token
+            token: sanctumToken || jwtLoginToken, // Use Sanctum token or fallback to JWT login_token
             login_token: jwtLoginToken, // Include JWT login_token
             expires_at,
             message: `Authenticated as ${user.name} (${user.email})`,
@@ -1900,8 +2087,8 @@ ipcMain.handle('oauth-authenticate', async (event) => {
               result: response.data.result,
               message: response.data.message,
               data: response.data.data,
-              token: response.data.token,
-              login_token: response.data.login_token,
+              token: response.data.token || sanctumToken, // Include Sanctum token
+              login_token: response.data.login_token || jwtLoginToken, // Include JWT login_token
             },
           });
           
@@ -1914,7 +2101,7 @@ ipcMain.handle('oauth-authenticate', async (event) => {
             user,
             workspaces,
             currentWorkspace,
-            token: token || jwtLoginToken, // Use token or fallback to login_token
+            token: sanctumToken || jwtLoginToken, // Use Sanctum token or fallback to JWT login_token
             expires_at,
           };
         }
@@ -1967,8 +2154,30 @@ ipcMain.handle('oauth-authenticate', async (event) => {
           if (status === 400 || data?.error === 'code_already_used') {
             console.error('[OAUTH] Device code already used');
             console.error('[OAUTH] This usually means the device code was verified but polling missed it, or a new auth attempt started');
-            // Don't return immediately - this might be from a previous attempt
-            // Instead, suggest the user might already be authenticated or should try again
+            
+            // Check if user is actually already authenticated (previous polling might have succeeded)
+            try {
+              const authStatus = await checkOAuthStatus();
+              if (authStatus.authenticated && authStatus.user) {
+                console.log('[OAUTH] ✅ User is actually already authenticated! Previous polling must have succeeded.');
+                console.log('[OAUTH] Returning authenticated status instead of error');
+                
+                // Clean up this attempt
+                ongoingOAuthAttempts.delete(requestId);
+                
+                return {
+                  success: true,
+                  message: 'Already authenticated',
+                  user: authStatus.user,
+                  workspaces: authStatus.workspaces || [],
+                  currentWorkspace: authStatus.currentWorkspace || null,
+                };
+              }
+            } catch (checkError) {
+              console.error('[OAUTH] Error checking auth status after code_already_used:', checkError);
+            }
+            
+            // If not authenticated, return error
             return {
               success: false,
               error: 'Device code has already been used. This may mean you\'re already authenticated, or you need to start a fresh authentication flow. Please check if you\'re logged in, or try again.',
@@ -2092,6 +2301,15 @@ async function checkOAuthStatus() {
           currentWorkspace = workspaces[0];
           console.log('[OAUTH] Using first workspace:', currentWorkspace.workspace_name);
         }
+        
+        // Update cached workspace ID for file paths
+        if (currentWorkspace && currentWorkspace.workspace_id) {
+          const newWorkspaceId = String(currentWorkspace.workspace_id);
+          if (currentWorkspaceId !== newWorkspaceId) {
+            currentWorkspaceId = newWorkspaceId;
+            console.log(`[OAUTH] Updated cached workspace ID to: ${currentWorkspaceId}`);
+          }
+        }
       } catch (e) {
         console.error('[OAUTH] Error parsing user data:', e);
         console.error('[OAUTH] User data string:', userDataStr.substring(0, 200));
@@ -2112,6 +2330,42 @@ async function checkOAuthStatus() {
     return { authenticated: false, error: error.message };
   }
 }
+
+// Initialize workspace ID on app startup
+const initializeWorkspaceId = async () => {
+  try {
+    const keytar = require('keytar');
+    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
+    
+    if (userDataStr) {
+      const metadata = JSON.parse(userDataStr);
+      const workspaces = metadata.workspaces || [];
+      let workspace = null;
+      
+      // Get current workspace
+      if (metadata.current_workspace_id) {
+        workspace = workspaces.find(w => 
+          String(w.workspace_id) === String(metadata.current_workspace_id)
+        ) || null;
+      }
+      
+      // Fallback to general workspace or first one
+      if (!workspace) {
+        workspace = workspaces.find(w => w.workspace_is_general) || null;
+      }
+      if (!workspace && workspaces.length > 0) {
+        workspace = workspaces[0];
+      }
+      
+      if (workspace && workspace.workspace_id) {
+        currentWorkspaceId = String(workspace.workspace_id);
+        console.log(`[INIT] Initialized workspace ID: ${currentWorkspaceId}`);
+      }
+    }
+  } catch (error) {
+    console.error('[INIT] Error initializing workspace ID:', error);
+  }
+};
 
 // Check OAuth authentication status
 ipcMain.handle('oauth-check-status', async () => {
@@ -2147,6 +2401,15 @@ ipcMain.handle('oauth-check-status', async () => {
         }
         if (!currentWorkspace && workspaces.length > 0) {
           currentWorkspace = workspaces[0];
+        }
+        
+        // Update cached workspace ID for file paths
+        if (currentWorkspace && currentWorkspace.workspace_id) {
+          const newWorkspaceId = String(currentWorkspace.workspace_id);
+          if (currentWorkspaceId !== newWorkspaceId) {
+            currentWorkspaceId = newWorkspaceId;
+            console.log(`[OAUTH] Updated cached workspace ID to: ${currentWorkspaceId}`);
+          }
         }
       } catch (e) {
         console.error('[OAUTH] Error parsing user data:', e);
@@ -2208,6 +2471,10 @@ ipcMain.handle('oauth-set-workspace', async (event, workspaceId) => {
       metadata.current_workspace_id = workspaceId;
       await keytar.setPassword('tyro-app', 'user_data', JSON.stringify(metadata));
       
+      // Update cached workspace ID for file paths
+      currentWorkspaceId = String(workspaceId);
+      console.log(`[OAUTH] Updated cached workspace ID to: ${currentWorkspaceId}`);
+      
       return { success: true };
     } catch (e) {
       return { success: false, error: 'Failed to parse user data' };
@@ -2218,57 +2485,116 @@ ipcMain.handle('oauth-set-workspace', async (event, workspaceId) => {
 });
 
 // Device logout API call
-ipcMain.handle('oauth-device-logout', async (event) => {
+// Uses main domain (tyrodesk.test:8000) and Bearer token (login_token from localStorage)
+ipcMain.handle('oauth-device-logout', async (event, bearerTokenFromRenderer = null) => {
   try {
     const keytar = require('keytar');
     const store = await initStore();
     const settings = store.get('settings', {});
     
-    if (!settings.apiBaseUrl) {
-      return { success: false, error: 'API base URL not set' };
+    // Get Bearer token (login_token) - use the one passed from renderer first
+    // According to user: login_token stored in localStorage is the Bearer token to use
+    let bearerToken = bearerTokenFromRenderer; // First try token passed from renderer
+    if (bearerToken) {
+      console.log('[OAUTH] ✅ Using Bearer token (login_token) from renderer (localStorage)');
     }
     
-    // Get login_token from storage
-    const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
-    let loginToken = null;
-    
-    if (userDataStr) {
+    // If not passed from renderer, try to get from localStorage via executeJavaScript
+    if (!bearerToken && mainWindow && mainWindow.webContents) {
       try {
-        const metadata = JSON.parse(userDataStr);
-        // Try to get login_token from stored data
-        // It might be in the token field or we need to get it from access_token
-        loginToken = await keytar.getPassword('tyro-app', 'access_token');
+        bearerToken = await mainWindow.webContents.executeJavaScript(`
+          (() => {
+            try {
+              // First try login_token directly from localStorage
+              let token = localStorage.getItem('login_token');
+              if (token) return token;
+              
+              // Fallback: try from auth_full_response
+              const authFullResponse = localStorage.getItem('auth_full_response');
+              if (authFullResponse) {
+                const parsed = JSON.parse(authFullResponse);
+                // Try multiple paths: login_token, data.login_token
+                return parsed.login_token || parsed.data?.login_token || null;
+              }
+              return null;
+            } catch (e) {
+              console.error('Error getting login_token from localStorage:', e);
+              return null;
+            }
+          })()
+        `);
+        
+        if (bearerToken) {
+          console.log('[OAUTH] ✅ Found Bearer token (login_token) in localStorage via executeJavaScript');
+        }
       } catch (e) {
-        console.error('[OAUTH] Error parsing user data for logout:', e);
+        console.error('[OAUTH] Error getting login_token from renderer:', e);
       }
     }
     
-    if (!loginToken) {
-      return { success: false, error: 'No authentication token found' };
+    // If still not found, try keytar as last resort
+    if (!bearerToken) {
+      try {
+        // Try to get from keytar (might be stored as refresh_token which is JWT login_token)
+        bearerToken = await keytar.getPassword('tyro-app', 'refresh_token');
+        if (bearerToken) {
+          console.log('[OAUTH] Found Bearer token in keytar (refresh_token)');
+        }
+      } catch (e) {
+        console.error('[OAUTH] Error getting token from keytar:', e);
+      }
     }
     
-    // Use base URL as-is (it should include full path like /api/v11)
-    let baseUrl = settings.apiBaseUrl.replace(/\/$/, '');
-    
-    // Remove version suffix for OAuth endpoints
-    if (baseUrl.match(/\/v\d+$/)) {
-      baseUrl = baseUrl.replace(/\/v\d+$/, '');
+    if (!bearerToken) {
+      console.error('[OAUTH] ❌ No Bearer token (login_token) found');
+      return { 
+        success: false, 
+        error: 'No authentication token found. Please log in again.' 
+      };
     }
     
-    const logoutUrl = `${baseUrl}/auth/device/logout`;
-    console.log('[OAUTH] Calling logout API:', logoutUrl);
+    // Validate token format (Bearer tokens can be JWT or other formats)
+    if (bearerToken.length < 10) {
+      console.error('[OAUTH] Invalid Bearer token format');
+      return { 
+        success: false, 
+        error: 'Invalid authentication token format. Please log in again.' 
+      };
+    }
+    
+    // According to documentation: API works from ANY domain (main or subdomain)
+    // Extract domain from apiBaseUrl or use default
+    let apiDomain = 'tyrodesk.test:8000';
+    
+    // Try to extract domain from apiBaseUrl if available
+    if (settings.apiBaseUrl) {
+      try {
+        const url = new URL(settings.apiBaseUrl);
+        const hostname = url.hostname;
+        apiDomain = hostname + (url.port ? `:${url.port}` : ':8000');
+        console.log('[OAUTH] Using domain from settings:', apiDomain);
+      } catch (e) {
+        console.warn('[OAUTH] Could not parse apiBaseUrl, using default domain');
+      }
+    }
+    
+    // Construct logout URL - use /api/V11/auth/device/logout (primary) or /api/auth/device/logout (alternative)
+    // According to documentation: POST /api/V11/auth/device/logout (primary endpoint)
+    const logoutUrl = `http://${apiDomain}/api/V11/auth/device/logout`;
+    console.log('[OAUTH] Calling device logout API:', logoutUrl);
+    console.log('[OAUTH] Using Bearer token (login_token) (first 20 chars):', bearerToken.substring(0, 20) + '...');
     
     const axiosModule = await import('axios');
     const axios = axiosModule.default;
     
     const response = await axios.post(
       logoutUrl,
-      {},
+      {}, // Empty body as per documentation
       {
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
-          'Authorization': `Bearer ${loginToken}`,
+          'Authorization': `Bearer ${bearerToken}`, // Bearer token (login_token from localStorage)
         },
         timeout: 30000,
       }
@@ -2288,16 +2614,24 @@ ipcMain.handle('oauth-device-logout', async (event) => {
       };
     }
   } catch (error) {
-    console.error('[OAUTH] Error calling logout API:', error);
+    console.error('[OAUTH] Error calling device logout API:', error);
     
     if (error.response) {
       const status = error.response.status;
       const data = error.response.data;
       
+      // Handle error responses according to documentation
       if (status === 401) {
         return {
           success: false,
-          error: 'Unauthorized - token may be expired',
+          error: data?.message || 'Unauthorized - JWT token may be invalid or expired',
+        };
+      }
+      
+      if (status === 500) {
+        return {
+          success: false,
+          error: data?.message || data?.error || 'Failed to logout - server error',
         };
       }
       
@@ -2611,6 +2945,323 @@ ipcMain.handle('sync-all-tasks', async () => {
   }
 });
 
+// Retry helper function with exponential backoff
+const retryWithBackoff = async (fn, maxRetries = 3, initialDelay = 1000) => {
+  let lastError;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries) {
+        const delay = initialDelay * Math.pow(2, attempt - 1); // Exponential backoff: 1s, 2s, 4s
+        console.log(`[RETRY] Attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
+};
+
+const uploadTrackingImage = async (imageBuffer, imageType, projectId, taskId, workspaceId) => {
+  try {
+    const store = await initStore();
+    const settings = store.get('settings', {});
+    
+    // Validate API configuration
+    if (!settings.apiEnabled) {
+      const errorMsg = '[IMAGE UPLOAD] ❌ API not enabled in settings!';
+      console.error(errorMsg);
+      console.error('[IMAGE UPLOAD] 📋 Current settings:', {
+        apiEnabled: settings.apiEnabled,
+        apiBaseUrl: settings.apiBaseUrl || 'NOT SET',
+        hasApiKey: !!settings.apiKey
+      });
+      console.error('[IMAGE UPLOAD] 💡 Solution: Enable API in application settings');
+      throw new Error('API not enabled - cannot upload image. Please enable API in settings.');
+    }
+    
+    if (!settings.apiBaseUrl) {
+      const errorMsg = '[IMAGE UPLOAD] ❌ API base URL not configured!';
+      console.error(errorMsg);
+      console.error('[IMAGE UPLOAD] 📋 Current settings:', {
+        apiEnabled: settings.apiEnabled,
+        apiBaseUrl: settings.apiBaseUrl || 'NOT SET',
+        hasApiKey: !!settings.apiKey
+      });
+      console.error('[IMAGE UPLOAD] 💡 Solution: Configure API base URL in application settings');
+      throw new Error('API base URL not configured - cannot upload image. Please set API base URL in settings.');
+    }
+    
+    console.log('[IMAGE UPLOAD] 📤 Starting upload...');
+    console.log('[IMAGE UPLOAD] 📋 Configuration:', {
+      apiEnabled: settings.apiEnabled,
+      apiBaseUrl: settings.apiBaseUrl,
+      imageType,
+      projectId,
+      taskId,
+      workspaceId: workspaceId || 'not provided',
+      imageSize: `${(imageBuffer.length / 1024).toFixed(2)} KB`
+    });
+
+    // Get Bearer token (login_token) from localStorage - same pattern as logout handler
+    let authToken = null;
+    if (mainWindow && mainWindow.webContents) {
+      try {
+        authToken = await mainWindow.webContents.executeJavaScript(`
+          (() => {
+            try {
+              // First try login_token directly from localStorage
+              let token = localStorage.getItem('login_token');
+              if (token) return token;
+              
+              // Fallback: try from auth_full_response
+              const authFullResponse = localStorage.getItem('auth_full_response');
+              if (authFullResponse) {
+                const parsed = JSON.parse(authFullResponse);
+                // Try multiple paths: login_token, data.login_token
+                return parsed.login_token || parsed.data?.login_token || null;
+              }
+              return null;
+            } catch (e) {
+              console.error('Error getting login_token from localStorage:', e);
+              return null;
+            }
+          })()
+        `);
+        
+        if (authToken) {
+          console.log('[IMAGE UPLOAD] ✅ Found Bearer token (login_token) in localStorage');
+        }
+      } catch (e) {
+        console.error('[IMAGE UPLOAD] Error getting login_token from renderer:', e);
+      }
+    }
+
+    if (!authToken) {
+      throw new Error('No login_token found in localStorage');
+    }
+    
+    console.log('[IMAGE UPLOAD] ✅ Using Bearer token (login_token) from localStorage');
+
+    // Determine API base URL
+    let apiBaseUrl = settings.apiBaseUrl;
+    const originalApiBaseUrl = apiBaseUrl; // Keep for logging
+    
+    // Remove version prefix (e.g., /v11, /v12) if present
+    // Documentation says: /api/vue/backend/v1 (NOT /api/v11/vue/backend/v1)
+    // Similar to OAuth endpoint handling - remove version prefix for image upload routes
+    if (apiBaseUrl.match(/\/v\d+$/)) {
+      // Remove version suffix (e.g., /v11) for image upload endpoints
+      apiBaseUrl = apiBaseUrl.replace(/\/v\d+$/, '');
+      console.log('[IMAGE UPLOAD] ⚠️  Removed version prefix from apiBaseUrl');
+      console.log('[IMAGE UPLOAD] Original:', originalApiBaseUrl);
+      console.log('[IMAGE UPLOAD] Cleaned:', apiBaseUrl);
+    }
+    
+    // Also handle case where version is in the middle (e.g., /api/v11/something)
+    // This shouldn't happen, but handle it just in case
+    apiBaseUrl = apiBaseUrl.replace(/\/v\d+\//g, '/');
+    
+    // Ensure baseUrl doesn't have trailing slash
+    if (apiBaseUrl.endsWith('/')) {
+      apiBaseUrl = apiBaseUrl.slice(0, -1);
+    }
+    
+    console.log('[IMAGE UPLOAD] 📋 API Base URL (final):', apiBaseUrl);
+
+    // Create FormData equivalent for Node.js
+    const FormData = (await import('form-data')).default;
+    const formData = new FormData();
+    
+    // Determine filename and content type based on image type
+    const isWebcam = imageType === 'webcam_photo';
+    const extension = isWebcam ? 'jpg' : 'png';
+    const contentType = isWebcam ? 'image/jpeg' : 'image/png';
+    const filename = `${imageType}_${Date.now()}.${extension}`;
+    
+    // Convert buffer to Blob-like object for form-data
+    formData.append('images[]', imageBuffer, {
+      filename: filename,
+      contentType: contentType
+    });
+    
+    if (projectId) {
+      formData.append('project_id', projectId);
+    }
+    if (taskId) {
+      formData.append('task_id', taskId);
+    }
+    if (workspaceId) {
+      formData.append('workspace_id', workspaceId);
+    }
+    if (imageType) {
+      formData.append('type', imageType);
+    }
+
+    // Make API request
+    const axiosModule = await import('axios');
+    const axios = axiosModule.default;
+    
+    // Construct full upload URL - VERIFIED CORRECT ROUTE
+    // Verified route: /api/vue/backend/v1/tracking-images/upload
+    // Handle both cases: baseUrl with/without /api prefix
+    let uploadUrl;
+    if (apiBaseUrl.includes('/api')) {
+      // If baseUrl already has /api, append the endpoint path
+      uploadUrl = `${apiBaseUrl}/vue/backend/v1/tracking-images/upload`;
+    } else {
+      // If baseUrl doesn't have /api, add it before the endpoint path
+      uploadUrl = `${apiBaseUrl}/api/vue/backend/v1/tracking-images/upload`;
+    }
+    
+    // Verify the route matches documentation
+    const expectedRoute = '/api/vue/backend/v1/tracking-images/upload';
+    const actualRoute = uploadUrl.replace(/^https?:\/\/[^\/]+/, ''); // Extract path from full URL
+    
+    if (actualRoute !== expectedRoute) {
+      console.error('[IMAGE UPLOAD] ⚠️  ROUTE MISMATCH!');
+      console.error('[IMAGE UPLOAD] Expected:', expectedRoute);
+      console.error('[IMAGE UPLOAD] Actual:', actualRoute);
+      console.error('[IMAGE UPLOAD] Full URL:', uploadUrl);
+      throw new Error(`Route mismatch! Expected ${expectedRoute}, got ${actualRoute}`);
+    }
+    
+    console.log('[IMAGE UPLOAD] ✅ Route verified:', actualRoute);
+    console.log('[IMAGE UPLOAD] 📤 Uploading to:', uploadUrl);
+    console.log('[IMAGE UPLOAD] 📋 Details:', {
+      imageType,
+      size: `${(imageBuffer.length / 1024).toFixed(2)} KB`,
+      projectId,
+      taskId,
+      workspaceId: workspaceId || 'not provided',
+      hasAuthToken: !!authToken
+    });
+    
+    const response = await axios.post(uploadUrl, formData, {
+      headers: {
+        ...formData.getHeaders(),
+        'Authorization': `Bearer ${authToken}`,
+      },
+      timeout: 60000, // 60 seconds for image upload
+    });
+
+    // Handle API response
+    console.log('[IMAGE UPLOAD] 📋 Full API response:', JSON.stringify(response.data, null, 2));
+    console.log('[IMAGE UPLOAD] 📋 Response status:', response.status);
+    console.log('[IMAGE UPLOAD] 📋 Response structure check:', {
+      hasResult: !!response.data?.result,
+      resultValue: response.data?.result,
+      hasImages: !!response.data?.images,
+      imagesLength: response.data?.images?.length || 0,
+    });
+    
+    if (response.data?.result === true && response.data.images && response.data.images.length > 0) {
+      const uploadedImage = response.data.images[0];
+      console.log('[IMAGE UPLOAD] 📋 Uploaded image object:', JSON.stringify(uploadedImage, null, 2));
+      
+      // Check if image is queued (status: "queued") or completed (status: "completed")
+      const imageStatus = uploadedImage.status || 'unknown';
+      const batchId = response.data.batch_id || uploadedImage.batch_id;
+      
+      // Try to get file URL directly first
+      let fileUrl = uploadedImage.file_url || uploadedImage.fileUrl || uploadedImage.url || uploadedImage.path;
+      
+      if (fileUrl) {
+        // File URL is available immediately
+        console.log('[IMAGE UPLOAD] ✅ Image uploaded successfully!');
+        console.log('[IMAGE UPLOAD] File URL:', fileUrl);
+        console.log('[IMAGE UPLOAD] Image ID:', uploadedImage.id);
+        return fileUrl;
+      } else if (imageStatus === 'queued' && batchId) {
+        // Image is queued - need to poll batch endpoint to get final URL
+        console.log('[IMAGE UPLOAD] ⏳ Image queued for processing, polling batch endpoint...');
+        console.log('[IMAGE UPLOAD] 📋 Batch ID:', batchId);
+        
+        // Poll batch endpoint with retries (max 10 attempts, 2 seconds apart = 20 seconds total)
+        const maxPollAttempts = 10;
+        const pollDelay = 2000; // 2 seconds
+        
+        for (let attempt = 1; attempt <= maxPollAttempts; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, pollDelay));
+          
+          try {
+            console.log(`[IMAGE UPLOAD] 🔄 Polling batch endpoint (attempt ${attempt}/${maxPollAttempts})...`);
+            
+            // Construct batch endpoint URL
+            let batchUrl;
+            if (apiBaseUrl.includes('/api')) {
+              batchUrl = `${apiBaseUrl}/vue/backend/v1/tracking-images/batch/${batchId}`;
+            } else {
+              batchUrl = `${apiBaseUrl}/api/vue/backend/v1/tracking-images/batch/${batchId}`;
+            }
+            
+            const batchResponse = await axios.get(batchUrl, {
+              headers: {
+                'Authorization': `Bearer ${authToken}`,
+              },
+              timeout: 10000,
+            });
+            
+            if (batchResponse.data?.result === true && batchResponse.data.images && batchResponse.data.images.length > 0) {
+              const processedImage = batchResponse.data.images[0];
+              fileUrl = processedImage.file_url || processedImage.fileUrl;
+              
+              if (fileUrl) {
+                console.log('[IMAGE UPLOAD] ✅ Image processing completed!');
+                console.log('[IMAGE UPLOAD] File URL:', fileUrl);
+                return fileUrl;
+              } else {
+                console.log(`[IMAGE UPLOAD] ⏳ Image still processing (no file_url yet), waiting...`);
+              }
+            } else {
+              console.log(`[IMAGE UPLOAD] ⏳ Batch not ready yet, waiting...`);
+            }
+          } catch (pollError) {
+            console.warn(`[IMAGE UPLOAD] ⚠️ Poll attempt ${attempt} failed:`, pollError.message);
+            // Continue to next attempt
+          }
+        }
+        
+        // If we get here, polling failed - throw error
+        throw new Error(`Image processing timeout - batch ID: ${batchId}. Image was queued but processing did not complete within ${maxPollAttempts * pollDelay / 1000} seconds.`);
+      } else {
+        // No file URL and not queued - error
+        console.error('[IMAGE UPLOAD] ❌ File URL is missing in response!');
+        console.error('[IMAGE UPLOAD] 📋 Available fields:', Object.keys(uploadedImage));
+        console.error('[IMAGE UPLOAD] 📋 Image status:', imageStatus);
+        console.error('[IMAGE UPLOAD] 📋 Batch ID:', batchId);
+        throw new Error('File URL not found in API response. Available fields: ' + Object.keys(uploadedImage).join(', ') + ', status: ' + imageStatus);
+      }
+    } else {
+      const errorMsg = '[IMAGE UPLOAD] ❌ Unexpected API response format';
+      console.error(errorMsg);
+      console.error('[IMAGE UPLOAD] 📋 Response data:', JSON.stringify(response.data, null, 2));
+      console.error('[IMAGE UPLOAD] 📋 Expected: result=true, images array with at least 1 item');
+      console.error('[IMAGE UPLOAD] 📋 Actual:', {
+        result: response.data?.result,
+        hasImages: !!response.data?.images,
+        imagesLength: response.data?.images?.length || 0,
+      });
+      throw new Error('Unexpected API response format - upload may have failed');
+    }
+  } catch (error) {
+    console.error('[IMAGE UPLOAD] ❌ FAILED to upload image!');
+    console.error('[IMAGE UPLOAD] Error message:', error.message);
+    if (error.response) {
+      console.error('[IMAGE UPLOAD] Response status:', error.response.status);
+      console.error('[IMAGE UPLOAD] Response data:', error.response.data);
+      console.error('[IMAGE UPLOAD] Response headers:', error.response.headers);
+    }
+    if (error.request) {
+      console.error('[IMAGE UPLOAD] Request made but no response received');
+      console.error('[IMAGE UPLOAD] Request config:', error.config);
+    }
+    // Re-throw error to prevent saving base64
+    throw error;
+  }
+};
+
 // Screenshot capture handler (no screen share needed)
 ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
   try {
@@ -2645,36 +3296,117 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
         console.log('Thumbnail size:', size.width, 'x', size.height);
         
         if (size.width > 0 && size.height > 0) {
-          // Convert to data URL with better quality
+          // Convert to PNG buffer for upload
           const pngBuffer = thumbnail.toPNG();
           const image = nativeImage.createFromBuffer(pngBuffer);
           const dataUrl = image.toDataURL();
           console.log('Screenshot captured successfully, data URL length:', dataUrl.length);
           
-          // Tag screenshot with current task
+          // Upload image to server with retry and deduplication - REQUIRED before saving to JSON
+          let fileUrl = null;
           if (currentTaskId && currentProjectId) {
+            try {
+              // Get workspace ID if available
+              const store = await initStore();
+              const workspaceId = store.get('workspaceId');
+              
+              // Create upload key for deduplication
+              const uploadKey = getUploadKey(pngBuffer, 'screenshot', currentProjectId, currentTaskId);
+              
+              // Check if this exact image is already being uploaded
+              if (activeUploads.has(uploadKey)) {
+                console.log('[TASK-SCREENSHOT] ⚠️ Duplicate upload detected, reusing existing upload...');
+                fileUrl = await activeUploads.get(uploadKey);
+              } else {
+                console.log('[TASK-SCREENSHOT] 🚀 Starting new upload (with retry and deduplication)...');
+                
+                // Create upload promise and store it to prevent duplicates
+                const uploadPromise = retryWithBackoff(async () => {
+                  return await uploadTrackingImage(
+                    pngBuffer,
+                    'screenshot',
+                    currentProjectId,
+                    currentTaskId,
+                    workspaceId
+                  );
+                }, 3, 1000);
+                
+                // Store the promise to prevent duplicate uploads
+                activeUploads.set(uploadKey, uploadPromise);
+                
+                try {
+                  fileUrl = await uploadPromise;
+                  
+                  if (fileUrl) {
+                    console.log('[TASK-SCREENSHOT] ✅ Image uploaded successfully! URL:', fileUrl);
+                  } else {
+                    throw new Error('Upload returned null - no file URL received');
+                  }
+                } finally {
+                  // Remove from active uploads after completion (success or failure)
+                  activeUploads.delete(uploadKey);
+                }
+              }
+            } catch (uploadError) {
+              // Upload failed after all retries - log error and skip saving
+              console.error('[TASK-SCREENSHOT] ❌ Upload failed after retries:', uploadError.message);
+              console.error('[TASK-SCREENSHOT] ⚠️ Screenshot will NOT be saved to JSON (upload required)');
+              console.error('[TASK-SCREENSHOT] 💡 Fix: Enable API, configure API base URL, and ensure authentication token is available');
+              // Don't save screenshot if upload fails - user needs to fix API configuration
+              fileUrl = null;
+            }
+          } else {
+            console.warn('[TASK-SCREENSHOT] ⚠️ No task context (taskId or projectId missing), cannot upload');
+            fileUrl = null;
+          }
+          
+          // Save screenshot to task - ONLY if upload succeeded (fileUrl exists)
+          // Save IMMEDIATELY after upload success (not debounced)
+          if (fileUrl && currentTaskId && currentProjectId) {
             const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
             if (taskData) {
+              // Ensure screenshots array exists
+              if (!taskData.screenshots) {
+                taskData.screenshots = [];
+                console.log('[TASK-SCREENSHOT] ⚠️ Initialized screenshots array (was missing)');
+              }
+              
               const screenshotId = `ss_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-              taskData.screenshots.push({
+              const screenshotData = {
                 id: screenshotId,
                 timestamp: Date.now(),
-                dataUrl: dataUrl,
+                fileUrl: fileUrl, // ONLY save fileUrl, never base64
                 isBlurred: isBlurred,
                 taskId: currentTaskId,
                 projectId: currentProjectId
-              });
+              };
               
-              // Schedule real-time save (debounced) - saves 2 seconds after screenshot
-              scheduleTaskSave(currentProjectId, currentTaskId);
+              taskData.screenshots.push(screenshotData);
+              
+              console.log(`[TASK-SCREENSHOT] 📝 Added screenshot to memory. Total screenshots in memory: ${taskData.screenshots.length}`);
+              console.log(`[TASK-SCREENSHOT] 📝 Screenshot data:`, JSON.stringify(screenshotData, null, 2));
+              
+              // IMMEDIATE save after successful upload (no debounce)
+              scheduleTaskSave(currentProjectId, currentTaskId, null, null, true);
+              
+              console.log(`[TASK-SCREENSHOT] ✅ Screenshot saved to JSON with fileUrl: ${fileUrl.substring(0, 80)}...`);
+              console.log(`[TASK-SCREENSHOT] 💾 Save called, fileUrl length: ${fileUrl.length}`);
               
               if (isDev) {
-                console.log(`[TASK-SCREENSHOT] Tagged screenshot with task ${currentTaskId}, scheduled save`);
+                console.log(`[TASK-SCREENSHOT] Tagged screenshot with task ${currentTaskId}, saved immediately`);
               }
+            } else {
+              console.error('[TASK-SCREENSHOT] ❌ CRITICAL: taskData is null after getTaskTrackingData!');
             }
+          } else if (!fileUrl) {
+            console.error('[TASK-SCREENSHOT] ❌ Cannot save screenshot - upload failed. Fix API configuration.');
+            console.error(`[TASK-SCREENSHOT] Debug: fileUrl=${fileUrl}, currentTaskId=${currentTaskId}, currentProjectId=${currentProjectId}`);
+          } else {
+            console.warn('[TASK-SCREENSHOT] ⚠️ No task context - screenshot captured but not saved to task');
+            console.warn(`[TASK-SCREENSHOT] Debug: fileUrl=${fileUrl}, currentTaskId=${currentTaskId}, currentProjectId=${currentProjectId}`);
           }
           
-          return dataUrl;
+          return dataUrl; // Still return dataUrl for UI display
         } else {
           console.warn('Thumbnail has invalid dimensions');
           return null;
@@ -2688,7 +3420,10 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
       return null;
     }
   } catch (error) {
+    // Only log critical errors that prevent screenshot capture entirely
+    // Upload errors are already handled above and won't reach here
     console.error('Screenshot capture error:', error);
+    // Still return null for critical errors (permissions, capture failure, etc.)
     return null;
   }
 });
@@ -4585,18 +5320,20 @@ function createTray() {
 
 // This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {
-  // Migrate existing files to new folder structure on startup
-  if (isDev) {
-    console.log('[APP] Running migration to new folder structure...');
-  }
-  migrateTrackingDataStructure('default');
-  
   // Pre-initialize store to avoid delays in IPC handlers
   await initStore();
+  
+  // Initialize workspace ID from storage (needed before migration)
+  await initializeWorkspaceId();
+  
+  // Migrate existing files to new folder structure on startup (use actual workspace ID)
+  if (isDev) {
+    console.log('[APP] Running migration to new folder structure with workspace ID:', currentWorkspaceId);
+  }
+  migrateTrackingDataStructure(currentWorkspaceId);
+  
   createWindow();
   createTray();
-  // Migrate existing files to new folder structure on startup
-  migrateTrackingDataStructure('default');
   // Start tracking data watcher for combined insights
   startTrackingDataWatcher();
 
@@ -4684,6 +5421,21 @@ ipcMain.handle('add-activity-log-to-task', async (event, activityLog) => {
   return true;
 });
 
+// Helper function to convert dataUrl to buffer
+const dataUrlToBuffer = (dataUrl) => {
+  try {
+    // Remove data URL prefix (e.g., "data:image/jpeg;base64,")
+    const base64Data = dataUrl.split(',')[1];
+    if (!base64Data) {
+      return null;
+    }
+    return Buffer.from(base64Data, 'base64');
+  } catch (error) {
+    console.error('[IMAGE UPLOAD] Failed to convert dataUrl to buffer:', error);
+    return null;
+  }
+};
+
 // Add webcam photo to current task
 ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
   if (!currentTaskId || !currentProjectId) {
@@ -4695,23 +5447,171 @@ ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
     return false;
   }
   
-  const photoId = `wc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  taskData.webcamPhotos.push({
-    id: photoId,
-    timestamp: Date.now(),
-    dataUrl: photoDataUrl,
-    taskId: currentTaskId,
-    projectId: currentProjectId
-  });
+  // Upload image to server with retry and deduplication - REQUIRED before saving to JSON
+  let fileUrl = null;
+  try {
+    // Convert dataUrl to buffer
+    const imageBuffer = dataUrlToBuffer(photoDataUrl);
+    if (!imageBuffer) {
+      throw new Error('Failed to convert dataUrl to buffer');
+    }
+    
+    // Get workspace ID if available
+    const store = await initStore();
+    const workspaceId = store.get('workspaceId');
+    
+    // Create upload key for deduplication
+    const uploadKey = getUploadKey(imageBuffer, 'webcam_photo', currentProjectId, currentTaskId);
+    
+    // Check if this exact image is already being uploaded
+    if (activeUploads.has(uploadKey)) {
+      console.log('[TASK-WEBCAM] ⚠️ Duplicate upload detected, reusing existing upload...');
+      fileUrl = await activeUploads.get(uploadKey);
+    } else {
+      console.log('[TASK-WEBCAM] 🚀 Starting new upload (with retry and deduplication)...');
+      
+      // Create upload promise and store it to prevent duplicates
+      const uploadPromise = retryWithBackoff(async () => {
+        return await uploadTrackingImage(
+          imageBuffer,
+          'webcam_photo',
+          currentProjectId,
+          currentTaskId,
+          workspaceId
+        );
+      }, 3, 1000);
+      
+      // Store the promise to prevent duplicate uploads
+      activeUploads.set(uploadKey, uploadPromise);
+      
+      try {
+        fileUrl = await uploadPromise;
+        
+        if (fileUrl) {
+          console.log('[TASK-WEBCAM] ✅ Image uploaded successfully! URL:', fileUrl);
+        } else {
+          throw new Error('Upload returned null - no file URL received');
+        }
+      } finally {
+        // Remove from active uploads after completion (success or failure)
+        activeUploads.delete(uploadKey);
+      }
+    }
+  } catch (uploadError) {
+    // Upload failed after all retries - log error and skip saving
+    console.error('[TASK-WEBCAM] ❌ Upload failed after retries:', uploadError.message);
+    console.error('[TASK-WEBCAM] ⚠️ Webcam photo will NOT be saved to JSON (upload required)');
+    console.error('[TASK-WEBCAM] 💡 Fix: Enable API, configure API base URL, and ensure authentication token is available');
+    // Don't save webcam photo if upload fails - user needs to fix API configuration
+    fileUrl = null;
+  }
   
-  // Schedule real-time save (debounced) - saves 2 seconds after webcam photo
-  scheduleTaskSave(currentProjectId, currentTaskId);
+  // Save webcam photo to task - ONLY if upload succeeded (fileUrl exists)
+  // Save IMMEDIATELY after upload success (not debounced)
+  if (fileUrl) {
+    // Ensure webcamPhotos array exists
+    if (!taskData.webcamPhotos) {
+      taskData.webcamPhotos = [];
+      console.log('[TASK-WEBCAM] ⚠️ Initialized webcamPhotos array (was missing)');
+    }
+    
+    const photoId = `wc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const photoData = {
+      id: photoId,
+      timestamp: Date.now(),
+      fileUrl: fileUrl, // ONLY save fileUrl, never base64
+      taskId: currentTaskId,
+      projectId: currentProjectId
+    };
+    
+    taskData.webcamPhotos.push(photoData);
+    
+    console.log(`[TASK-WEBCAM] 📝 Added webcam photo to memory. Total photos in memory: ${taskData.webcamPhotos.length}`);
+    console.log(`[TASK-WEBCAM] 📝 Photo data:`, JSON.stringify(photoData, null, 2));
+    
+    // IMMEDIATE save after successful upload (no debounce)
+    scheduleTaskSave(currentProjectId, currentTaskId, null, null, true);
+    
+    console.log(`[TASK-WEBCAM] ✅ Webcam photo saved to JSON with fileUrl: ${fileUrl.substring(0, 80)}...`);
+    console.log(`[TASK-WEBCAM] 💾 Save called, fileUrl length: ${fileUrl.length}`);
+    
+    if (isDev) {
+      console.log(`[TASK-WEBCAM] Tagged webcam photo with task ${currentTaskId}, saved immediately`);
+    }
+    
+    return true;
+  } else {
+    console.error('[TASK-WEBCAM] ❌ Cannot save webcam photo - upload failed. Fix API configuration.');
+    console.error(`[TASK-WEBCAM] Debug: fileUrl=${fileUrl}, currentTaskId=${currentTaskId}, currentProjectId=${currentProjectId}`);
+    return false;
+  }
   
   if (isDev) {
     console.log(`[TASK-WEBCAM] Tagged webcam photo with task ${currentTaskId}, scheduled save`);
   }
   
   return true;
+});
+
+// Delete tracking image by ID
+ipcMain.handle('delete-tracking-image', async (event, imageId) => {
+  try {
+    const store = await initStore();
+    const settings = store.get('settings', {});
+    
+    if (!settings.apiEnabled || !settings.apiBaseUrl) {
+      return { success: false, error: 'API not enabled' };
+    }
+
+    // Get authentication token
+    let authToken = null;
+    try {
+      const keytar = require('keytar');
+      authToken = await keytar.getPassword('tyro-app', 'login_token');
+      if (!authToken) {
+        authToken = await keytar.getPassword('tyro-app', 'access_token');
+      }
+      if (!authToken && settings.apiKey) {
+        authToken = settings.apiKey;
+      }
+    } catch (e) {
+      if (settings.apiKey) {
+        authToken = settings.apiKey;
+      }
+    }
+
+    if (!authToken) {
+      return { success: false, error: 'No authentication token available' };
+    }
+
+    // Make API request
+    const axiosModule = await import('axios');
+    const axios = axiosModule.default;
+    
+    const deleteUrl = `${settings.apiBaseUrl}/vue/backend/v1/tracking-images/${imageId}`;
+    console.log('[DELETE IMAGE] Deleting image:', deleteUrl);
+    
+    const response = await axios.delete(deleteUrl, {
+      headers: {
+        'Authorization': `Bearer ${authToken}`,
+      },
+      timeout: 30000,
+    });
+
+    // Handle API response
+    if (response.data?.result === true) {
+      console.log('[DELETE IMAGE] ✅ Image deleted successfully');
+      return { success: true, message: response.data.message || 'Image deleted successfully' };
+    } else {
+      return { success: false, error: response.data?.message || 'Failed to delete image' };
+    }
+  } catch (error) {
+    console.error('[DELETE IMAGE] ❌ Failed to delete image:', error.message);
+    return { 
+      success: false, 
+      error: error.response?.data?.message || error.message || 'Failed to delete image' 
+    };
+  }
 });
 
 // Save current task data manually
@@ -5994,4 +6894,5 @@ app.on('will-quit', () => {
     // Ignore cleanup errors
   }
 });
+
 

@@ -303,9 +303,9 @@ export const CombinedInsights: React.FC<CombinedInsightsProps> = ({ onClose }) =
                                 <span>All Tasks ({tasks.length})</span>
                             </h3>
                             <div className="space-y-2 max-h-96 overflow-y-auto custom-scrollbar">
-                                {tasks.map((task) => (
+                                {tasks.map((task, index) => (
                                     <div
-                                        key={`${task.projectId}-${task.taskId}`}
+                                        key={`${task.projectId}-${task.taskId}-${index}-${task.lastUpdated || Date.now()}`}
                                         className="bg-gray-800 rounded p-2 sm:p-3"
                                     >
                                         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-start gap-2 sm:gap-0 mb-2">

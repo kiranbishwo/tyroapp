@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getCurrentTaskTracking: () => ipcRenderer.invoke('get-current-task-tracking'),
   addActivityLogToTask: (activityLog) => ipcRenderer.invoke('add-activity-log-to-task', activityLog),
   addWebcamPhotoToTask: (photoDataUrl) => ipcRenderer.invoke('add-webcam-photo-to-task', photoDataUrl),
+  deleteTrackingImage: (imageId) => ipcRenderer.invoke('delete-tracking-image', imageId),
   saveTaskTrackingData: (projectId, taskId, taskName, projectName) => ipcRenderer.invoke('save-task-tracking-data', projectId, taskId, taskName, projectName),
   loadTaskTrackingData: (projectId, taskId, dateFilter = 'today') => ipcRenderer.invoke('load-task-tracking-data', projectId, taskId, dateFilter),
   getProjectTasksTracking: (projectId) => ipcRenderer.invoke('get-project-tasks-tracking', projectId),
@@ -90,6 +91,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   oauthAuthenticate: () => ipcRenderer.invoke('oauth-authenticate'),
   oauthCheckStatus: () => ipcRenderer.invoke('oauth-check-status'),
   oauthLogout: () => ipcRenderer.invoke('oauth-logout'),
+  oauthDeviceLogout: (token) => ipcRenderer.invoke('oauth-device-logout', token),
   oauthGetAccessToken: () => ipcRenderer.invoke('oauth-get-access-token'),
   oauthGetLoginToken: () => ipcRenderer.invoke('oauth-get-login-token'),
   // OAuth event listeners

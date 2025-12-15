@@ -1934,8 +1934,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                     const timestamp = screenshot.timestamp 
                                         ? new Date(screenshot.timestamp) 
                                         : (screenshot.createdAt ? new Date(screenshot.createdAt) : new Date());
-                                    // Support both dataUrl (base64) and file paths
-                                    const imageUrl = screenshot.dataUrl || screenshot.path || screenshot.url || screenshot.filePath;
+                                    // Prefer fileUrl (server URL) over dataUrl (base64) for better performance
+                                    const imageUrl = screenshot.fileUrl || screenshot.dataUrl || screenshot.path || screenshot.url || screenshot.filePath;
                                     if (imageUrl) { // Only add if imageUrl exists
                                         evidenceItems.push({
                                             id: `json-screenshot-${idx}-${timestamp.getTime()}`,
@@ -1955,8 +1955,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                     const timestamp = photo.timestamp 
                                         ? new Date(photo.timestamp) 
                                         : (photo.createdAt ? new Date(photo.createdAt) : new Date());
-                                    // Support both dataUrl (base64) and file paths
-                                    const photoUrl = photo.dataUrl || photo.path || photo.url || photo.filePath;
+                                    // Prefer fileUrl (server URL) over dataUrl (base64) for better performance
+                                    const photoUrl = photo.fileUrl || photo.dataUrl || photo.path || photo.url || photo.filePath;
                                     if (photoUrl) { // Only add if photoUrl exists
                                         evidenceItems.push({
                                             id: `json-webcam-${idx}-${timestamp.getTime()}`,
