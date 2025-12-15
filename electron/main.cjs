@@ -5934,13 +5934,19 @@ ipcMain.handle('verify-tracking-data', async (event, projectId = null) => {
 });
 
 // Get all tasks from today (for restoration and continuation)
-ipcMain.handle('get-today-tasks', async () => {
+// Optionally filter by workspaceId - if provided, only returns tasks from that workspace
+ipcMain.handle('get-today-tasks', async (event, workspaceId = null) => {
   try {
     const projectRoot = path.join(__dirname, '..');
     const trackingDataPath = path.join(projectRoot, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       return [];
+    }
+    
+    // Get current workspace ID if not provided
+    if (!workspaceId) {
+      workspaceId = await getCurrentWorkspaceId();
     }
     
     // Get today's date in YYYY-MM-DD format
@@ -5952,6 +5958,16 @@ ipcMain.handle('get-today-tasks', async () => {
     const todayTasks = [];
     
     for (const taskFile of taskFiles) {
+      // Filter by workspace if specified (only include tasks from current workspace)
+      if (workspaceId && taskFile.workspaceId && taskFile.workspaceId !== workspaceId) {
+        continue; // Skip tasks from other workspaces
+      }
+      
+      // For old structure files (no workspaceId), include them only if no workspace filter is set
+      // or if we're looking for the default workspace
+      if (workspaceId && !taskFile.workspaceId && workspaceId !== 'default') {
+        continue; // Skip old structure files if filtering by specific workspace
+      }
       try {
         const fileContent = fs.readFileSync(taskFile.filePath, 'utf8');
         const data = JSON.parse(fileContent);
@@ -6089,6 +6105,61 @@ ipcMain.handle('get-today-tasks', async () => {
     return todayTasks;
   } catch (error) {
     console.error('[GET-TODAY-TASKS] Error getting today\'s tasks:', error);
+    return [];
+  }
+});
+
+// Get all tasks (all files, no date filter) - for syncing all files
+ipcMain.handle('get-all-tasks', async () => {
+  try {
+    const projectRoot = path.join(__dirname, '..');
+    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    
+    if (!fs.existsSync(trackingDataPath)) {
+      return [];
+    }
+    
+    // Find all task files using new structure (supports both old and new)
+    const taskFiles = findAllTaskFiles(trackingDataPath);
+    const allTasks = [];
+    
+    for (const taskFile of taskFiles) {
+      try {
+        const fileContent = fs.readFileSync(taskFile.filePath, 'utf8');
+        const data = JSON.parse(fileContent);
+        
+        if (!data.metadata) continue;
+        
+        allTasks.push({
+          projectId: taskFile.projectId,
+          taskId: taskFile.taskId,
+          taskName: data.metadata.taskName || 'Unknown Task',
+          projectName: data.metadata.projectName || 'Unknown Project',
+          createdAt: data.metadata.createdAt,
+          lastUpdated: data.metadata.lastUpdated,
+          totalTime: data.trackingData?.summary?.totalTime || 0,
+          keystrokes: data.trackingData?.summary?.totalKeystrokes || 0,
+          mouseClicks: data.trackingData?.summary?.totalMouseClicks || 0,
+          activityLogCount: data.trackingData?.activityLogs?.length || 0,
+          screenshotCount: data.trackingData?.screenshots?.length || 0,
+          webcamPhotoCount: data.trackingData?.webcamPhotos?.length || 0,
+          summary: data.trackingData?.summary
+        });
+      } catch (error) {
+        console.error(`[GET-ALL-TASKS] Error reading file ${taskFile.filePath}:`, error);
+      }
+    }
+    
+    // Sort by lastUpdated (most recent first)
+    allTasks.sort((a, b) => {
+      const aTime = a.lastUpdated ? new Date(a.lastUpdated).getTime() : 0;
+      const bTime = b.lastUpdated ? new Date(b.lastUpdated).getTime() : 0;
+      return bTime - aTime;
+    });
+    
+    return allTasks;
+  } catch (error) {
+    console.error('[GET-ALL-TASKS] Error getting all tasks:', error);
     return [];
   }
 });

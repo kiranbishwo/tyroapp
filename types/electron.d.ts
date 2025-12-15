@@ -27,7 +27,22 @@ declare global {
             saveTaskTrackingData: (projectId?: string, taskId?: string, taskName?: string, projectName?: string) => Promise<boolean>;
             loadTaskTrackingData: (projectId: string, taskId: string, dateFilter?: 'today' | 'all') => Promise<any | null>;
             getProjectTasksTracking: (projectId: string) => Promise<any[]>;
-            getTodayTasks: () => Promise<Array<{
+            getAllTasks: () => Promise<Array<{
+                projectId: string;
+                taskId: string;
+                taskName: string;
+                projectName: string;
+                createdAt: string;
+                lastUpdated: string;
+                totalTime: number;
+                keystrokes: number;
+                mouseClicks: number;
+                activityLogCount: number;
+                screenshotCount: number;
+                webcamPhotoCount: number;
+                summary?: any;
+            }>>;
+            getTodayTasks: (workspaceId?: string | null) => Promise<Array<{
                 projectId: string;
                 taskId: string;
                 taskName: string;

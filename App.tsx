@@ -659,14 +659,14 @@ const App: React.FC = () => {
             isUserCheckedIn,
             authStateDataIsAuth: authStateData.isAuthenticated,
             hasElectronAPI: !!window.electronAPI,
-            hasGetTodayTasks: !!window.electronAPI?.getTodayTasks,
+            hasGetAllTasks: !!window.electronAPI?.getAllTasks,
             currentWorkspace: currentWorkspace?.workspace_id || 'none',
         });
 
         // Allow upload if user is checked in OR authenticated OR has login token
         const isAuthenticated = isAuthFromState || hasLoginToken || isUserCheckedIn;
         
-        if (!isAuthenticated || !window.electronAPI?.getTodayTasks) {
+        if (!isAuthenticated || !window.electronAPI?.getAllTasks) {
             const errorMsg = 'Not authenticated or API not available';
             console.error('[UPLOAD] ❌', errorMsg, {
                 isAuthFromState,
@@ -674,7 +674,7 @@ const App: React.FC = () => {
                 isUserCheckedIn,
                 authStateDataIsAuth: authStateData.isAuthenticated,
                 hasElectronAPI: !!window.electronAPI,
-                hasGetTodayTasks: !!window.electronAPI?.getTodayTasks,
+                hasGetAllTasks: !!window.electronAPI?.getAllTasks,
             });
             if (showStatus) {
                 setSyncStatus('error');
@@ -708,12 +708,17 @@ const App: React.FC = () => {
                 return;
             }
 
-            console.log('[UPLOAD] 📋 Step 1: Getting today\'s tasks from Electron...');
-            const todayTasks = await window.electronAPI.getTodayTasks();
-            console.log('[UPLOAD] 📋 Today\'s tasks received:', JSON.stringify(todayTasks, null, 2));
-            console.log('[UPLOAD] 📊 Task count:', todayTasks.length);
+            // Get current workspace ID for filtering
+            const workspaceId = currentWorkspace?.workspace_id?.toString() || null;
+            console.log('[UPLOAD] 📋 Step 1: Getting today\'s tasks from Electron (workspace:', workspaceId || 'all', ')...');
             
-            if (todayTasks.length === 0) {
+            // Get only today's tasks for current workspace
+            const allTasks = await window.electronAPI.getTodayTasks(workspaceId);
+            console.log('[UPLOAD] 📋 Today\'s tasks received:', JSON.stringify(allTasks, null, 2));
+            console.log('[UPLOAD] 📊 Task count:', allTasks.length);
+            console.log('[UPLOAD] 📋 Filtered by workspace:', workspaceId || 'all workspaces');
+            
+            if (allTasks.length === 0) {
                 const msg = 'No tasks to upload';
                 console.log('[UPLOAD] ⚠️', msg);
                 if (showStatus) {
@@ -725,17 +730,18 @@ const App: React.FC = () => {
                 return;
             }
 
-            console.log(`[UPLOAD] 📋 Step 2: Starting upload of ${todayTasks.length} tracking file(s)...`);
+            console.log(`[UPLOAD] 📋 Step 2: Starting upload of ${allTasks.length} tracking file(s) one by one...`);
             if (showStatus) {
-                setSyncMessage(`Syncing ${todayTasks.length} task(s)...`);
+                setSyncMessage(`Syncing ${allTasks.length} task(s)...`);
             }
 
             let successCount = 0;
             let errorCount = 0;
             const errors: string[] = [];
 
-            for (let i = 0; i < todayTasks.length; i++) {
-                const task = todayTasks[i];
+            // Upload files one by one sequentially
+            for (let i = 0; i < allTasks.length; i++) {
+                const task = allTasks[i];
                 console.log(`[UPLOAD] ========================================`);
                 console.log(`[UPLOAD] 📤 Task ${i + 1}/${todayTasks.length}: ${task.taskId} (project: ${task.projectId})`);
                 console.log(`[UPLOAD] 📋 Task details:`, JSON.stringify(task, null, 2));
@@ -2568,6 +2574,9 @@ const App: React.FC = () => {
                     const workspace = authState.getCurrentWorkspace();
                     const workspaceId = workspace?.workspace_id?.toString() || currentWorkspace?.workspace_id?.toString();
                     
+                    // Navigate to dashboard first (so user sees loading state)
+                    setView(AppView.DASHBOARD);
+                    
                     if (workspaceId) {
                         console.log('[CHECK-IN] Fetching projects and tasks after check-in...', { workspaceId });
                         // Use Promise.all to fetch both in parallel
@@ -2579,9 +2588,6 @@ const App: React.FC = () => {
                     } else {
                         console.warn('[CHECK-IN] ⚠️ No workspace ID available, cannot fetch projects/tasks');
                     }
-                    
-                    // Navigate to dashboard
-                    setView(AppView.DASHBOARD);
                 } else {
                     // Check-in API failed
                     const errorMessage = checkInResult.error || checkInResult.message || 'Check-in failed';
@@ -3175,7 +3181,11 @@ const App: React.FC = () => {
         );
     }
 
-    if (view === AppView.CHECK_IN_OUT) {
+    // Don't show CHECK_IN_OUT view if user just checked in and we're loading data
+    // This prevents showing checkout page immediately after check-in
+    const shouldShowCheckInOut = view === AppView.CHECK_IN_OUT && !(user?.isCheckedIn && (projectsLoading || tasksLoading));
+    
+    if (shouldShowCheckInOut) {
         return (
             <div className="min-h-screen bg-gray-950 flex flex-col font-sans">
                 <TitleBar />
@@ -3240,16 +3250,25 @@ const App: React.FC = () => {
                                 // Stop camera
                                 stopCamera();
                                 
-                                // Fetch projects and tasks after successful check-in
-                                if (currentWorkspace) {
-                                    const workspaceId = currentWorkspace.workspace_id.toString();
-                                    console.log('[CHECK-IN] Fetching projects and tasks after check-in...');
-                                    await fetchProjects(workspaceId);
-                                    await fetchTasks(undefined, workspaceId);
-                                }
+                                // Get workspace ID
+                                const workspace = authState.getCurrentWorkspace();
+                                const workspaceId = workspace?.workspace_id?.toString() || currentWorkspace?.workspace_id?.toString();
                                 
-                                // Navigate to dashboard
+                                // Navigate to dashboard FIRST (so user sees loading state)
                                 setView(AppView.DASHBOARD);
+                                
+                                // Fetch projects and tasks after successful check-in
+                                if (workspaceId) {
+                                    console.log('[CHECK-IN] Fetching projects and tasks after check-in...', { workspaceId });
+                                    // Use Promise.all to fetch both in parallel
+                                    await Promise.all([
+                                        fetchProjects(workspaceId),
+                                        fetchTasks(undefined, workspaceId)
+                                    ]);
+                                    console.log('[CHECK-IN] ✅ Projects and tasks fetched successfully');
+                                } else {
+                                    console.warn('[CHECK-IN] ⚠️ No workspace ID available, cannot fetch projects/tasks');
+                                }
                             } else {
                                 const errorMessage = checkInResult.error || checkInResult.message || 'Check-in failed';
                                 console.error('[CHECK-IN] Check-in failed:', errorMessage);
@@ -3859,7 +3878,16 @@ const App: React.FC = () => {
                         {/* Glow effect when running */}
                         {isTimerRunning && <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 via-purple-500 to-blue-500 animate-gradient"></div>}
                         
-                        {!isTimerRunning && !selectedProjectId && (
+                        {/* Show loading state while fetching projects/tasks after check-in */}
+                        {(projectsLoading || tasksLoading) && !isTimerRunning && !selectedProjectId ? (
+                            <div className="max-w-5xl mx-auto w-full py-12">
+                                <div className="text-center">
+                                    <i className="fas fa-spinner fa-spin text-4xl text-blue-400 mb-4 block"></i>
+                                    <p className="text-gray-300 text-sm sm:text-base">Loading projects and tasks...</p>
+                                    <p className="text-gray-500 text-xs mt-2">Please wait while we fetch your data</p>
+                                </div>
+                            </div>
+                        ) : !isTimerRunning && !selectedProjectId && (
                             /* Step 1: Project Selection with Resume Option */
                             <div className="max-w-5xl mx-auto w-full">
                                 {/* Resume Last Task Section */}

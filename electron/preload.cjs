@@ -31,7 +31,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveTaskTrackingData: (projectId, taskId, taskName, projectName) => ipcRenderer.invoke('save-task-tracking-data', projectId, taskId, taskName, projectName),
   loadTaskTrackingData: (projectId, taskId, dateFilter = 'today') => ipcRenderer.invoke('load-task-tracking-data', projectId, taskId, dateFilter),
   getProjectTasksTracking: (projectId) => ipcRenderer.invoke('get-project-tasks-tracking', projectId),
-  getTodayTasks: () => ipcRenderer.invoke('get-today-tasks'),
+  getTodayTasks: (workspaceId) => ipcRenderer.invoke('get-today-tasks', workspaceId),
+  getAllTasks: () => ipcRenderer.invoke('get-all-tasks'),
   getTrackingDataPath: () => ipcRenderer.invoke('get-tracking-data-path'),
   verifyTrackingData: (projectId) => ipcRenderer.invoke('verify-tracking-data', projectId),
   // Active task state management (for restoration on app restart)
