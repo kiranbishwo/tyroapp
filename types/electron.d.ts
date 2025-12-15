@@ -109,6 +109,7 @@ declare global {
             oauthCheckStatus: () => Promise<{ authenticated: boolean; user?: any; workspaces?: any[]; currentWorkspace?: any; expires_at?: number; error?: string }>;
             oauthLogout: () => Promise<{ success: boolean; error?: string }>;
             oauthDeviceLogout: (token?: string) => Promise<{ success: boolean; message?: string; error?: string }>;
+            oauthForceLogout: () => Promise<{ success: boolean; message?: string; error?: string }>;
             oauthGetAccessToken: () => Promise<{ token: string | null; expired?: boolean; error?: string }>;
             oauthGetLoginToken: () => Promise<{ token: string | null; expired?: boolean; error?: string }>;
             oauthSetWorkspace: (workspaceId: string | number) => Promise<{ success: boolean; error?: string }>;

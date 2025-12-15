@@ -878,7 +878,7 @@ class ApiService {
             }
 
             // Get workspace domain (dynamic from authState based on current workspace)
-            // Format: http://{workspace_domain}:8000/api/vue/backend/attendance/face/check
+            // Format: https://{workspace_domain}/api/vue/backend/attendance/face/check
             let workspaceDomain = authState.getWorkspaceDomain();
             
             // Fallback: Try to get from full response if available
@@ -993,11 +993,14 @@ class ApiService {
 
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
+            // Normalize old test domains to production domain
+            if (cleanDomain.includes('tyrodesk.test')) {
+                cleanDomain = cleanDomain.replace(/\.test$/, '.com');
+            }
             
-            // Use environment-based protocol and port
-            const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
-            const protocol = isDev ? 'http' : 'https';
-            const port = isDev ? ':8000' : '';
+            // Always use https for production domain
+            const protocol = 'https';
+            const port = '';
             
             // Construct the full API URL
             const apiUrl = `${protocol}://${cleanDomain}${port}/api/vue/backend/attendance/face/check`;
@@ -1114,11 +1117,14 @@ class ApiService {
 
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
+            // Normalize old test domains to production domain
+            if (cleanDomain.includes('tyrodesk.test')) {
+                cleanDomain = cleanDomain.replace(/\.test$/, '.com');
+            }
             
-            // Use environment-based protocol and port
-            const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
-            const protocol = isDev ? 'http' : 'https';
-            const port = isDev ? ':8000' : '';
+            // Always use https for production domain
+            const protocol = 'https';
+            const port = '';
             
             // Construct the full API URL
             const apiUrl = `${protocol}://${cleanDomain}${port}/api/vue/backend/attendance/check-in`;
@@ -1201,11 +1207,14 @@ class ApiService {
 
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
+            // Normalize old test domains to production domain
+            if (cleanDomain.includes('tyrodesk.test')) {
+                cleanDomain = cleanDomain.replace(/\.test$/, '.com');
+            }
             
-            // Use environment-based protocol and port
-            const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
-            const protocol = isDev ? 'http' : 'https';
-            const port = isDev ? ':8000' : '';
+            // Always use https for production domain
+            const protocol = 'https';
+            const port = '';
             
             // Construct the full API URL (with or without attendance_id)
             const endpoint = API_ENDPOINTS.ATTENDANCE.CHECK_OUT(checkOutData.attendance_id);

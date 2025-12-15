@@ -14,7 +14,7 @@ const STATIC_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJUeXJvZGVza
 
 // Configuration
 const CONFIG = {
-    BASE_URL: process.env.TEST_BASE_URL || 'http://kiran.tyrodesk.test:8000',
+    BASE_URL: process.env.TEST_BASE_URL || 'https://kiran.tyrodesk.com',
     ENDPOINT: '/api/vue/backend/attendance/face/check'
 };
 

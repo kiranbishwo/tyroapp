@@ -93,6 +93,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   oauthCheckStatus: () => ipcRenderer.invoke('oauth-check-status'),
   oauthLogout: () => ipcRenderer.invoke('oauth-logout'),
   oauthDeviceLogout: (token) => ipcRenderer.invoke('oauth-device-logout', token),
+  oauthForceLogout: () => ipcRenderer.invoke('oauth-force-logout'),
   oauthGetAccessToken: () => ipcRenderer.invoke('oauth-get-access-token'),
   oauthGetLoginToken: () => ipcRenderer.invoke('oauth-get-login-token'),
   // OAuth event listeners

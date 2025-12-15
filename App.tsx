@@ -1433,6 +1433,100 @@ const App: React.FC = () => {
         setView(AppView.CHECK_IN_OUT); 
     };
     
+    // Force logout handler - bypasses API requirement and clears everything
+    const handleForceLogout = async () => {
+        try {
+            console.log('[APP] 🔥 Force logout - clearing all authentication data...');
+            
+            // Stop camera if running
+            if (cameraStream) {
+                stopCamera();
+            }
+            
+            // Stop timer if running
+            if (isTimerRunning) {
+                setIsTimerRunning(false);
+                setStartTime(null);
+                setElapsedSeconds(0);
+            }
+            
+            // Clear tokens from keytar (force logout)
+            if (window.electronAPI?.oauthForceLogout) {
+                try {
+                    const result = await window.electronAPI.oauthForceLogout();
+                    if (result.success) {
+                        console.log('[APP] ✅ Force logout - tokens cleared from keytar storage');
+                    } else {
+                        console.warn('[APP] ⚠️ Force logout keytar clear failed:', result.error);
+                    }
+                } catch (error) {
+                    console.error('[APP] Error during force logout keytar clear:', error);
+                }
+            }
+            
+            // Also try regular logout as fallback
+            if (window.electronAPI?.oauthLogout) {
+                try {
+                    await window.electronAPI.oauthLogout();
+                } catch (error) {
+                    console.error('[APP] Error during fallback logout:', error);
+                }
+            }
+            
+            // Clear ALL localStorage items related to auth
+            const keysToRemove = [
+                'login_token',
+                'device_token',
+                'device_code',
+                'user_code',
+                'device_code_data',
+                'auth_full_response',
+                'oauth_state',
+                'oauth_code_verifier',
+                'oauth_nonce'
+            ];
+            
+            keysToRemove.forEach(key => {
+                try {
+                    localStorage.removeItem(key);
+                } catch (e) {
+                    console.warn(`[APP] Could not remove ${key}:`, e);
+                }
+            });
+            
+            console.log('[APP] ✅ Cleared all auth data from localStorage');
+            
+            // Clear auth state
+            authState.clearAuth();
+            
+            // Clear local user state
+            setUser(null);
+            setAuthenticatedUser(null);
+            setWorkspaces([]);
+            setCurrentWorkspace(null);
+            
+            // Navigate to login view
+            setView(AppView.LOGIN);
+            setShowUserMenu(false);
+            
+            console.log('[APP] ✅ Force logout complete - ready for new login');
+        } catch (error) {
+            console.error('[APP] Error during force logout:', error);
+            // Even if there's an error, try to clear what we can and navigate to login
+            try {
+                localStorage.clear();
+                authState.clearAuth();
+                setUser(null);
+                setAuthenticatedUser(null);
+                setWorkspaces([]);
+                setCurrentWorkspace(null);
+                setView(AppView.LOGIN);
+            } catch (e) {
+                console.error('[APP] Error during emergency cleanup:', e);
+            }
+        }
+    };
+
     // Logout handler
     const handleLogout = async () => {
         try {
@@ -1450,11 +1544,11 @@ const App: React.FC = () => {
                 setElapsedSeconds(0);
             }
             
-            // STEP 1: Call device logout API FIRST (unlinks device from server)
+            // STEP 1: Try to call device logout API FIRST (unlinks device from server)
             // According to documentation: POST /api/V11/auth/device/logout
             // Uses JWT Token (login_token) from localStorage as Bearer token
             // Works from ANY domain (main or subdomain)
-            // WAIT for success response before proceeding with local logout
+            // If API fails, fall back to force logout
             let deviceLogoutSuccess = false;
             
             // Get login_token (Bearer token) from localStorage
@@ -1477,7 +1571,8 @@ const App: React.FC = () => {
             
             console.log('[APP] Using login_token (Bearer token) for logout:', bearerToken ? `${bearerToken.substring(0, 20)}...` : 'not found');
             
-            if (window.electronAPI?.oauthDeviceLogout) {
+            // Try device logout API, but don't block if it fails
+            if (window.electronAPI?.oauthDeviceLogout && bearerToken) {
                 try {
                     console.log('[APP] Calling device logout API on main domain...');
                     // Pass the login_token (Bearer token) to the main process
@@ -1487,32 +1582,19 @@ const App: React.FC = () => {
                         console.log('[APP] ✅ Device logout API success:', deviceLogoutResult.message);
                         deviceLogoutSuccess = true;
                     } else {
-                        console.error('[APP] ❌ Device logout API failed:', deviceLogoutResult.error);
-                        // Don't proceed with logout if API fails
-                        alert(`Logout failed: ${deviceLogoutResult.error || 'Device logout API returned an error'}. Please try again.`);
-                        return; // Exit - don't clear localStorage or logout
+                        console.warn('[APP] ⚠️ Device logout API failed, will proceed with local logout:', deviceLogoutResult.error);
+                        // Continue with local logout even if API fails
                     }
                 } catch (error: any) {
-                    console.error('[APP] ❌ Error calling device logout API:', error);
-                    // Don't proceed with logout if API call throws error
-                    const errorMessage = error?.message || error?.error || 'Failed to call device logout API';
-                    alert(`Logout failed: ${errorMessage}. Please try again.`);
-                    return; // Exit - don't clear localStorage or logout
+                    console.warn('[APP] ⚠️ Error calling device logout API, will proceed with local logout:', error);
+                    // Continue with local logout even if API call throws error
                 }
             } else {
-                console.warn('[APP] ⚠️ oauthDeviceLogout API not available');
-                // If API is not available, we can't proceed safely
-                alert('Logout API is not available. Please try again.');
-                return; // Exit - don't clear localStorage or logout
+                console.warn('[APP] ⚠️ Device logout API not available or no token, proceeding with local logout');
             }
             
-            // STEP 2: Only proceed with local logout if device logout API was successful
-            if (!deviceLogoutSuccess) {
-                console.error('[APP] ❌ Device logout API did not succeed, aborting logout');
-                return; // Don't proceed
-            }
-            
-            console.log('[APP] Device logout API succeeded, proceeding with local logout...');
+            // STEP 2: Proceed with local logout regardless of API result
+            console.log('[APP] Proceeding with local logout...');
             
             // Clear tokens from local storage (keytar)
             if (window.electronAPI?.oauthLogout) {
@@ -1552,11 +1634,28 @@ const App: React.FC = () => {
             
             console.log('[APP] ✅ Logout complete - ready for new login');
         } catch (error) {
-            console.error('[APP] Error during logout:', error);
-            // Don't navigate to login if logout process failed
-            alert('An error occurred during logout. Please try again.');
+            console.error('[APP] Error during logout, attempting force logout:', error);
+            // If regular logout fails, try force logout
+            await handleForceLogout();
         }
     };
+
+    // Keyboard shortcut for force logout (Ctrl+Shift+L)
+    useEffect(() => {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            // Ctrl+Shift+L for force logout
+            if (event.ctrlKey && event.shiftKey && event.key === 'L') {
+                event.preventDefault();
+                console.log('[APP] 🔥 Force logout triggered via keyboard shortcut (Ctrl+Shift+L)');
+                handleForceLogout();
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+        };
+    }, []); // Empty dependency array - handleForceLogout is stable
 
     // Start camera when navigating to CHECK_IN_OUT view (for checkout/checkin)
     useEffect(() => {
@@ -3195,9 +3294,9 @@ const App: React.FC = () => {
                     {/* Logout Button - Top Right (only show on check-in, not check-out) */}
                     {!user?.isCheckedIn && (
                         <button
-                            onClick={handleLogout}
+                            onClick={handleForceLogout}
                             className="absolute top-3 sm:top-4 right-3 sm:right-4 z-20 bg-red-600 hover:bg-red-500 text-white px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors flex items-center gap-2 shadow-lg"
-                            title="Logout and login again to get fresh token"
+                            title="Logout and clear all authentication data (Ctrl+Shift+L)"
                         >
                             <i className="fas fa-sign-out-alt"></i>
                             <span className="hidden sm:inline">Logout</span>
@@ -3626,14 +3725,14 @@ const App: React.FC = () => {
                                         {/* Logout Section */}
                                         <div className="p-2 border-t border-gray-700">
                                             <button
-                                                onClick={handleLogout}
+                                                onClick={handleForceLogout}
                                                 className="w-full px-3 py-2.5 rounded-md text-xs font-medium transition-all flex items-center gap-2 text-left text-red-400 hover:bg-red-900/20 hover:text-red-300"
                                             >
                                                 <i className="fas fa-sign-out-alt text-[10px]"></i>
                                                 <span>Logout</span>
                                             </button>
                                             <p className="text-[10px] text-gray-500 mt-2 px-3">
-                                                Logout to switch accounts or unlink this device
+                                                Logout to switch accounts or unlink this device. Clears all authentication data.
                                             </p>
                                         </div>
                                     </div>

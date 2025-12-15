@@ -301,11 +301,16 @@ class AuthStateManager {
             let cleanDomain = domain.replace(/^https?:\/\//, '');
             // Remove port if present
             cleanDomain = cleanDomain.split(':')[0];
-            return `http://${cleanDomain}:8000/api`;
+            // Normalize old test domains to production domain
+            if (cleanDomain.includes('tyrodesk.test')) {
+                cleanDomain = cleanDomain.replace(/\.test$/, '.com');
+            }
+            // Always use https for production domain
+            return `https://${cleanDomain}/api`;
         }
         // Fallback to environment-based default
         const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
-        return isDev ? 'http://tyrodesk.test:8000/api' : 'https://tyrodesk.com/api';
+        return isDev ? 'https://tyrodesk.com/api' : 'https://tyrodesk.com/api';
     }
 }
 

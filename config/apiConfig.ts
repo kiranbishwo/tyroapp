@@ -20,7 +20,7 @@ const getDefaultApiBaseUrl = (): string => {
     }
     // Use environment-based defaults
     const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
-    return isDev ? 'http://tyrodesk.test:8000/api' : 'https://tyrodesk.com/api';
+    return isDev ? 'https://tyrodesk.com/api' : 'https://tyrodesk.com/api';
 };
 
 // Default API configuration
