@@ -12,9 +12,20 @@ export interface ApiConfig {
     syncInterval: number; // seconds
 }
 
+// Get default API base URL based on environment
+const getDefaultApiBaseUrl = (): string => {
+    // Check for explicit environment variable first
+    if (import.meta.env.VITE_API_BASE_URL) {
+        return import.meta.env.VITE_API_BASE_URL;
+    }
+    // Use environment-based defaults
+    const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
+    return isDev ? 'http://tyrodesk.test:8000/api' : 'https://tyrodesk.com/api';
+};
+
 // Default API configuration
 const DEFAULT_CONFIG: ApiConfig = {
-    baseUrl: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api',
+    baseUrl: getDefaultApiBaseUrl(),
     apiKey: import.meta.env.VITE_API_KEY || '',
     timeout: 30000, // 30 seconds
     enabled: import.meta.env.VITE_API_ENABLED === 'true' || false,

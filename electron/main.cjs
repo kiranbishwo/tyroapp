@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, nativeImage, globalShortcut, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, nativeImage, globalShortcut, Tray, Menu, dialog } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -1487,21 +1488,29 @@ const getAllWindowStats = () => {
 };
 
 function createWindow() {
-  // Get the logo path for the app icon
+  // Get the icon path for the app icon
   // Try multiple possible paths for dev and production
+  // Priority: favicon.ico (Windows icon format) > logo.png
   const possiblePaths = [
-    path.join(__dirname, '../public/logo.png'), // Dev mode
-    path.join(__dirname, '../dist/logo.png'), // Production (Vite copies public to dist)
-    path.join(process.cwd(), 'public/logo.png'), // Alternative dev path
-    path.join(process.cwd(), 'dist/logo.png') // Alternative production path
+    path.join(__dirname, '../favicon.ico'), // Root directory (dev and production)
+    path.join(process.cwd(), 'favicon.ico'), // Alternative path
+    path.join(__dirname, '../public/logo.png'), // Fallback: Dev mode
+    path.join(__dirname, '../dist/logo.png'), // Fallback: Production (Vite copies public to dist)
+    path.join(process.cwd(), 'public/logo.png'), // Fallback: Alternative dev path
+    path.join(process.cwd(), 'dist/logo.png') // Fallback: Alternative production path
   ];
   
   let iconPath = undefined;
-  for (const logoPath of possiblePaths) {
-    if (fs.existsSync(logoPath)) {
-      iconPath = logoPath;
+  for (const iconFilePath of possiblePaths) {
+    if (fs.existsSync(iconFilePath)) {
+      iconPath = iconFilePath;
+      console.log('[WINDOW] Using icon:', iconPath);
       break;
     }
+  }
+  
+  if (!iconPath) {
+    console.warn('[WINDOW] ⚠️ No icon file found, using default Electron icon');
   }
 
   mainWindow = new BrowserWindow({
@@ -1528,8 +1537,10 @@ function createWindow() {
     // Development: Load from Vite dev server
     mainWindow.loadURL('http://localhost:3000');
   } else {
-    // Production: Load from built files
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    // Production: Load from built files - NEVER use localhost in production
+    const distPath = path.join(__dirname, '../dist/index.html');
+    console.log('[PRODUCTION] Loading from:', distPath);
+    mainWindow.loadFile(distPath);
   }
 
   // Show window immediately when ready (faster startup)
@@ -1546,6 +1557,11 @@ function createWindow() {
       setTimeout(() => {
         mainWindow.loadURL('http://localhost:3000');
       }, 2000);
+    } else {
+      // Production: Retry loading from file, NEVER use localhost
+      const distPath = path.join(__dirname, '../dist/index.html');
+      console.error('[PRODUCTION] Retrying load from:', distPath);
+      mainWindow.loadFile(distPath);
     }
   });
 
@@ -2563,24 +2579,34 @@ ipcMain.handle('oauth-device-logout', async (event, bearerTokenFromRenderer = nu
     }
     
     // According to documentation: API works from ANY domain (main or subdomain)
-    // Extract domain from apiBaseUrl or use default
-    let apiDomain = 'tyrodesk.test:8000';
+    // Extract domain from apiBaseUrl or use environment-based default
+    // Default: dev = tyrodesk.test:8000, production = tyrodesk.com
+    const defaultDomain = isDev ? 'tyrodesk.test:8000' : 'tyrodesk.com';
+    let apiDomain = defaultDomain;
     
     // Try to extract domain from apiBaseUrl if available
     if (settings.apiBaseUrl) {
       try {
         const url = new URL(settings.apiBaseUrl);
         const hostname = url.hostname;
-        apiDomain = hostname + (url.port ? `:${url.port}` : ':8000');
+        // For production, don't add port (uses HTTPS on 443)
+        // For dev, add port 8000 if not specified
+        if (isDev) {
+          apiDomain = hostname + (url.port ? `:${url.port}` : ':8000');
+        } else {
+          apiDomain = hostname; // Production uses HTTPS, no port needed
+        }
         console.log('[OAUTH] Using domain from settings:', apiDomain);
       } catch (e) {
-        console.warn('[OAUTH] Could not parse apiBaseUrl, using default domain');
+        console.warn('[OAUTH] Could not parse apiBaseUrl, using default domain:', defaultDomain);
       }
     }
     
     // Construct logout URL - use /api/V11/auth/device/logout (primary) or /api/auth/device/logout (alternative)
     // According to documentation: POST /api/V11/auth/device/logout (primary endpoint)
-    const logoutUrl = `http://${apiDomain}/api/V11/auth/device/logout`;
+    // Use http for dev, https for production
+    const protocol = isDev ? 'http' : 'https';
+    const logoutUrl = `${protocol}://${apiDomain}/api/V11/auth/device/logout`;
     console.log('[OAUTH] Calling device logout API:', logoutUrl);
     console.log('[OAUTH] Using Bearer token (login_token) (first 20 chars):', bearerToken.substring(0, 20) + '...');
     
@@ -5318,6 +5344,32 @@ function createTray() {
   }, 100);
 }
 
+// Auto-updater event listeners
+autoUpdater.on('checking-for-update', () => {
+  console.log('Checking for update...');
+});
+
+autoUpdater.on('update-available', () => {
+  dialog.showMessageBox({
+    type: 'info',
+    title: 'Update available',
+    message: 'A new version is downloading in background.'
+  });
+});
+
+autoUpdater.on('update-downloaded', () => {
+  dialog.showMessageBox({
+    title: 'Update Ready',
+    message: 'Update downloaded. App will restart now.',
+  }).then(() => {
+    autoUpdater.quitAndInstall();
+  });
+});
+
+autoUpdater.on('error', (err) => {
+  console.error('Update error:', err);
+});
+
 // This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {
   // Pre-initialize store to avoid delays in IPC handlers
@@ -5336,6 +5388,11 @@ app.whenReady().then(async () => {
   createTray();
   // Start tracking data watcher for combined insights
   startTrackingDataWatcher();
+
+  // Check for updates (only in production)
+  if (!isDev) {
+    autoUpdater.checkForUpdatesAndNotify();
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

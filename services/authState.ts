@@ -81,6 +81,7 @@ class AuthStateManager {
                 currentWorkspace,
                 token: null, // Token is retrieved via IPC when needed
                 expiresAt: status.expires_at || null,
+                fullResponse: null, // Will be set when full auth data is available
             };
         } catch (error) {
             console.error('Failed to get full auth data:', error);
@@ -302,8 +303,9 @@ class AuthStateManager {
             cleanDomain = cleanDomain.split(':')[0];
             return `http://${cleanDomain}:8000/api`;
         }
-        // Fallback to default
-        return 'http://tyrodesk.test:8000/api';
+        // Fallback to environment-based default
+        const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
+        return isDev ? 'http://tyrodesk.test:8000/api' : 'https://tyrodesk.com/api';
     }
 }
 

@@ -1,25 +1,27 @@
 {
-  "name": "tempo---ai-time-&-attendance",
+  "name": "tyrodesk-app",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.1",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
+    "build:renderer": "vite build",
+    "build:electron": "electron-builder",
+    "build": "npm run build:renderer && npm run build:electron",
+
     "electron:dev": "concurrently \"cross-env NODE_ENV=development vite\" \"wait-on http://localhost:3000 && cross-env NODE_ENV=development electron .\"",
-    "electron:build": "npm run build && electron-builder",
-    "electron:pack": "npm run build && electron-builder --dir",
-    "postinstall": "node scripts/rebuild-check.cjs || echo '⚠️  Native rebuild skipped - app will use PowerShell fallback (this is OK!)'",
-    "postinstall:force": "electron-rebuild",
-    "postinstall:skip": "echo 'Skipping native module rebuild'"
+
+    "electron:pack": "npm run build:renderer && electron-builder --dir",
+
+    "postinstall": "node scripts/rebuild-check.cjs || echo '⚠️  Native rebuild skipped - app will use PowerShell fallback (this is OK!)'"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
     "active-win": "^9.0.0",
     "axios": "^1.7.7",
     "electron-store": "^10.1.0",
+    "electron-updater": "^6.6.2",
     "keytar": "^7.9.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -42,7 +44,7 @@
   },
   "build": {
     "appId": "com.tempo.app",
-    "productName": "Tempo",
+    "productName": "Tyrodesk Tracker",
     "directories": {
       "output": "release"
     },
@@ -53,8 +55,21 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "build/icon.ico"
+      "icon": "favicon.ico"
     },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "kiranbishwo",
+        "repo": "tyroapp"
+      }
+    ],
     "mac": {
       "target": "dmg",
       "icon": "build/icon.icns"

@@ -994,8 +994,13 @@ class ApiService {
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
             
+            // Use environment-based protocol and port
+            const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
+            const protocol = isDev ? 'http' : 'https';
+            const port = isDev ? ':8000' : '';
+            
             // Construct the full API URL
-            const apiUrl = `http://${cleanDomain}:8000/api/vue/backend/attendance/face/check`;
+            const apiUrl = `${protocol}://${cleanDomain}${port}/api/vue/backend/attendance/face/check`;
 
             console.log('[FACE CHECK] Using workspace domain:', workspaceDomain);
             console.log('[FACE CHECK] API URL:', apiUrl);
@@ -1110,8 +1115,13 @@ class ApiService {
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
             
+            // Use environment-based protocol and port
+            const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
+            const protocol = isDev ? 'http' : 'https';
+            const port = isDev ? ':8000' : '';
+            
             // Construct the full API URL
-            const apiUrl = `http://${cleanDomain}:8000/api/vue/backend/attendance/check-in`;
+            const apiUrl = `${protocol}://${cleanDomain}${port}/api/vue/backend/attendance/check-in`;
 
             console.log('[CHECK-IN] Using workspace domain:', workspaceDomain);
             console.log('[CHECK-IN] API URL:', apiUrl);
@@ -1192,9 +1202,14 @@ class ApiService {
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
             
+            // Use environment-based protocol and port
+            const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
+            const protocol = isDev ? 'http' : 'https';
+            const port = isDev ? ':8000' : '';
+            
             // Construct the full API URL (with or without attendance_id)
             const endpoint = API_ENDPOINTS.ATTENDANCE.CHECK_OUT(checkOutData.attendance_id);
-            const apiUrl = `http://${cleanDomain}:8000/api${endpoint}`;
+            const apiUrl = `${protocol}://${cleanDomain}${port}/api${endpoint}`;
 
             // Remove attendance_id from request body (it's in URL)
             const { attendance_id, ...requestBody } = checkOutData;

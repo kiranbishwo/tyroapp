@@ -3147,7 +3147,7 @@ const App: React.FC = () => {
                         </div>
                     )}
                     
-                    <div className="flex items-center my-6">
+                    {/* <div className="flex items-center my-6">
                         <div className="flex-1 border-t border-gray-700"></div>
                         <span className="px-4 text-xs text-gray-500 uppercase font-bold">Or</span>
                         <div className="flex-1 border-t border-gray-700"></div>
@@ -3174,7 +3174,7 @@ const App: React.FC = () => {
                         <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg shadow-lg transition-all">
                             Log In
                         </button>
-                    </form>
+                    </form> */}
                     </div>
                 </div>
             </div>
