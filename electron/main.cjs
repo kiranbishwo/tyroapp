@@ -518,8 +518,25 @@ const updateCurrentWorkspaceId = async () => {
   return currentWorkspaceId;
 };
 
+// Get base data directory - uses userData in production, project root in dev
+// This ensures files can be written in production (userData is writable)
+const getBaseDataDirectory = () => {
+  if (app.isPackaged) {
+    // Production: Use userData directory (writable, per-user)
+    // Windows: C:\Users\<user>\AppData\Roaming\Tyrodesk Tracker
+    // Mac: ~/Library/Application Support/Tyrodesk Tracker
+    // Linux: ~/.config/Tyrodesk Tracker
+    return app.getPath('userData');
+  } else {
+    // Development: Use project root (one level up from electron folder)
+    return path.join(__dirname, '..');
+  }
+};
+
 // Get path for task tracking data file - ONE FILE PER TASK (not per session)
-// Files are saved in project directory: {projectRoot}/tracking-data/{workspaceId}/{date}/{projectId}/{taskId}.json
+// Files are saved in: {baseDir}/tracking-data/{workspaceId}/{date}/{projectId}/{taskId}.json
+// In production: {userData}/tracking-data/...
+// In dev: {projectRoot}/tracking-data/...
 const getTaskDataPath = (projectId, taskId, workspaceId = null) => {
   // Validate required parameters
   if (!projectId || projectId === null || projectId === undefined) {
@@ -560,15 +577,15 @@ const getTaskDataPath = (projectId, taskId, workspaceId = null) => {
   projectId = String(projectId || 'unknown');
   taskId = String(taskId || 'unknown');
   
-  // Get project root directory (one level up from electron folder)
-  const projectRoot = path.join(__dirname, '..');
+  // Get base data directory (userData in production, project root in dev)
+  const baseDir = getBaseDataDirectory();
   
   // Get today's date in YYYY-MM-DD format
   const today = new Date();
   const dateStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
   
   // New structure: workspace_id/YYYY-MM-DD/project_id/taskid.json
-  const dataDir = path.join(projectRoot, 'tracking-data', finalWorkspaceId, dateStr, projectId);
+  const dataDir = path.join(baseDir, 'tracking-data', finalWorkspaceId, dateStr, projectId);
   
   // Create directory if it doesn't exist
   if (!fs.existsSync(dataDir)) {
@@ -674,8 +691,8 @@ const migrateTrackingDataStructure = (workspaceId = null) => {
     workspaceId = getCurrentWorkspaceId();
   }
   try {
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       console.log('[MIGRATION] No tracking-data directory found, nothing to migrate');
@@ -1304,8 +1321,8 @@ const loadTaskTrackingDataFromFile = (projectId, taskId) => {
     }
     
     // Try old structure for backward compatibility
-    const projectRoot = path.join(__dirname, '..');
-    const oldFilePath = path.join(projectRoot, 'tracking-data', projectId || 'unknown', `${taskId}.json`);
+    const baseDir = getBaseDataDirectory();
+    const oldFilePath = path.join(baseDir, 'tracking-data', projectId || 'unknown', `${taskId}.json`);
     
     if (fs.existsSync(oldFilePath)) {
       const fileContent = fs.readFileSync(oldFilePath, 'utf8');
@@ -1393,13 +1410,13 @@ const initializeTaskTracking = async (projectId, taskId, taskName = null, projec
   
   if (taskData) {
     const filePath = getTaskDataPath(projectId, taskId);
-    const projectRoot = path.join(__dirname, '..');
+    const baseDir = getBaseDataDirectory();
     const hasExistingData = taskData.activityLogs && taskData.activityLogs.length > 0;
     
     console.log(`[TASK-INIT] ✅ Initialized tracking for task ${taskId} in project ${projectId}`);
     console.log(`[TASK-INIT] 📁 JSON file: ${filePath}`);
-    console.log(`[TASK-INIT] 📂 Project root: ${projectRoot}`);
-    console.log(`[TASK-INIT] 📂 Tracking data folder: ${path.join(projectRoot, 'tracking-data')}`);
+    console.log(`[TASK-INIT] 📂 Base directory: ${baseDir}`);
+    console.log(`[TASK-INIT] 📂 Tracking data folder: ${path.join(baseDir, 'tracking-data')}`);
     
     if (hasExistingData) {
       console.log(`[TASK-INIT] 💾 Loaded existing data: ${taskData.activityLogs.length} logs, ${taskData.screenshots?.length || 0} screenshots`);
@@ -3013,8 +3030,8 @@ ipcMain.handle('sync-all-tasks', async () => {
     }
 
     // Get all today's tasks - need to call the function directly
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       return { success: true, synced: 0, errors: 0 };
@@ -6016,10 +6033,11 @@ ipcMain.handle('get-last-active-task-state', async () => {
 
 // Get the file path where JSON files are saved
 ipcMain.handle('get-tracking-data-path', async () => {
-  const projectRoot = path.join(__dirname, '..');
-  const trackingDataPath = path.join(projectRoot, 'tracking-data');
+  const baseDir = getBaseDataDirectory();
+  const trackingDataPath = path.join(baseDir, 'tracking-data');
   return {
-    projectRoot: projectRoot,
+    projectRoot: baseDir, // Keep key name for backward compatibility
+    baseDir: baseDir,
     trackingDataPath: trackingDataPath,
     exists: fs.existsSync(trackingDataPath)
   };
@@ -6028,8 +6046,8 @@ ipcMain.handle('get-tracking-data-path', async () => {
 // Verify all task data files and their integrity
 ipcMain.handle('verify-tracking-data', async (event, projectId = null) => {
   try {
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       return {
@@ -6140,8 +6158,8 @@ ipcMain.handle('verify-tracking-data', async (event, projectId = null) => {
 // Optionally filter by workspaceId - if provided, only returns tasks from that workspace
 ipcMain.handle('get-today-tasks', async (event, workspaceId = null) => {
   try {
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       return [];
@@ -6315,8 +6333,8 @@ ipcMain.handle('get-today-tasks', async (event, workspaceId = null) => {
 // Get all tasks (all files, no date filter) - for syncing all files
 ipcMain.handle('get-all-tasks', async () => {
   try {
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       return [];
@@ -6370,8 +6388,8 @@ ipcMain.handle('get-all-tasks', async () => {
 // Get all tasks for a project - ONE FILE PER TASK (taskId-based)
 ipcMain.handle('get-project-tasks-tracking', async (event, projectId) => {
   try {
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       return [];
@@ -6426,8 +6444,8 @@ let combinedInsightsListeners = new Set();
 // dateFilter: 'today' | 'all' - filters data by date (default: 'today')
 const combineAllTrackingData = (dateFilter = 'today') => {
   try {
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       return {
@@ -6945,8 +6963,8 @@ ipcMain.handle('get-combined-insights', async (event, dateFilter = 'today') => {
 // Start watching tracking data directory for changes
 const startTrackingDataWatcher = () => {
   try {
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       // Create directory if it doesn't exist
@@ -7028,8 +7046,8 @@ const getLastActiveTaskState = () => {
 // Find the most recently active task from JSON files
 const findLastActiveTaskFromFiles = () => {
   try {
-    const projectRoot = path.join(__dirname, '..');
-    const trackingDataPath = path.join(projectRoot, 'tracking-data');
+    const baseDir = getBaseDataDirectory();
+    const trackingDataPath = path.join(baseDir, 'tracking-data');
     
     if (!fs.existsSync(trackingDataPath)) {
       return null;
