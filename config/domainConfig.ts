@@ -1,11 +1,12 @@
 /**
  * Central Base URL Configuration
  * 
- * Set your base URL here - this is the ONLY place you need to change it.
- * Examples:
- *   - Development: 'http://tyrodesk.test:8000'
- *   - Production: 'https://tyrodesk.com'
+ * Automatically uses production URL when built for production.
+ * Development: 'http://tyrodesk.test:8000'
+ * Production: 'https://tyrodesk.com'
  */
 
-// export const BASE_URL = 'http://tyrodesk.test:8000';
-export const BASE_URL = 'https://tyrodesk.com';
+// Production mode - set to false for production, true for development
+const isDev = false;
+
+export const BASE_URL = isDev ? 'http://tyrodesk.test:8000' : 'https://tyrodesk.com';

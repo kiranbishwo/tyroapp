@@ -7,13 +7,11 @@ const crypto = require('crypto');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
-const isDev = process.env.NODE_ENV === 'development';
+const isDev = false; // Production mode
 
 // ==================== Base URL Configuration ====================
-// Change this ONE variable to update the base URL everywhere
-// Examples: 'http://tyrodesk.test:8000' or 'https://tyrodesk.com'
-// const BASE_URL = 'http://tyrodesk.test:8000';
-const BASE_URL = 'https://tyrodesk.com';
+// Automatically uses production URL when not in development mode
+const BASE_URL = isDev ? 'http://tyrodesk.test:8000' : 'https://tyrodesk.com';
 
 // Helper function to normalize API URL to use BASE_URL
 const normalizeApiUrl = (url) => {
