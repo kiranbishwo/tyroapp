@@ -8,6 +8,7 @@ import { getApiConfig, updateApiConfig, ApiConfig, API_ENDPOINTS } from '../conf
 import { ActivityLog, Settings } from '../types';
 import { getAccessToken } from './tokenStorage';
 import { authState } from './authState';
+import { BASE_URL } from '../config/domainConfig';
 
 export interface ApiResponse<T = any> {
     success: boolean;
@@ -993,16 +994,13 @@ class ApiService {
 
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
-            // Normalize old test domains to production domain
-            if (cleanDomain.includes('tyrodesk.test')) {
-                cleanDomain = cleanDomain.replace(/\.test$/, '.com');
-            }
             
-            // Always use https for production domain
-            const protocol = 'https';
-            const port = '';
+            // Get protocol and port from BASE_URL
+            const protocol = BASE_URL.split('://')[0];
+            const baseUrlParts = BASE_URL.replace(/^https?:\/\//, '').split(':');
+            const port = baseUrlParts.length > 1 ? `:${baseUrlParts[1]}` : '';
             
-            // Construct the full API URL
+            // Construct the full API URL with port if it exists in BASE_URL
             const apiUrl = `${protocol}://${cleanDomain}${port}/api/vue/backend/attendance/face/check`;
 
             console.log('[FACE CHECK] Using workspace domain:', workspaceDomain);
@@ -1117,16 +1115,13 @@ class ApiService {
 
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
-            // Normalize old test domains to production domain
-            if (cleanDomain.includes('tyrodesk.test')) {
-                cleanDomain = cleanDomain.replace(/\.test$/, '.com');
-            }
             
-            // Always use https for production domain
-            const protocol = 'https';
-            const port = '';
+            // Get protocol and port from BASE_URL
+            const protocol = BASE_URL.split('://')[0];
+            const baseUrlParts = BASE_URL.replace(/^https?:\/\//, '').split(':');
+            const port = baseUrlParts.length > 1 ? `:${baseUrlParts[1]}` : '';
             
-            // Construct the full API URL
+            // Construct the full API URL with port if it exists in BASE_URL
             const apiUrl = `${protocol}://${cleanDomain}${port}/api/vue/backend/attendance/check-in`;
 
             console.log('[CHECK-IN] Using workspace domain:', workspaceDomain);
@@ -1207,16 +1202,13 @@ class ApiService {
 
             // Clean domain (remove protocol and port)
             let cleanDomain = workspaceDomain.replace(/^https?:\/\//, '').split(':')[0];
-            // Normalize old test domains to production domain
-            if (cleanDomain.includes('tyrodesk.test')) {
-                cleanDomain = cleanDomain.replace(/\.test$/, '.com');
-            }
             
-            // Always use https for production domain
-            const protocol = 'https';
-            const port = '';
+            // Get protocol and port from BASE_URL
+            const protocol = BASE_URL.split('://')[0];
+            const baseUrlParts = BASE_URL.replace(/^https?:\/\//, '').split(':');
+            const port = baseUrlParts.length > 1 ? `:${baseUrlParts[1]}` : '';
             
-            // Construct the full API URL (with or without attendance_id)
+            // Construct the full API URL with port if it exists in BASE_URL
             const endpoint = API_ENDPOINTS.ATTENDANCE.CHECK_OUT(checkOutData.attendance_id);
             const apiUrl = `${protocol}://${cleanDomain}${port}/api${endpoint}`;
 

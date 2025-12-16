@@ -3226,10 +3226,31 @@ const App: React.FC = () => {
                                     </a>
                                 </div>
                             )}
-                            <p className="text-gray-400 text-xs text-center">
-                                <i className="fas fa-clock mr-1"></i>
-                                Waiting for authorization...
-                            </p>
+                            <div className="flex items-center justify-between pt-2 border-t border-blue-800">
+                                <p className="text-gray-400 text-xs">
+                                    <i className="fas fa-clock mr-1"></i>
+                                    Waiting for authorization...
+                                </p>
+                                <button
+                                    onClick={async () => {
+                                        // Clear current device code and restart OAuth flow
+                                        setLoginDeviceCode(null);
+                                        setLoginOAuthStatus('');
+                                        // Clear stored device code data
+                                        localStorage.removeItem('device_code');
+                                        localStorage.removeItem('device_code_data');
+                                        localStorage.removeItem('user_code');
+                                        console.log('[APP] Cleared device code, restarting OAuth flow...');
+                                        // Restart OAuth flow
+                                        await handleOAuthLogin();
+                                    }}
+                                    className="text-blue-400 hover:text-blue-300 text-xs font-medium flex items-center gap-1 transition-colors"
+                                    title="Get a new verification code"
+                                >
+                                    <i className="fas fa-redo text-[10px]"></i>
+                                    <span>Resend Verification</span>
+                                </button>
+                            </div>
                         </div>
                     )}
 

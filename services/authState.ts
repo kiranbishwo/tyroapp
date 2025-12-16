@@ -4,6 +4,7 @@
  */
 
 import { AuthenticatedUser, Workspace } from '../types';
+import { BASE_URL } from '../config/domainConfig';
 
 export interface AuthState {
     isAuthenticated: boolean;
@@ -297,20 +298,17 @@ class AuthStateManager {
     getApiBaseUrl(): string {
         const domain = this.getWorkspaceDomain();
         if (domain) {
-            // Remove protocol if present
-            let cleanDomain = domain.replace(/^https?:\/\//, '');
-            // Remove port if present
-            cleanDomain = cleanDomain.split(':')[0];
-            // Normalize old test domains to production domain
-            if (cleanDomain.includes('tyrodesk.test')) {
-                cleanDomain = cleanDomain.replace(/\.test$/, '.com');
-            }
-            // Always use https for production domain
-            return `https://${cleanDomain}/api`;
+            // Remove protocol and port if present
+            let cleanDomain = domain.replace(/^https?:\/\//, '').split(':')[0];
+            // Get protocol and port from BASE_URL
+            const protocol = BASE_URL.split('://')[0];
+            const baseUrlParts = BASE_URL.replace(/^https?:\/\//, '').split(':');
+            const port = baseUrlParts.length > 1 ? `:${baseUrlParts[1]}` : '';
+            // Use the domain from workspace with port from BASE_URL
+            return `${protocol}://${cleanDomain}${port}/api`;
         }
-        // Fallback to environment-based default
-        const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
-        return isDev ? 'https://tyrodesk.com/api' : 'https://tyrodesk.com/api';
+        // Fallback to centralized BASE_URL
+        return `${BASE_URL}/api`;
     }
 }
 

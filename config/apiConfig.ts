@@ -3,6 +3,8 @@
  * Manages API settings and environment variables
  */
 
+import { BASE_URL } from './domainConfig';
+
 export interface ApiConfig {
     baseUrl: string;
     apiKey?: string;
@@ -18,9 +20,8 @@ const getDefaultApiBaseUrl = (): string => {
     if (import.meta.env.VITE_API_BASE_URL) {
         return import.meta.env.VITE_API_BASE_URL;
     }
-    // Use environment-based defaults
-    const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
-    return isDev ? 'https://tyrodesk.com/api' : 'https://tyrodesk.com/api';
+    // Use centralized base URL + /api
+    return `${BASE_URL}/api`;
 };
 
 // Default API configuration

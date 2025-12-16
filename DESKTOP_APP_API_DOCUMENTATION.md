@@ -690,7 +690,7 @@ Authorization: Bearer {jwt_token}
   "images": [
     {
       "id": 1,
-      "file_url": "http://kiran.tyrodesk.test:8000/allUploads/tracking-images/screenshots/20251214_221500_screenshot1.jpg",
+      "file_url": "https://kiran.tyrodesk.com/allUploads/tracking-images/screenshots/20251214_221500_screenshot1.jpg",
       "original_name": "screenshot1.jpg",
       "type": "screenshot",
       "file_size": 245678,
@@ -698,7 +698,7 @@ Authorization: Bearer {jwt_token}
     },
     {
       "id": 2,
-      "file_url": "http://kiran.tyrodesk.test:8000/allUploads/tracking-images/screenshots/20251214_221501_screenshot2.png",
+      "file_url": "https://kiran.tyrodesk.com/allUploads/tracking-images/screenshots/20251214_221501_screenshot2.png",
       "original_name": "screenshot2.png",
       "type": "screenshot",
       "file_size": 189234,
@@ -753,7 +753,7 @@ Authorization: Bearer {jwt_token}
   "images": [
     {
       "id": 1,
-      "file_url": "http://kiran.tyrodesk.test:8000/allUploads/tracking-images/screenshots/20251214_221500_screenshot1.jpg",
+      "file_url": "https://kiran.tyrodesk.com/allUploads/tracking-images/screenshots/20251214_221500_screenshot1.jpg",
       "original_name": "screenshot1.jpg",
       "type": "screenshot",
       "file_size": 245678,
@@ -762,7 +762,7 @@ Authorization: Bearer {jwt_token}
     },
     {
       "id": 2,
-      "file_url": "http://kiran.tyrodesk.test:8000/allUploads/tracking-images/webcam/20251214_221501_webcam1.jpg",
+      "file_url": "https://kiran.tyrodesk.com/allUploads/tracking-images/webcam/20251214_221501_webcam1.jpg",
       "original_name": "webcam1.jpg",
       "type": "webcam_photo",
       "file_size": 156789,
@@ -859,11 +859,11 @@ After uploading images, use the returned URLs in your tracking data JSON:
         "timestamp": "2025-12-14T22:15:00Z",
         "activity": "coding",
         "screenshots": [
-          "http://kiran.tyrodesk.test:8000/allUploads/tracking-images/screenshots/20251214_221500_screenshot1.jpg",
-          "http://kiran.tyrodesk.test:8000/allUploads/tracking-images/screenshots/20251214_221501_screenshot2.png"
+          "https://kiran.tyrodesk.com/allUploads/tracking-images/screenshots/20251214_221500_screenshot1.jpg",
+          "https://kiran.tyrodesk.com/allUploads/tracking-images/screenshots/20251214_221501_screenshot2.png"
         ],
         "webcamPhotos": [
-          "http://kiran.tyrodesk.test:8000/allUploads/tracking-images/webcam/20251214_221502_webcam1.jpg"
+          "https://kiran.tyrodesk.com/allUploads/tracking-images/webcam/20251214_221502_webcam1.jpg"
         ]
       }
     ]

@@ -9,6 +9,33 @@ const { promisify } = require('util');
 const execAsync = promisify(exec);
 const isDev = process.env.NODE_ENV === 'development';
 
+// ==================== Base URL Configuration ====================
+// Change this ONE variable to update the base URL everywhere
+// Examples: 'http://tyrodesk.test:8000' or 'https://tyrodesk.com'
+// const BASE_URL = 'http://tyrodesk.test:8000';
+const BASE_URL = 'https://tyrodesk.com';
+
+// Helper function to normalize API URL to use BASE_URL
+const normalizeApiUrl = (url) => {
+  if (!url) return `${BASE_URL}/api`;
+  
+  // If URL already matches BASE_URL pattern, use it as-is
+  if (url.includes(BASE_URL.replace('https://', '').replace('http://', ''))) {
+    return url.replace(/\/$/, '');
+  }
+  
+  // Otherwise, extract domain from URL and use BASE_URL's protocol
+  try {
+    const urlObj = new URL(url);
+    const protocol = BASE_URL.split('://')[0];
+    const path = urlObj.pathname;
+    return `${protocol}://${urlObj.hostname}${path}`.replace(/\/$/, '');
+  } catch (e) {
+    // Fallback: use BASE_URL
+    return `${BASE_URL}/api`;
+  }
+};
+
 // Generate UUID v4
 const generateUUID = () => {
   return crypto.randomUUID ? crypto.randomUUID() : 
@@ -1709,33 +1736,8 @@ ipcMain.handle('test-api-connection', async () => {
       return { success: false, error: 'API not enabled or base URL not set' };
     }
 
-    // Normalize API base URL to always use https://tyrodesk.com
-    let normalizedApiBaseUrl = settings.apiBaseUrl.replace(/\/$/, '');
-    try {
-      const url = new URL(normalizedApiBaseUrl);
-      let hostname = url.hostname;
-      
-      // Normalize old test domains to production domain
-      if (hostname.includes('tyrodesk.test')) {
-        hostname = hostname.replace(/\.test$/, '.com');
-        hostname = hostname.split(':')[0];
-      } else if (hostname === 'tyrodesk.com' || hostname.includes('.tyrodesk.com')) {
-        hostname = hostname.split(':')[0];
-      }
-      
-      // Always use HTTPS and remove port
-      const protocol = 'https';
-      const port = '';
-      const path = url.pathname;
-      normalizedApiBaseUrl = `${protocol}://${hostname}${port}${path}`;
-    } catch (e) {
-      // Fallback: simple string replacement
-      normalizedApiBaseUrl = normalizedApiBaseUrl
-        .replace(/^http:\/\//, 'https://')
-        .replace(/tyrodesk\.test:8000/, 'tyrodesk.com')
-        .replace(/tyrodesk\.test/, 'tyrodesk.com')
-        .replace(/:8000/, '');
-    }
+    // Normalize API base URL using centralized BASE_URL
+    let normalizedApiBaseUrl = normalizeApiUrl(settings.apiBaseUrl);
     normalizedApiBaseUrl = normalizedApiBaseUrl.replace(/\/$/, '');
 
     // Dynamic import of axios (ES module)
@@ -1827,43 +1829,9 @@ ipcMain.handle('oauth-authenticate', async (event) => {
       return { success: false, error: 'API base URL not set' };
     }
 
-    // Normalize base URL to always use https://tyrodesk.com
-    // Parse the URL and normalize domain
-    let baseUrl = settings.apiBaseUrl.replace(/\/$/, '');
-    
-    try {
-      const url = new URL(baseUrl);
-      let hostname = url.hostname;
-      
-      // Normalize old test domains to production domain
-      if (hostname.includes('tyrodesk.test')) {
-        hostname = hostname.replace(/\.test$/, '.com');
-        // Remove port if present
-        hostname = hostname.split(':')[0];
-      } else if (hostname === 'tyrodesk.com' || hostname.includes('.tyrodesk.com')) {
-        // Already correct domain, just remove port
-        hostname = hostname.split(':')[0];
-      }
-      
-      // Always use HTTPS and remove port
-      const protocol = 'https';
-      const port = '';
-      
-      // Reconstruct base URL with normalized domain
-      // Preserve the path (e.g., /api/v11)
-      const path = url.pathname;
-      baseUrl = `${protocol}://${hostname}${port}${path}`;
-      
-      console.log('[OAUTH] Normalized base URL from', settings.apiBaseUrl, 'to', baseUrl);
-    } catch (e) {
-      console.warn('[OAUTH] Could not parse apiBaseUrl, attempting string replacement:', e);
-      // Fallback: simple string replacement
-      baseUrl = baseUrl
-        .replace(/^http:\/\//, 'https://')
-        .replace(/tyrodesk\.test:8000/, 'tyrodesk.com')
-        .replace(/tyrodesk\.test/, 'tyrodesk.com')
-        .replace(/:8000/, '');
-    }
+    // Normalize base URL using centralized BASE_URL
+    let baseUrl = normalizeApiUrl(settings.apiBaseUrl);
+    console.log('[OAUTH] Normalized base URL from', settings.apiBaseUrl, 'to', baseUrl);
     
     // Remove trailing slash if present
     baseUrl = baseUrl.replace(/\/$/, '');
@@ -2670,44 +2638,22 @@ ipcMain.handle('oauth-device-logout', async (event, bearerTokenFromRenderer = nu
       };
     }
     
-    // According to documentation: API works from ANY domain (main or subdomain)
-    // Always use production domain: tyrodesk.com
-    // Normalize any old domain references to tyrodesk.com
-    let apiDomain = 'tyrodesk.com';
-    
-    // Try to extract domain from apiBaseUrl if available, but normalize to tyrodesk.com
+    // Use BASE_URL for logout
+    // Extract domain from settings or use BASE_URL
+    let logoutBaseUrl = BASE_URL;
     if (settings.apiBaseUrl) {
       try {
         const url = new URL(settings.apiBaseUrl);
-        const hostname = url.hostname;
-        // Normalize old test domains to production domain
-        if (hostname.includes('tyrodesk.test') || hostname === 'tyrodesk.com') {
-          apiDomain = 'tyrodesk.com';
-        } else {
-          // For subdomains, preserve the subdomain but use tyrodesk.com as base
-          // Extract subdomain if present (e.g., kiran.tyrodesk.test -> kiran.tyrodesk.com)
-          if (hostname.includes('.')) {
-            const parts = hostname.split('.');
-            if (parts.length >= 2 && parts[parts.length - 2] === 'tyrodesk') {
-              apiDomain = parts.slice(0, -1).join('.') + '.tyrodesk.com';
-            } else {
-              apiDomain = hostname.replace(/\.test$/, '.com');
-            }
-          } else {
-            apiDomain = hostname;
-          }
-        }
-        console.log('[OAUTH] Using domain from settings (normalized):', apiDomain);
+        const protocol = BASE_URL.split('://')[0];
+        logoutBaseUrl = `${protocol}://${url.hostname}`;
       } catch (e) {
-        console.warn('[OAUTH] Could not parse apiBaseUrl, using default domain:', apiDomain);
+        // Use BASE_URL as fallback
+        logoutBaseUrl = BASE_URL;
       }
     }
     
-    // Construct logout URL - use /api/V11/auth/device/logout (primary) or /api/auth/device/logout (alternative)
-    // According to documentation: POST /api/V11/auth/device/logout (primary endpoint)
-    // Always use https for production domain
-    const protocol = 'https';
-    const logoutUrl = `${protocol}://${apiDomain}/api/V11/auth/device/logout`;
+    // Construct logout URL
+    const logoutUrl = `${logoutBaseUrl}/api/V11/auth/device/logout`;
     console.log('[OAUTH] Calling device logout API:', logoutUrl);
     console.log('[OAUTH] Using Bearer token (login_token) (first 20 chars):', bearerToken.substring(0, 20) + '...');
     
