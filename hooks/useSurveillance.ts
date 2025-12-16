@@ -290,15 +290,15 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId, currentTaskI
                               window.location.port === '3000' ||
                               (window as any).__DEV__ === true;
             
-            // Use 1 minute in dev mode, 10 minutes in production
-            const INTERVAL_DURATION = isDevMode ? 1 * 60 * 1000 : 10 * 60 * 1000; // 1 min (dev) or 10 min (prod)
-            const INTERVAL_MINUTES = isDevMode ? 1 : 10;
+            // Use 2 minutes in dev mode, 10 minutes in production
+            const INTERVAL_DURATION = isDevMode ? 2 * 60 * 1000 : 10 * 60 * 1000; // 2 min (dev) or 10 min (prod)
+            const INTERVAL_MINUTES = isDevMode ? 2 : 10;
 
             let isActive = true; // Track if effect is still active
             let intervalStartTime = Date.now(); // Track when current interval started
 
             if (isDevMode) {
-                console.log('🔧 DEV MODE: Using 1-minute intervals for TyroDesk metrics');
+                console.log('🔧 DEV MODE: Using 2-minute intervals for TyroDesk metrics');
             }
 
             // Calculate time until next interval boundary

@@ -659,14 +659,14 @@ const App: React.FC = () => {
             isUserCheckedIn,
             authStateDataIsAuth: authStateData.isAuthenticated,
             hasElectronAPI: !!window.electronAPI,
-            hasGetAllTasks: !!window.electronAPI?.getAllTasks,
+            hasGetTodayTasks: !!window.electronAPI?.getTodayTasks,
             currentWorkspace: currentWorkspace?.workspace_id || 'none',
         });
 
         // Allow upload if user is checked in OR authenticated OR has login token
         const isAuthenticated = isAuthFromState || hasLoginToken || isUserCheckedIn;
         
-        if (!isAuthenticated || !window.electronAPI?.getAllTasks) {
+        if (!isAuthenticated || !window.electronAPI?.getTodayTasks) {
             const errorMsg = 'Not authenticated or API not available';
             console.error('[UPLOAD] ❌', errorMsg, {
                 isAuthFromState,
@@ -674,7 +674,7 @@ const App: React.FC = () => {
                 isUserCheckedIn,
                 authStateDataIsAuth: authStateData.isAuthenticated,
                 hasElectronAPI: !!window.electronAPI,
-                hasGetAllTasks: !!window.electronAPI?.getAllTasks,
+                hasGetTodayTasks: !!window.electronAPI?.getTodayTasks,
             });
             if (showStatus) {
                 setSyncStatus('error');
@@ -743,7 +743,7 @@ const App: React.FC = () => {
             for (let i = 0; i < allTasks.length; i++) {
                 const task = allTasks[i];
                 console.log(`[UPLOAD] ========================================`);
-                console.log(`[UPLOAD] 📤 Task ${i + 1}/${todayTasks.length}: ${task.taskId} (project: ${task.projectId})`);
+                console.log(`[UPLOAD] 📤 Task ${i + 1}/${allTasks.length}: ${task.taskId} (project: ${task.projectId})`);
                 console.log(`[UPLOAD] 📋 Task details:`, JSON.stringify(task, null, 2));
                 
                 try {
@@ -817,77 +817,178 @@ const App: React.FC = () => {
                 setIsSyncing(false);
             }
         }
-    }, [authStateData.isAuthenticated, currentWorkspace?.workspace_id]); // Removed user?.isCheckedIn - checked inside function
+    }, [authStateData.isAuthenticated, currentWorkspace?.workspace_id, user?.isCheckedIn, user]); // Added user to dependencies
 
     // Store upload function in ref to prevent useEffect re-runs
     const uploadAllTrackingFilesRef = useRef(uploadAllTrackingFiles);
     uploadAllTrackingFilesRef.current = uploadAllTrackingFiles;
+    
+    // Track if auto-sync has been initialized
+    const autoSyncInitializedRef = useRef(false);
+    const autoSyncIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const autoSyncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-    // Periodic upload of tracking files (every 1 minute)
+    // Debug: Log when component mounts/updates to verify auto-sync useEffect is registered
     useEffect(() => {
+        console.log('[AUTO-SYNC-DEBUG] Component mounted/updated - auto-sync useEffect should be registered');
+        console.log('[AUTO-SYNC-DEBUG] Current state:', {
+            hasUploadFunction: typeof uploadAllTrackingFiles === 'function',
+            hasUploadRef: typeof uploadAllTrackingFilesRef.current === 'function',
+            authStateData: !!authStateData,
+            user: !!user,
+            currentWorkspace: !!currentWorkspace,
+            'authStateData.isAuthenticated': authStateData?.isAuthenticated,
+            'currentWorkspace?.workspace_id': currentWorkspace?.workspace_id,
+            'user?.isCheckedIn': user?.isCheckedIn,
+        });
+    });
+
+    // Periodic upload of tracking files (every 2 minutes)
+    // IMPORTANT: This effect MUST run - it sets up the auto-sync interval
+    // Run on mount AND when dependencies change
+    useEffect(() => {
+        // ALWAYS log this first - to verify useEffect is running
+        console.log('[AUTO-SYNC] ========================================');
         console.log('[AUTO-SYNC] 🔍 useEffect triggered - checking conditions...');
+        console.log('[AUTO-SYNC] 🚨 THIS MESSAGE MUST APPEAR - IF NOT, useEffect IS NOT RUNNING!');
+        console.log('[AUTO-SYNC] 🚨 Effect is DEFINITELY running now!');
+        console.log('[AUTO-SYNC] 🚨 First run:', !autoSyncInitializedRef.current);
+        autoSyncInitializedRef.current = true;
+        console.log('[AUTO-SYNC] 📋 useEffect dependencies:', {
+            'authStateData.isAuthenticated': authStateData?.isAuthenticated,
+            'currentWorkspace?.workspace_id': currentWorkspace?.workspace_id,
+            'user?.isCheckedIn': user?.isCheckedIn,
+            'authStateData exists': !!authStateData,
+            'currentWorkspace exists': !!currentWorkspace,
+            'user exists': !!user,
+            timestamp: new Date().toISOString(),
+        });
+        
+        // Check authentication using multiple methods
+        const isAuthFromState = authStateData?.isAuthenticated || false;
+        const hasLoginToken = typeof localStorage !== 'undefined' && !!localStorage.getItem('login_token');
+        const isUserCheckedIn = user?.isCheckedIn || false;
+        const isAuthenticated = isAuthFromState || hasLoginToken || isUserCheckedIn;
+        
         console.log('[AUTO-SYNC] 📋 Auth state:', {
-            isAuthenticated: authStateData.isAuthenticated,
+            isAuthFromState,
+            hasLoginToken,
+            isUserCheckedIn,
+            isAuthenticated,
             workspaceId: currentWorkspace?.workspace_id || 'none',
             hasUploadFunction: typeof uploadAllTrackingFilesRef.current === 'function',
+            uploadFunctionType: typeof uploadAllTrackingFilesRef.current,
             timestamp: new Date().toISOString()
         });
 
-        if (!authStateData.isAuthenticated) {
-            console.log('[AUTO-SYNC] ⏸️ Auto-sync disabled: Not authenticated');
+        if (typeof uploadAllTrackingFilesRef.current !== 'function') {
+            console.error('[AUTO-SYNC] ❌ Auto-sync disabled: uploadAllTrackingFiles function not available');
+            console.error('[AUTO-SYNC] ❌ Function type:', typeof uploadAllTrackingFilesRef.current);
+            console.error('[AUTO-SYNC] ❌ uploadAllTrackingFiles type:', typeof uploadAllTrackingFiles);
             return;
         }
-
-        console.log('[AUTO-SYNC] ✅ Auto-sync ENABLED - setting up intervals');
-        console.log('[AUTO-SYNC] ⏱️ Initial sync: 30 seconds');
-        console.log('[AUTO-SYNC] ⏱️ Periodic sync: Every 60 seconds (1 minute)');
+        
+        // Set up intervals regardless of auth - interval will check auth before each sync
+        // This ensures interval is ready when user authenticates
+        if (isAuthenticated) {
+            console.log('[AUTO-SYNC] ✅ Auto-sync ENABLED - user is authenticated, setting up intervals');
+        } else {
+            console.log('[AUTO-SYNC] ⚠️ Auto-sync SETUP - user not authenticated yet, but setting up interval');
+            console.log('[AUTO-SYNC] ⚠️ Interval will check auth before each sync');
+        }
+        
+        console.log('[AUTO-SYNC] ⏱️ Initial sync: 30 seconds (if authenticated)');
+        console.log('[AUTO-SYNC] ⏱️ Periodic sync: Every 120 seconds (2 minutes)');
 
         let initialTimeout: NodeJS.Timeout | null = null;
         let interval: NodeJS.Timeout | null = null;
 
-        // Initial upload after 30 seconds (to allow some data to accumulate)
-        initialTimeout = setTimeout(() => {
-            console.log('[AUTO-SYNC] 🚀 Initial sync triggered (30 seconds after auth)');
-            console.log('[AUTO-SYNC] 📞 Calling uploadAllTrackingFiles(false)...');
-            uploadAllTrackingFilesRef.current(false).catch(err => {
-                console.error('[AUTO-SYNC] ❌ Initial sync failed:', err);
-            });
-        }, 30000); // 30 seconds
-        console.log('[AUTO-SYNC] ✅ Initial timeout set:', initialTimeout);
+        // Initial upload after 30 seconds (to allow some data to accumulate) - only if authenticated
+        if (isAuthenticated) {
+            initialTimeout = setTimeout(() => {
+                console.log('[AUTO-SYNC] 🚀 Initial sync triggered (30 seconds after setup)');
+                console.log('[AUTO-SYNC] 📞 Calling uploadAllTrackingFiles(false)...');
+                if (typeof uploadAllTrackingFilesRef.current === 'function') {
+                    uploadAllTrackingFilesRef.current(false).catch(err => {
+                        console.error('[AUTO-SYNC] ❌ Initial sync failed:', err);
+                    });
+                } else {
+                    console.error('[AUTO-SYNC] ❌ uploadAllTrackingFiles function not available');
+                }
+            }, 30000); // 30 seconds
+            autoSyncTimeoutRef.current = initialTimeout;
+            console.log('[AUTO-SYNC] ✅ Initial timeout set:', initialTimeout);
+        } else {
+            console.log('[AUTO-SYNC] ⏸️ Skipping initial timeout - not authenticated');
+        }
 
-        // Then upload every 1 minute
+        // Then upload every 2 minutes - ALWAYS set this up, even if not authenticated
         interval = setInterval(() => {
             console.log('[AUTO-SYNC] ========================================');
-            console.log('[AUTO-SYNC] 🔄 Periodic sync triggered (every 1 minute)');
+            console.log('[AUTO-SYNC] 🔄 Periodic sync triggered (every 2 minutes)');
             console.log('[AUTO-SYNC] ⏰ Current time:', new Date().toISOString());
             console.log('[AUTO-SYNC] 📞 Calling uploadAllTrackingFiles(false)...');
+            
+            // Double-check authentication before each sync
+            const stillAuthFromState = authStateData.isAuthenticated;
+            const stillHasLoginToken = typeof localStorage !== 'undefined' && !!localStorage.getItem('login_token');
+            const stillCheckedIn = user?.isCheckedIn || false;
+            const stillAuth = stillAuthFromState || stillHasLoginToken || stillCheckedIn;
+            
+            console.log('[AUTO-SYNC] 🔐 Re-checking auth before sync:', {
+                stillAuthFromState,
+                stillHasLoginToken,
+                stillCheckedIn,
+                stillAuth,
+            });
+            
+            if (!stillAuth) {
+                console.log('[AUTO-SYNC] ⏸️ Skipping sync: User no longer authenticated');
+                return;
+            }
+            
+            if (typeof uploadAllTrackingFilesRef.current !== 'function') {
+                console.error('[AUTO-SYNC] ❌ uploadAllTrackingFiles function not available in interval');
+                console.error('[AUTO-SYNC] Function type:', typeof uploadAllTrackingFilesRef.current);
+                return;
+            }
+            
+            console.log('[AUTO-SYNC] ✅ Calling uploadAllTrackingFiles...');
             uploadAllTrackingFilesRef.current(false).catch(err => {
                 console.error('[AUTO-SYNC] ❌ Periodic sync failed:', err);
+                console.error('[AUTO-SYNC] Error details:', {
+                    message: err?.message,
+                    stack: err?.stack,
+                });
             });
-        }, 60000); // 1 minute
+        }, 120000); // 2 minutes
+        autoSyncIntervalRef.current = interval;
         console.log('[AUTO-SYNC] ✅ Periodic interval set:', interval);
         console.log('[AUTO-SYNC] ✅ Interval ID:', interval);
+        console.log('[AUTO-SYNC] ✅ Interval stored in ref:', autoSyncIntervalRef.current);
 
         // Verify interval is actually set
         console.log('[AUTO-SYNC] 🔍 Verification:', {
             hasInitialTimeout: !!initialTimeout,
             hasInterval: !!interval,
             intervalType: typeof interval,
-            nextSyncIn: '60 seconds'
+            nextSyncIn: '120 seconds (2 minutes)'
         });
 
         return () => {
             console.log('[AUTO-SYNC] 🛑 Auto-sync stopped (cleanup)');
-            console.log('[AUTO-SYNC] 🛑 Clearing timeout:', initialTimeout);
-            console.log('[AUTO-SYNC] 🛑 Clearing interval:', interval);
-            if (initialTimeout) {
-                clearTimeout(initialTimeout);
+            console.log('[AUTO-SYNC] 🛑 Clearing timeout:', autoSyncTimeoutRef.current);
+            console.log('[AUTO-SYNC] 🛑 Clearing interval:', autoSyncIntervalRef.current);
+            if (autoSyncTimeoutRef.current) {
+                clearTimeout(autoSyncTimeoutRef.current);
+                autoSyncTimeoutRef.current = null;
             }
-            if (interval) {
-                clearInterval(interval);
+            if (autoSyncIntervalRef.current) {
+                clearInterval(autoSyncIntervalRef.current);
+                autoSyncIntervalRef.current = null;
             }
         };
-    }, [authStateData.isAuthenticated, currentWorkspace?.workspace_id]); // Removed uploadAllTrackingFiles from deps - using ref instead
+    }, [authStateData?.isAuthenticated, currentWorkspace?.workspace_id, user?.isCheckedIn]); // Effect runs on mount and when these change
 
     // Fetch current status on mount and when authenticated
     useEffect(() => {
@@ -912,29 +1013,66 @@ const App: React.FC = () => {
 
     // Update status on API when user status changes
     useEffect(() => {
-        if (authStateData.isAuthenticated && userStatus) {
-            const updateStatus = async () => {
-                try {
-                    const workspaceId = currentWorkspace?.workspace_id?.toString();
-                    await apiService.updateStatus({
-                        status: userStatus,
-                        workspace_id: workspaceId,
-                        metadata: {
-                            task_id: selectedTaskId || undefined,
-                            project_id: selectedProjectId || undefined,
-                        },
-                    });
-                    console.log('[STATUS] Updated status to:', userStatus);
-                } catch (error) {
-                    console.error('[STATUS] Error updating status:', error);
-                }
-            };
-            
-            // Debounce status updates to avoid too many API calls
-            const timeoutId = setTimeout(updateStatus, 500);
-            return () => clearTimeout(timeoutId);
+        if (!userStatus) {
+            return;
         }
-    }, [userStatus, selectedTaskId, selectedProjectId, currentWorkspace?.workspace_id]);
+        
+        // Check authentication using multiple methods (same as auto-sync)
+        const isAuthFromState = authStateData.isAuthenticated;
+        const hasLoginToken = typeof localStorage !== 'undefined' && !!localStorage.getItem('login_token');
+        const isUserCheckedIn = user?.isCheckedIn || false;
+        const isAuthenticated = isAuthFromState || hasLoginToken || isUserCheckedIn;
+        
+        if (!isAuthenticated) {
+            console.log('[STATUS] ⏸️ Status update skipped:', {
+                isAuthFromState,
+                hasLoginToken,
+                isUserCheckedIn,
+                isAuthenticated: false,
+                userStatus: userStatus,
+            });
+            return;
+        }
+        
+        const updateStatus = async () => {
+            try {
+                const workspaceId = currentWorkspace?.workspace_id?.toString();
+                console.log('[STATUS] 🔄 Updating status to server:', {
+                    status: userStatus,
+                    workspace_id: workspaceId,
+                    task_id: selectedTaskId,
+                    project_id: selectedProjectId,
+                    authMethod: isAuthFromState ? 'authState' : hasLoginToken ? 'loginToken' : 'checkedIn',
+                });
+                
+                const response = await apiService.updateStatus({
+                    status: userStatus,
+                    workspace_id: workspaceId,
+                    metadata: {
+                        task_id: selectedTaskId || undefined,
+                        project_id: selectedProjectId || undefined,
+                    },
+                });
+                
+                if (response.success) {
+                    console.log('[STATUS] ✅ Status updated successfully to:', userStatus, response.message || '');
+                } else {
+                    console.error('[STATUS] ❌ Status update failed:', response.error);
+                }
+            } catch (error: any) {
+                console.error('[STATUS] ❌ Error updating status:', error);
+                console.error('[STATUS] Error details:', {
+                    message: error.message,
+                    response: error.response?.data,
+                    status: error.response?.status,
+                });
+            }
+        };
+        
+        // Debounce status updates to avoid too many API calls
+        const timeoutId = setTimeout(updateStatus, 500);
+        return () => clearTimeout(timeoutId);
+    }, [authStateData.isAuthenticated, userStatus, selectedTaskId, selectedProjectId, currentWorkspace?.workspace_id, user?.isCheckedIn]);
 
     // Surveillance Hook - Only active if user has consented AND status is working
     const { 
@@ -1706,11 +1844,41 @@ const App: React.FC = () => {
         // 1. Not in CHECK_IN_OUT view (camera is needed there)
         // 2. Timer is not running OR status is not working
         // 3. Camera stream exists
-        if (view !== AppView.CHECK_IN_OUT && cameraStream && (!isTimerRunning || userStatus !== 'working')) {
-            console.log('Stopping camera - timer stopped or status changed to non-working');
-            stopCamera();
+        if (view !== AppView.CHECK_IN_OUT && cameraStream) {
+            // Check if camera tracks are actually live
+            const videoTracks = cameraStream.getVideoTracks();
+            const hasLiveTracks = videoTracks.length > 0 && videoTracks.some(track => track.readyState === 'live');
+            
+            if (hasLiveTracks && (!isTimerRunning || userStatus !== 'working')) {
+                console.log('Stopping camera - timer stopped or status changed to non-working');
+                stopCamera();
+            } else if (!hasLiveTracks) {
+                // Camera stream exists but tracks are dead - clean it up
+                console.log('Cleaning up dead camera stream');
+                stopCamera();
+            }
         }
     }, [isTimerRunning, userStatus, view, cameraStream, stopCamera]);
+    
+    // Additional safety: Stop camera if it's been on too long without being used for capture
+    useEffect(() => {
+        if (cameraStream && view !== AppView.CHECK_IN_OUT && isTimerRunning && userStatus === 'working') {
+            // Only keep camera on if we're actively capturing or about to capture
+            // Set a timeout to stop camera if no capture happens within 30 seconds
+            const cameraTimeout = setTimeout(() => {
+                const videoTracks = cameraStream.getVideoTracks();
+                const hasLiveTracks = videoTracks.length > 0 && videoTracks.some(track => track.readyState === 'live');
+                if (hasLiveTracks && !captureInProgressRef.current) {
+                    console.log('Stopping camera - no capture activity for 30 seconds');
+                    stopCamera();
+                }
+            }, 30000); // 30 seconds
+            
+            return () => {
+                clearTimeout(cameraTimeout);
+            };
+        }
+    }, [cameraStream, view, isTimerRunning, userStatus, stopCamera]);
 
     // Attach streams to hidden video elements for capture
     useEffect(() => {
@@ -1777,16 +1945,16 @@ const App: React.FC = () => {
     
     // Background Capture Logic (Sync with Activity Log creation)
     // We observe the activity logs array. When a new log is added (by useSurveillance),
-    // we capture 1-3 screenshots and webcam photo per 10-minute interval (or 20 seconds in dev mode).
+    // we capture 1-3 screenshots and webcam photo per 10-minute interval (or 2 minutes in dev mode).
     const lastProcessedLogIdRef = useRef<string | null>(null);
     const devCaptureIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     
     const immediateCaptureRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     
-    // Dev mode: Periodic capture every 1 minute (60 seconds)
+    // Dev mode: Periodic capture every 2 minutes (120 seconds)
     useEffect(() => {
         if (isDevMode && isTimerRunning && userStatus === 'working') {
-            console.log('Dev mode: Starting periodic capture every 1 minute');
+            console.log('Dev mode: Starting periodic capture every 2 minutes');
             
             // Create initial log if none exists (for immediate capture)
             if (activityLogs.length === 0) {
@@ -1825,6 +1993,7 @@ const App: React.FC = () => {
             }, 2000);
             
             devCaptureIntervalRef.current = setInterval(() => {
+                console.log('Dev mode: 2-minute interval triggered - forcing capture');
                 // Ensure we have a log to work with
                 setActivityLogs(prev => {
                     if (prev.length === 0) {
@@ -1853,12 +2022,12 @@ const App: React.FC = () => {
                                 webcamUrl: undefined
                             };
                             lastProcessedLogIdRef.current = null;
-                            console.log('Dev mode: Cleared media URLs, forcing capture');
+                            console.log('Dev mode: Cleared media URLs, forcing capture for log:', newLogs[0].id);
                         }
                         return newLogs;
                     }
                 });
-            }, 60000); // 60 seconds (1 minute) - gives camera time to close and reopen
+            }, 120000); // 120 seconds (2 minutes) - gives camera time to close and reopen
             
             return () => {
                 if (immediateCaptureRef.current) {
@@ -1932,8 +2101,9 @@ const App: React.FC = () => {
             // Increased time window to 5 minutes to allow for async operations and retries
             const isFresh = (new Date().getTime() - latestLog.timestamp.getTime()) < 300000; // 5 minutes
             
-            // Capture screenshots and webcam if enabled and log doesn't have them yet
-            const needsScreenshot = !latestLog.screenshotUrl && settings?.enableScreenshots !== false;
+            // Capture screenshots and webcam if enabled
+            // Always capture if log doesn't have media (allows re-capture in dev mode)
+            const needsScreenshot = settings?.enableScreenshots !== false && !latestLog.screenshotUrl;
             const needsWebcam = !latestLog.webcamUrl;
             
             console.log('Capture check:', {
@@ -1947,11 +2117,13 @@ const App: React.FC = () => {
                 hasWebcam: !!latestLog.webcamUrl,
                 hasCameraStream: !!cameraStream,
                 enableScreenshots: settings?.enableScreenshots,
-                isDevMode
+                isDevMode,
+                timestamp: latestLog.timestamp.toISOString(),
+                timeSinceLog: (new Date().getTime() - latestLog.timestamp.getTime()) / 1000 + ' seconds'
             });
             
-            // In dev mode, always capture regardless of freshness
-            const shouldCapture = isDevMode ? (needsScreenshot || needsWebcam) : (isFresh && (needsScreenshot || needsWebcam));
+            // Always capture if needed (dev mode allows re-capture, production only captures fresh logs)
+            const shouldCapture = needsScreenshot || needsWebcam;
             
             if (shouldCapture) {
                 // Double-check conditions before starting capture
@@ -1977,10 +2149,14 @@ const App: React.FC = () => {
                             return;
                         }
                         
-                        // Start camera first if we need webcam capture (before capturing screenshots)
-                    // Check if cameraStream exists AND has active tracks, not just if it exists
-                    const hasActiveCamera = cameraStream && cameraStream.getTracks().some(track => track.readyState === 'live');
-                    if (needsWebcam && !hasActiveCamera) {
+                        // Start camera ONLY if we need webcam capture (before capturing screenshots)
+                        // IMPORTANT: Always start a fresh camera stream for capture - don't reuse existing
+                        // This ensures camera is only on during capture and gets properly stopped after
+                    if (needsWebcam) {
+                        // Always start a fresh camera stream for capture (don't reuse existing cameraStream)
+                        // This ensures camera is only on during capture and gets properly stopped after
+                        console.log('Webcam needed - starting fresh camera stream for capture (will stop after capture)');
+                        
                         // Double-check conditions before starting camera
                         if (!isTimerRunning || userStatus !== 'working') {
                             console.log('Conditions changed - aborting camera start');
@@ -1988,7 +2164,14 @@ const App: React.FC = () => {
                             return;
                         }
                         
-                        console.log('Starting camera for webcam capture...');
+                        // Stop any existing camera stream first to ensure clean start
+                        if (cameraStream) {
+                            console.log('Stopping existing camera stream before starting fresh one for capture...');
+                            stopCamera();
+                            await new Promise(resolve => setTimeout(resolve, 300)); // Give it time to stop
+                        }
+                        
+                        console.log('Starting fresh camera for webcam capture...');
                         try {
                             tempCameraStream = await startCamera();
                             
@@ -2072,14 +2255,19 @@ const App: React.FC = () => {
                     let activeCameraStream: MediaStream | null = null;
                     
                     // Determine which stream to use for webcam capture
+                    // ALWAYS use tempCameraStream if available (fresh stream for capture)
+                    // Only fall back to existing cameraStream if tempCameraStream wasn't created
                     if (tempCameraStream) {
-                        // Use the stream we just started
+                        // Use the stream we just started (preferred - fresh stream)
                         activeCameraStream = tempCameraStream;
-                        console.log('Using tempCameraStream for webcam capture');
-                    } else if (cameraStream) {
-                        // Use existing stream if available
+                        console.log('Using tempCameraStream for webcam capture (fresh stream)');
+                    } else if (cameraStream && needsWebcam) {
+                        // Fallback: Use existing stream if tempCameraStream wasn't created
+                        // But this shouldn't happen - we should always create tempCameraStream
+                        console.warn('Using existing cameraStream for webcam capture (fallback - tempCameraStream not created)');
                         activeCameraStream = cameraStream;
-                        console.log('Using existing cameraStream for webcam capture');
+                    } else {
+                        console.warn('No camera stream available for webcam capture');
                     }
                     
                     // Verify camera is actually ready
@@ -2315,9 +2503,10 @@ const App: React.FC = () => {
                     await Promise.all(capturePromises);
                     console.log(`All captures completed: ${screenshots.length} screenshot(s), ${webcamPhoto ? '1' : '0'} webcam photo(s)`);
                     
+                    // ALWAYS stop camera after capture - don't keep it running
                     // Stop temporary camera stream after capture
                     if (tempCameraStream) {
-                        console.log('Stopping temporary camera stream...');
+                        console.log('Stopping temporary camera stream after capture...');
                         try {
                             // Stop all tracks
                             tempCameraStream.getTracks().forEach(track => {
@@ -2353,6 +2542,34 @@ const App: React.FC = () => {
                             if (cameraStream === tempCameraStream) {
                                 stopCamera();
                             }
+                        }
+                    } else if (cameraStream && needsWebcam) {
+                        // If we used the existing cameraStream, stop it after capture
+                        console.log('Stopping existing camera stream after capture...');
+                        try {
+                            cameraStream.getTracks().forEach(track => {
+                                track.stop();
+                                console.log('Stopped existing track:', track.kind, track.label);
+                            });
+                            
+                            // Clean up video element
+                            if (hiddenCamVideoRef.current) {
+                                const video = hiddenCamVideoRef.current;
+                                video.pause();
+                                video.srcObject = null;
+                                video.load();
+                                console.log('Video element cleaned up');
+                            }
+                            
+                            // Clear the state
+                            stopCamera();
+                            
+                            // Small delay to allow browser to release camera
+                            await new Promise(resolve => setTimeout(resolve, 300));
+                            console.log('Existing camera stream fully stopped and released');
+                        } catch (error) {
+                            console.error('Error stopping existing camera stream:', error);
+                            stopCamera();
                         }
                     }
                     
