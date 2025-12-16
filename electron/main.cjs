@@ -7,28 +7,81 @@ const crypto = require('crypto');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
-const isDev = false; // Production mode
+// Detect development mode from environment variables (set in package.json scripts)
+// Priority: APP_ENV > NODE_ENV > app.isPackaged
+// APP_ENV=development or NODE_ENV=development = dev mode
+// APP_ENV=production or NODE_ENV=production or app.isPackaged = production mode
+const isDev = (() => {
+  // Check APP_ENV first (set in package.json scripts)
+  if (process.env.APP_ENV === 'production') return false;
+  if (process.env.APP_ENV === 'development') return true;
+  
+  // Fallback to NODE_ENV
+  if (process.env.NODE_ENV === 'production') return false;
+  if (process.env.NODE_ENV === 'development') return true;
+  
+  // Final fallback: if app is packaged, it's production
+  return !app.isPackaged;
+})();
+
+console.log('[CONFIG] Environment detection:', {
+  APP_ENV: process.env.APP_ENV,
+  NODE_ENV: process.env.NODE_ENV,
+  isPackaged: app.isPackaged,
+  isDev: isDev
+});
 
 // ==================== Base URL Configuration ====================
 // Automatically uses production URL when not in development mode
 const BASE_URL = isDev ? 'http://tyrodesk.test:8000' : 'https://tyrodesk.com';
+console.log('[CONFIG] BASE_URL set to:', BASE_URL);
+
+// Helper function to detect if a URL is a development URL
+const isDevUrl = (url) => {
+  if (!url) return false;
+  return url.includes('tyrodesk.test') || 
+         url.includes('localhost') || 
+         url.includes('127.0.0.1') ||
+         url.includes(':8000') && url.includes('tyrodesk');
+};
 
 // Helper function to normalize API URL to use BASE_URL
 const normalizeApiUrl = (url) => {
   if (!url) return `${BASE_URL}/api`;
   
-  // If URL already matches BASE_URL pattern, use it as-is
-  if (url.includes(BASE_URL.replace('https://', '').replace('http://', ''))) {
-    return url.replace(/\/$/, '');
-  }
-  
-  // Otherwise, extract domain from URL and use BASE_URL's protocol
   try {
-    const urlObj = new URL(url);
-    const protocol = BASE_URL.split('://')[0];
-    const path = urlObj.pathname;
-    return `${protocol}://${urlObj.hostname}${path}`.replace(/\/$/, '');
+    // Ensure URL has protocol
+    let urlToParse = url;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      urlToParse = `http://${url}`;
+    }
+    
+    const urlObj = new URL(urlToParse);
+    const baseUrlObj = new URL(BASE_URL);
+    
+    // If URL domain matches BASE_URL domain, use BASE_URL's protocol and port (especially important in dev mode)
+    const urlHostname = urlObj.hostname.replace(/^www\./, '');
+    const baseHostname = baseUrlObj.hostname.replace(/^www\./, '');
+    
+    if (urlHostname === baseHostname) {
+      // Use BASE_URL's protocol and port to ensure consistency
+      const protocol = baseUrlObj.protocol;
+      const hostname = baseUrlObj.hostname;
+      const port = baseUrlObj.port ? `:${baseUrlObj.port}` : '';
+      const path = urlObj.pathname || '/api';
+      return `${protocol}//${hostname}${port}${path}`.replace(/\/$/, '');
+    }
+    
+    // For different domains, preserve the original URL's protocol and port
+    const protocol = urlObj.protocol;
+    const hostname = urlObj.hostname;
+    const port = urlObj.port ? `:${urlObj.port}` : '';
+    const path = urlObj.pathname || '/api';
+    
+    // Build URL with preserved protocol and port
+    return `${protocol}//${hostname}${port}${path}`.replace(/\/$/, '');
   } catch (e) {
+    console.error('[URL NORMALIZE] Error parsing URL:', url, e);
     // Fallback: use BASE_URL
     return `${BASE_URL}/api`;
   }
@@ -1730,12 +1783,27 @@ ipcMain.handle('test-api-connection', async () => {
     const store = await initStore();
     const settings = store.get('settings', {});
     
-    if (!settings.apiEnabled || !settings.apiBaseUrl) {
-      return { success: false, error: 'API not enabled or base URL not set' };
+    // Determine which URL to use
+    let apiBaseUrl = settings.apiBaseUrl;
+    
+    // If in production mode and stored URL is a dev URL, use BASE_URL instead
+    if (!isDev && apiBaseUrl && isDevUrl(apiBaseUrl)) {
+      console.log('[API TEST] ⚠️ Production mode detected but stored URL is dev URL, using BASE_URL instead');
+      apiBaseUrl = `${BASE_URL}/api`;
+    }
+    
+    if (!settings.apiEnabled || !apiBaseUrl) {
+      // If no URL set, use BASE_URL as fallback
+      if (!apiBaseUrl) {
+        apiBaseUrl = `${BASE_URL}/api`;
+      }
+      if (!settings.apiEnabled) {
+        return { success: false, error: 'API not enabled' };
+      }
     }
 
     // Normalize API base URL using centralized BASE_URL
-    let normalizedApiBaseUrl = normalizeApiUrl(settings.apiBaseUrl);
+    let normalizedApiBaseUrl = normalizeApiUrl(apiBaseUrl);
     normalizedApiBaseUrl = normalizedApiBaseUrl.replace(/\/$/, '');
 
     // Dynamic import of axios (ES module)
@@ -1823,13 +1891,32 @@ ipcMain.handle('oauth-authenticate', async (event) => {
     const store = await initStore();
     const settings = store.get('settings', {});
     
-    if (!settings.apiBaseUrl) {
-      return { success: false, error: 'API base URL not set' };
+    // Determine which URL to use
+    let apiBaseUrl = settings.apiBaseUrl;
+    
+    // If in production mode and stored URL is a dev URL, use BASE_URL instead
+    if (!isDev && apiBaseUrl && isDevUrl(apiBaseUrl)) {
+      console.log('[OAUTH] ⚠️ Production mode detected but stored URL is dev URL, using BASE_URL instead');
+      console.log('[OAUTH] Stored URL:', apiBaseUrl);
+      console.log('[OAUTH] Using BASE_URL:', BASE_URL);
+      apiBaseUrl = `${BASE_URL}/api`;
+    }
+    
+    if (!apiBaseUrl) {
+      // Fallback to BASE_URL if no settings
+      apiBaseUrl = `${BASE_URL}/api`;
+      console.log('[OAUTH] No API base URL in settings, using BASE_URL:', apiBaseUrl);
     }
 
     // Normalize base URL using centralized BASE_URL
-    let baseUrl = normalizeApiUrl(settings.apiBaseUrl);
-    console.log('[OAUTH] Normalized base URL from', settings.apiBaseUrl, 'to', baseUrl);
+    let baseUrl = normalizeApiUrl(apiBaseUrl);
+    console.log('[OAUTH] Base URL normalization:', {
+      original: settings.apiBaseUrl,
+      apiBaseUrl: apiBaseUrl,
+      normalized: baseUrl,
+      BASE_URL: BASE_URL,
+      isDev: isDev
+    });
     
     // Remove trailing slash if present
     baseUrl = baseUrl.replace(/\/$/, '');
@@ -1885,7 +1972,21 @@ ipcMain.handle('oauth-authenticate', async (event) => {
       console.error('  Full URL:', startUrl);
       console.error('  Status:', statusCode, statusText);
       console.error('  Error message:', errorMessage);
+      console.error('  Error code:', error.code);
       console.error('  Response data:', error.response?.data);
+      
+      // Check for DNS/connection issues
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN') {
+        const urlObj = new URL(startUrl);
+        console.error('[OAUTH] Connection issue detected:');
+        console.error('  Hostname:', urlObj.hostname);
+        console.error('  Port:', urlObj.port);
+        console.error('  Protocol:', urlObj.protocol);
+        if (urlObj.hostname.includes('.test')) {
+          console.error('  ⚠️ .test domain detected - ensure it is configured in your hosts file (C:\\Windows\\System32\\drivers\\etc\\hosts)');
+          console.error('  Example: 127.0.0.1 tyrodesk.test');
+        }
+      }
       
       return {
         success: false,

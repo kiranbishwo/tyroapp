@@ -74,12 +74,17 @@ export const TitleBar: React.FC = () => {
       {/* Brand Name */}
       <div className="flex items-center gap-2 px-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <img 
-          src="/logo.png" 
+          src="./logo.png" 
           alt="Tyrodesk Logo" 
           className="h-5 w-5 object-contain"
           onError={(e) => {
-            // Fallback if logo doesn't load
-            (e.target as HTMLImageElement).style.display = 'none';
+            // Fallback if logo doesn't load - try absolute path as fallback
+            const img = e.target as HTMLImageElement;
+            if (img.src && !img.src.includes('logo.png')) {
+              img.src = '/logo.png';
+            } else {
+              img.style.display = 'none';
+            }
           }}
         />
         <span className="text-xs font-bold text-gray-200">Tyrodesk</span>

@@ -1,7 +1,7 @@
 {
   "name": "tyrodesk-app",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -10,7 +10,9 @@
     "build:electron": "electron-builder",
     "build": "npm run build:renderer && npm run build:electron",
 
-    "electron:dev": "concurrently \"cross-env NODE_ENV=development vite\" \"wait-on http://localhost:3000 && cross-env NODE_ENV=development electron .\"",
+    "electron:dev": "concurrently \"cross-env NODE_ENV=development VITE_APP_ENV=development vite\" \"wait-on http://localhost:3000 && cross-env NODE_ENV=development APP_ENV=development electron .\"",
+    
+    "electron:prod": "concurrently \"cross-env NODE_ENV=production VITE_APP_ENV=production vite\" \"wait-on http://localhost:3000 && cross-env NODE_ENV=production APP_ENV=production electron .\"",
 
     "electron:pack": "npm run build:renderer && electron-builder --dir",
 
