@@ -614,6 +614,10 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId, currentTaskI
             pendingIdleLogRef.current = null;
         }
         setIdleInfo(null);
+        
+        // When removing idle time, we don't change user status or redirect
+        // User stays on dashboard with current status
+        // The idle time is simply discarded from the log
     };
 
     return {

@@ -2947,8 +2947,21 @@ const App: React.FC = () => {
             <div className="min-h-screen flex flex-col bg-gray-950 font-sans">
                 <IdleDialog 
                     idleDuration={idleInfo.duration}
-                    onKeep={() => onIdleDecision(false)}
-                    onRemove={() => onIdleDecision(true)}
+                    onKeep={() => {
+                        onIdleDecision(false);
+                        // Keep idle time in log - user stays on dashboard
+                    }}
+                    onRemove={() => {
+                        onIdleDecision(true);
+                        // Remove idle time from log - set status to idle but stay on dashboard
+                        // Don't redirect - user should remain on current view (dashboard)
+                        setUserStatus('idle');
+                        // Ensure we stay on dashboard (don't change view)
+                        if (view !== AppView.DASHBOARD) {
+                            // Only if we're not already on dashboard, but typically we should be
+                            console.log('[IDLE] Removing idle time, staying on current view:', view);
+                        }
+                    }}
                 />
             </div>
         );
