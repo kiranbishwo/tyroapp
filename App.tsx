@@ -2555,6 +2555,34 @@ const App: React.FC = () => {
                         console.warn('No camera stream available for webcam capture');
                     }
                     
+                    // CRITICAL: Ensure video element ref is available before proceeding
+                    // Wait for ref to be available (component might not be fully rendered)
+                    if (needsWebcam && activeCameraStream && !hiddenCamVideoRef.current) {
+                        console.warn('Video ref not available, waiting for component to render...');
+                        // Wait up to 2 seconds for ref to be available
+                        let refWaitAttempts = 0;
+                        const maxRefWaitAttempts = 20;
+                        while (!hiddenCamVideoRef.current && refWaitAttempts < maxRefWaitAttempts) {
+                            await new Promise(resolve => setTimeout(resolve, 100));
+                            refWaitAttempts++;
+                        }
+                        if (!hiddenCamVideoRef.current) {
+                            console.error('Video ref still not available after waiting, cannot capture webcam photo');
+                        }
+                    }
+                    
+                    // Ensure stream is set on video element BEFORE checking readiness
+                    if (needsWebcam && activeCameraStream && hiddenCamVideoRef.current) {
+                        const video = hiddenCamVideoRef.current;
+                        // Ensure stream is set on video element
+                        if (video.srcObject !== activeCameraStream) {
+                            console.log('Setting stream on video element for capture...');
+                            video.srcObject = activeCameraStream;
+                            // Wait a bit for stream to attach
+                            await new Promise(resolve => setTimeout(resolve, 200));
+                        }
+                    }
+                    
                     // Verify camera is actually ready
                     // EXPLANATION: To capture a webcam photo in browsers, we MUST use a video element:
                     // 1. Camera stream (MediaStream) can only be displayed in a <video> element
@@ -2740,8 +2768,15 @@ const App: React.FC = () => {
                             (async () => {
                                 try {
                                     console.log('Capturing webcam photo...');
-                                    const video = hiddenCamVideoRef.current!;
-                                    const canvas = hiddenCanvasRef.current!;
+                                    
+                                    // Double-check refs are still available (React might have unmounted)
+                                    if (!hiddenCamVideoRef.current || !hiddenCanvasRef.current) {
+                                        console.error('📷 Video or canvas ref became unavailable during capture');
+                                        return;
+                                    }
+                                    
+                                    const video = hiddenCamVideoRef.current;
+                                    const canvas = hiddenCanvasRef.current;
                                     
                                     // Wait for video to be ready with retries
                                     let attempts = 0;
@@ -2806,11 +2841,89 @@ const App: React.FC = () => {
                             })()
                         );
                     } else if (needsWebcam) {
-                        console.warn('Webcam capture skipped - missing refs:', {
-                            hasVideoRef: !!hiddenCamVideoRef.current,
-                            hasCanvasRef: !!hiddenCanvasRef.current,
-                            hasCameraStream: !!activeCameraStream
-                        });
+                        // Check if canvas ref is missing (video ref might be available but canvas not)
+                        if (activeCameraStream && hiddenCamVideoRef.current && !hiddenCanvasRef.current) {
+                            console.error('📷 Canvas ref is missing - cannot capture webcam photo');
+                            // Try to wait for canvas ref to be available
+                            let canvasWaitAttempts = 0;
+                            const maxCanvasWaitAttempts = 10;
+                            while (!hiddenCanvasRef.current && canvasWaitAttempts < maxCanvasWaitAttempts) {
+                                await new Promise(resolve => setTimeout(resolve, 100));
+                                canvasWaitAttempts++;
+                            }
+                            if (hiddenCanvasRef.current && cameraReady) {
+                                console.log('📷 Canvas ref became available, will attempt capture');
+                                // Retry capture with canvas now available
+                                capturePromises.push(
+                                    (async () => {
+                                        try {
+                                            if (!hiddenCamVideoRef.current || !hiddenCanvasRef.current) {
+                                                console.error('📷 Refs became unavailable during retry');
+                                                return;
+                                            }
+                                            const video = hiddenCamVideoRef.current;
+                                            const canvas = hiddenCanvasRef.current;
+                                            
+                                            // Wait for video to be ready
+                                            let attempts = 0;
+                                            const maxAttempts = 15;
+                                            while (attempts < maxAttempts && (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0)) {
+                                                await new Promise(resolve => setTimeout(resolve, 200));
+                                                attempts++;
+                                            }
+                                            
+                                            if (video.videoWidth > 0 && video.videoHeight > 0) {
+                                                const context = canvas.getContext('2d');
+                                                if (context) {
+                                                    canvas.width = video.videoWidth;
+                                                    canvas.height = video.videoHeight;
+                                                    context.drawImage(video, 0, 0);
+                                                    
+                                                    const photoDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                                                    console.log(`Webcam photo captured successfully: ${video.videoWidth}x${video.videoHeight}, size: ${photoDataUrl.length} bytes`);
+                                                    
+                                                    // Upload webcam photo and get fileUrl
+                                                    if (selectedTaskId && selectedProjectId && window.electronAPI && window.electronAPI.addWebcamPhotoToTask) {
+                                                        try {
+                                                            const fileUrl = await window.electronAPI.addWebcamPhotoToTask(photoDataUrl);
+                                                            if (fileUrl) {
+                                                                webcamPhoto = fileUrl;
+                                                                console.log('📷 Webcam photo uploaded successfully, fileUrl:', fileUrl.substring(0, 80) + '...');
+                                                            } else {
+                                                                console.error('📷 Webcam photo upload failed - NOT storing base64 (user requirement)');
+                                                                webcamPhoto = null;
+                                                            }
+                                                        } catch (err) {
+                                                            console.error('📷 Failed to upload webcam photo:', err);
+                                                            webcamPhoto = null;
+                                                        }
+                                                    } else {
+                                                        console.warn('📷 No task context for webcam photo - cannot upload, not storing base64');
+                                                        webcamPhoto = null;
+                                                    }
+                                                }
+                                            }
+                                        } catch (error) {
+                                            console.error('Webcam capture retry failed:', error);
+                                        }
+                                    })()
+                                );
+                            } else {
+                                console.warn('Webcam capture skipped - missing refs:', {
+                                    hasVideoRef: !!hiddenCamVideoRef.current,
+                                    hasCanvasRef: !!hiddenCanvasRef.current,
+                                    hasCameraStream: !!activeCameraStream,
+                                    cameraReady
+                                });
+                            }
+                        } else {
+                            console.warn('Webcam capture skipped - missing refs:', {
+                                hasVideoRef: !!hiddenCamVideoRef.current,
+                                hasCanvasRef: !!hiddenCanvasRef.current,
+                                hasCameraStream: !!activeCameraStream,
+                                cameraReady
+                            });
+                        }
                     }
                     
                     // Execute all captures simultaneously
