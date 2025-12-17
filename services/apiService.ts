@@ -868,7 +868,22 @@ class ApiService {
     async checkFace(faceData: string): Promise<ApiResponse<{ similarity: number; message: string }>> {
         try {
             // Get login_token directly from localStorage
-            const loginToken = localStorage.getItem('login_token');
+            let loginToken = localStorage.getItem('login_token');
+
+            // If not in localStorage, try to get from keytar (Electron secure storage)
+            if (!loginToken && typeof window !== 'undefined' && (window as any).electronAPI) {
+                try {
+                    const tokenResult = await (window as any).electronAPI.oauthGetLoginToken();
+                    if (tokenResult.token) {
+                        loginToken = tokenResult.token;
+                        // Store in localStorage for future use
+                        localStorage.setItem('login_token', loginToken);
+                        console.log('[FACE CHECK] ✅ Restored login_token from keytar to localStorage');
+                    }
+                } catch (error) {
+                    console.warn('[FACE CHECK] Could not get token from keytar:', error);
+                }
+            }
 
             if (!loginToken) {
                 return {

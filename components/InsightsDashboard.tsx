@@ -81,8 +81,19 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
             setIsLoadingJsonData(true);
             const fetchCombinedData = async () => {
                 try {
+                    console.log('[INSIGHTS] 📊 Fetching combined insights data for today...');
                     // Fetch only today's data
                     const combinedData = await window.electronAPI!.getCombinedInsights('today');
+                    console.log('[INSIGHTS] 📊 Combined data response:', {
+                        success: combinedData?.success,
+                        hasCombinedData: !!combinedData?.combinedData,
+                        tasksCount: combinedData?.tasks?.length || 0,
+                        activityLogsCount: combinedData?.combinedData?.activityLogs?.length || 0,
+                        screenshotsCount: combinedData?.combinedData?.screenshots?.length || 0,
+                        webcamPhotosCount: combinedData?.combinedData?.webcamPhotos?.length || 0,
+                        activeWindowsCount: combinedData?.combinedData?.activeWindows?.length || 0
+                    });
+                    
                     if (combinedData && combinedData.success) {
                         // Transform combined data to match the format expected by the component
                         const transformedData = {
@@ -104,12 +115,18 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             }
                         };
                         setJsonTrackingData(transformedData);
-                        console.log('✅ Loaded combined tracking data from all tasks');
+                        console.log('[INSIGHTS] ✅ Loaded combined tracking data:', {
+                            activityLogs: transformedData.trackingData.activityLogs.length,
+                            screenshots: transformedData.trackingData.screenshots.length,
+                            webcamPhotos: transformedData.trackingData.webcamPhotos.length,
+                            activeWindows: transformedData.trackingData.activeWindows.length
+                        });
                     } else {
+                        console.warn('[INSIGHTS] ⚠️ No combined data available or request failed');
                         setJsonTrackingData(null);
                     }
                 } catch (error) {
-                    console.error('❌ Error loading combined tracking data:', error);
+                    console.error('[INSIGHTS] ❌ Error loading combined tracking data:', error);
                     setJsonTrackingData(null);
                 } finally {
                     setIsLoadingJsonData(false);
@@ -251,20 +268,23 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                 // console.log('Task Report Filtering:', { taskId: filterTaskId, filteredLogs: filtered.length });
             }
             
-            return filtered;
+            // Final null check to ensure no null values slip through
+            return filtered.filter(log => log != null);
         } else if (filterTaskId && filterProjectId) {
             // If filtering by taskId only (no time entries), filter by taskId or projectId
             // This is a fallback - prefer taskId but allow projectId if taskId not set
-            return todayLogs.filter(log => {
+            const filtered = todayLogs.filter(log => {
                 if (log && log.taskId) {
                     return log.taskId === filterTaskId;
                 }
                 // Fallback: if no taskId, match by projectId
                 return log && log.projectId === filterProjectId;
             });
+            // Final null check to ensure no null values slip through
+            return filtered.filter(log => log != null);
         }
-        // No task filter - return today's logs only
-        return todayLogs;
+        // No task filter - return today's logs only (with null check)
+        return todayLogs.filter(log => log != null);
     }, [logs, filterTaskId, filterProjectId, filterTimeEntries]);
     // Real-time activity state
     const [currentActivity, setCurrentActivity] = useState<{
@@ -416,44 +436,47 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
     
     // Calculate aggregate stats (including real-time data from all windows)
     const stats = useMemo(() => {
-        const totalProd = filteredLogs.reduce((acc, log) => acc + (log.compositeScore || log.productivityScore || 0), 0);
+        // Filter out null/undefined logs first to prevent errors
+        const validLogs = filteredLogs.filter(log => log != null);
+        
+        const totalProd = validLogs.reduce((acc, log) => acc + (log.compositeScore || log.productivityScore || 0), 0);
         
         // Use JSON data if available (preferred), otherwise use totalStats from all windows, otherwise calculate from logs
         const totalKeys = jsonTrackingData?.trackingData?.summary?.totalKeystrokes !== undefined
             ? jsonTrackingData.trackingData.summary.totalKeystrokes
             : (totalStats.totalKeystrokes > 0 
                 ? totalStats.totalKeystrokes 
-                : filteredLogs.reduce((acc, log) => acc + log.keyboardEvents, 0) + (currentActivity?.keystrokes || 0));
+                : validLogs.reduce((acc, log) => acc + (log.keyboardEvents || 0), 0) + (currentActivity?.keystrokes || 0));
         const totalClicks = jsonTrackingData?.trackingData?.summary?.totalMouseClicks !== undefined
             ? jsonTrackingData.trackingData.summary.totalMouseClicks
             : (totalStats.totalClicks > 0
                 ? totalStats.totalClicks
-                : filteredLogs.reduce((acc, log) => acc + log.mouseEvents, 0) + (currentActivity?.clicks || 0));
-        const avgProd = filteredLogs.length > 0 ? Math.round(totalProd / filteredLogs.length) : 0;
+                : validLogs.reduce((acc, log) => acc + (log.mouseEvents || 0), 0) + (currentActivity?.clicks || 0));
+        const avgProd = validLogs.length > 0 ? Math.round(totalProd / validLogs.length) : 0;
         
         // TyroDesk metrics
-        const logsWithComposite = filteredLogs.filter(log => log.compositeScore !== undefined);
+        const logsWithComposite = validLogs.filter(log => log.compositeScore !== undefined);
         const avgCompositeScore = logsWithComposite.length > 0 
             ? Math.round(logsWithComposite.reduce((acc, log) => acc + (log.compositeScore || 0), 0) / logsWithComposite.length)
             : avgProd;
         
         // Category breakdown
-        const categoryBreakdown = filteredLogs.reduce((acc, log) => {
+        const categoryBreakdown = validLogs.reduce((acc, log) => {
             const category = log.urlCategory || log.appCategory || 'neutral';
             acc[category] = (acc[category] || 0) + 1;
             return acc;
         }, {} as Record<string, number>);
         
         // Focus metrics
-        const focusScores = filteredLogs.filter(log => log.focusScore !== undefined).map(log => log.focusScore!);
+        const focusScores = validLogs.filter(log => log.focusScore !== undefined).map(log => log.focusScore!);
         const avgFocusScore = focusScores.length > 0 
             ? Math.round(focusScores.reduce((a, b) => a + b, 0) / focusScores.length)
             : 0;
         
-        const totalContextSwitches = filteredLogs.reduce((acc, log) => acc + (log.contextSwitches || 0), 0);
+        const totalContextSwitches = validLogs.reduce((acc, log) => acc + (log.contextSwitches || 0), 0);
         
         // Score breakdown averages
-        const breakdowns = filteredLogs.filter(log => log.scoreBreakdown).map(log => log.scoreBreakdown!);
+        const breakdowns = validLogs.filter(log => log.scoreBreakdown).map(log => log.scoreBreakdown!);
         const avgBreakdown = breakdowns.length > 0 ? {
             activity: Math.round(breakdowns.reduce((acc, b) => acc + b.activity, 0) / breakdowns.length),
             app: Math.round(breakdowns.reduce((acc, b) => acc + b.app, 0) / breakdowns.length),
@@ -1737,8 +1760,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                 projectId?: string;
                             }> = [];
                             
-                            // Add logs from filteredLogs
-                            filteredLogs.forEach(log => {
+                            // Add logs from filteredLogs (filter out null/undefined)
+                            filteredLogs.filter(log => log != null).forEach(log => {
                                 allLogs.push({
                                     id: log.id,
                                     timestamp: log.timestamp,
@@ -1780,13 +1803,27 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                             // Sort by timestamp
                             allLogs.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
                             
+                            // Debug logging
                             if (allLogs.length === 0) {
+                                console.log('[INSIGHTS] ⚠️ No activity logs found for Activity Timeline:', {
+                                    filteredLogsCount: filteredLogs.length,
+                                    jsonActivityLogsCount: jsonTrackingData?.trackingData?.activityLogs?.length || 0,
+                                    hasJsonTrackingData: !!jsonTrackingData,
+                                    filterTaskId: filterTaskId,
+                                    filterProjectId: filterProjectId
+                                });
                                 return (
                                     <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs italic">
                                         No activity recorded yet.
                                     </div>
                                 );
                             }
+                            
+                            console.log('[INSIGHTS] 📊 Activity Timeline:', {
+                                totalLogs: allLogs.length,
+                                fromFilteredLogs: filteredLogs.length,
+                                fromJsonData: jsonTrackingData?.trackingData?.activityLogs?.length || 0
+                            });
                             
                             return allLogs.map((log) => {
                                 const project = projects.find(p => p.id === log.projectId);
@@ -1842,8 +1879,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                 // Count all individual images (screenshots + webcam photos)
                                 let count = 0;
                                 
-                                // Count from filteredLogs
-                                filteredLogs.forEach(log => {
+                                // Count from filteredLogs (filter out null/undefined)
+                                filteredLogs.filter(log => log != null).forEach(log => {
                                     if (log.screenshotUrls && log.screenshotUrls.length > 0) {
                                         count += log.screenshotUrls.length;
                                     } else if (log.screenshotUrl) {
@@ -1881,8 +1918,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                 index?: number;
                             }> = [];
                             
-                            // Add evidence from filteredLogs
-                            filteredLogs.forEach(log => {
+                            // Add evidence from filteredLogs (filter out null/undefined)
+                            filteredLogs.filter(log => log != null).forEach(log => {
                                 // Add all screenshots as separate items
                                 if (log.screenshotUrls && log.screenshotUrls.length > 0) {
                                     log.screenshotUrls.forEach((url, idx) => {
@@ -1929,6 +1966,11 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                 const jsonScreenshots = jsonTrackingData.trackingData.screenshots || [];
                                 const jsonWebcamPhotos = jsonTrackingData.trackingData.webcamPhotos || [];
                                 
+                                console.log('[INSIGHTS] 📸 Adding evidence from JSON data:', {
+                                    screenshotsCount: jsonScreenshots.length,
+                                    webcamPhotosCount: jsonWebcamPhotos.length
+                                });
+                                
                                 // Add screenshots from JSON data
                                 jsonScreenshots.forEach((screenshot: any, idx: number) => {
                                     const timestamp = screenshot.timestamp 
@@ -1937,6 +1979,13 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                     // Prefer fileUrl (server URL) over dataUrl (base64) for better performance
                                     const imageUrl = screenshot.fileUrl || screenshot.dataUrl || screenshot.path || screenshot.url || screenshot.filePath;
                                     if (imageUrl) { // Only add if imageUrl exists
+                                        console.log('[INSIGHTS] 📸 Adding screenshot:', {
+                                            idx,
+                                            timestamp: timestamp.toISOString(),
+                                            hasFileUrl: !!screenshot.fileUrl,
+                                            hasDataUrl: !!screenshot.dataUrl,
+                                            imageUrl: imageUrl.substring(0, 80) + '...'
+                                        });
                                         evidenceItems.push({
                                             id: `json-screenshot-${idx}-${timestamp.getTime()}`,
                                             imageUrl: imageUrl,
@@ -1947,6 +1996,8 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                             productivityScore: screenshot.productivityScore,
                                             index: idx
                                         });
+                                    } else {
+                                        console.warn('[INSIGHTS] ⚠️ Screenshot missing imageUrl:', screenshot);
                                     }
                                 });
                                 
@@ -1958,6 +2009,13 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                     // Prefer fileUrl (server URL) over dataUrl (base64) for better performance
                                     const photoUrl = photo.fileUrl || photo.dataUrl || photo.path || photo.url || photo.filePath;
                                     if (photoUrl) { // Only add if photoUrl exists
+                                        console.log('[INSIGHTS] 📷 Adding webcam photo:', {
+                                            idx,
+                                            timestamp: timestamp.toISOString(),
+                                            hasFileUrl: !!photo.fileUrl,
+                                            hasDataUrl: !!photo.dataUrl,
+                                            photoUrl: photoUrl.substring(0, 80) + '...'
+                                        });
                                         evidenceItems.push({
                                             id: `json-webcam-${idx}-${timestamp.getTime()}`,
                                             imageUrl: photoUrl,
@@ -1967,9 +2025,24 @@ export const InsightsDashboard: React.FC<InsightsDashboardProps> = ({ logs, proj
                                             activeUrl: photo.url || photo.activeUrl,
                                             productivityScore: photo.productivityScore
                                         });
+                                    } else {
+                                        console.warn('[INSIGHTS] ⚠️ Webcam photo missing photoUrl:', photo);
                                     }
                                 });
+                            } else {
+                                console.log('[INSIGHTS] ⚠️ No JSON tracking data available for evidence');
                             }
+                            
+                            // Sort by timestamp (newest first)
+                            evidenceItems.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+                            
+                            console.log('[INSIGHTS] 📊 Evidence Log summary:', {
+                                totalItems: evidenceItems.length,
+                                fromFilteredLogs: evidenceItems.filter(e => !e.id.startsWith('json-')).length,
+                                fromJsonData: evidenceItems.filter(e => e.id.startsWith('json-')).length,
+                                screenshots: evidenceItems.filter(e => e.type === 'screenshot').length,
+                                webcamPhotos: evidenceItems.filter(e => e.type === 'webcam').length
+                            });
                             
                             // Sort by timestamp (newest first) and take latest 20
                             evidenceItems.sort((a, b) => 

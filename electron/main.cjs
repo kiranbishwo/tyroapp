@@ -471,9 +471,55 @@ const normalizeUrl = (url) => {
 
 // ==================== JSON File Storage Functions ====================
 
-// Helper function to update current workspace ID from storage (async)
-const updateCurrentWorkspaceId = async () => {
+// Helper function to get current workspace ID (async)
+// Priority: localStorage (from renderer) > keytar > cached variable > 'default'
+const getCurrentWorkspaceId = async () => {
   try {
+    // First, try to get from localStorage via renderer process
+    if (mainWindow && mainWindow.webContents) {
+      try {
+        const workspaceIdFromStorage = await mainWindow.webContents.executeJavaScript(`
+          (() => {
+            try {
+              // Try to get from localStorage
+              const authFullResponse = localStorage.getItem('auth_full_response');
+              if (authFullResponse) {
+                const parsed = JSON.parse(authFullResponse);
+                // Try multiple paths
+                const workspaceId = parsed.current_workspace_id || 
+                                   parsed.data?.current_workspace_id ||
+                                   parsed.workspace_id ||
+                                   parsed.data?.workspace_id;
+                if (workspaceId) {
+                  return String(workspaceId);
+                }
+              }
+              
+              // Also check if stored directly
+              const storedWorkspaceId = localStorage.getItem('current_workspace_id');
+              if (storedWorkspaceId) {
+                return String(storedWorkspaceId);
+              }
+              
+              return null;
+            } catch (e) {
+              console.error('Error getting workspace ID from localStorage:', e);
+              return null;
+            }
+          })()
+        `);
+        
+        if (workspaceIdFromStorage) {
+          currentWorkspaceId = workspaceIdFromStorage;
+          console.log(`[WORKSPACE-ID] Got workspace ID from localStorage: ${currentWorkspaceId}`);
+          return currentWorkspaceId;
+        }
+      } catch (error) {
+        console.warn('[WORKSPACE-ID] Could not get workspace ID from localStorage:', error);
+      }
+    }
+    
+    // Fallback: Get from keytar storage
     const keytar = require('keytar');
     const userDataStr = await keytar.getPassword('tyro-app', 'user_data');
     
@@ -501,21 +547,27 @@ const updateCurrentWorkspaceId = async () => {
         const newWorkspaceId = String(workspace.workspace_id);
         if (currentWorkspaceId !== newWorkspaceId) {
           currentWorkspaceId = newWorkspaceId;
-          console.log(`[TASK-PATH] Updated workspace ID to: ${currentWorkspaceId}`);
+          console.log(`[WORKSPACE-ID] Updated workspace ID from keytar: ${currentWorkspaceId}`);
         }
-        return newWorkspaceId;
+        return currentWorkspaceId;
       }
     }
   } catch (error) {
-    console.error('[TASK-PATH] Error updating workspace ID:', error);
+    console.error('[WORKSPACE-ID] Error getting workspace ID:', error);
   }
   
   // Ensure currentWorkspaceId is always a valid string (never null)
   if (!currentWorkspaceId || currentWorkspaceId === null || currentWorkspaceId === undefined) {
     currentWorkspaceId = 'default';
-    console.log('[TASK-PATH] Using default workspace ID (no workspace found or error occurred)');
+    console.log('[WORKSPACE-ID] Using default workspace ID (no workspace found or error occurred)');
   }
   return currentWorkspaceId;
+};
+
+// Helper function to update current workspace ID from storage (async)
+const updateCurrentWorkspaceId = async () => {
+  // Use getCurrentWorkspaceId to update the cached value
+  return await getCurrentWorkspaceId();
 };
 
 // Get base data directory - uses userData in production, project root in dev
@@ -685,10 +737,10 @@ const findAllTaskFiles = (trackingDataPath) => {
 // Migration function to move files from old structure to new structure
 // Old: tracking-data/project_id/taskid.json
 // New: tracking-data/workspace_id/YYYY-MM-DD/project_id/taskid.json
-const migrateTrackingDataStructure = (workspaceId = null) => {
+const migrateTrackingDataStructure = async (workspaceId = null) => {
   // Get workspace ID if not provided
   if (!workspaceId) {
-    workspaceId = getCurrentWorkspaceId();
+    workspaceId = await getCurrentWorkspaceId();
   }
   try {
     const baseDir = getBaseDataDirectory();
@@ -3237,15 +3289,33 @@ const uploadTrackingImage = async (imageBuffer, imageType, projectId, taskId, wo
     let apiBaseUrl = settings.apiBaseUrl;
     const originalApiBaseUrl = apiBaseUrl; // Keep for logging
     
+    // If in production mode and stored URL is a dev URL, use BASE_URL instead
+    if (!isDev && apiBaseUrl && isDevUrl(apiBaseUrl)) {
+      console.log('[IMAGE UPLOAD] ⚠️ Production mode detected but stored URL is dev URL, using BASE_URL instead');
+      console.log('[IMAGE UPLOAD] Stored URL:', apiBaseUrl);
+      console.log('[IMAGE UPLOAD] Using BASE_URL:', BASE_URL);
+      apiBaseUrl = `${BASE_URL}/api`;
+    }
+    
+    // If no URL set, use BASE_URL as fallback
+    if (!apiBaseUrl) {
+      apiBaseUrl = `${BASE_URL}/api`;
+      console.log('[IMAGE UPLOAD] No API base URL in settings, using BASE_URL:', apiBaseUrl);
+    }
+    
+    // Normalize API base URL using centralized BASE_URL
+    apiBaseUrl = normalizeApiUrl(apiBaseUrl);
+    
     // Remove version prefix (e.g., /v11, /v12) if present
     // Documentation says: /api/vue/backend/v1 (NOT /api/v11/vue/backend/v1)
     // Similar to OAuth endpoint handling - remove version prefix for image upload routes
     if (apiBaseUrl.match(/\/v\d+$/)) {
       // Remove version suffix (e.g., /v11) for image upload endpoints
+      const beforeVersion = apiBaseUrl;
       apiBaseUrl = apiBaseUrl.replace(/\/v\d+$/, '');
       console.log('[IMAGE UPLOAD] ⚠️  Removed version prefix from apiBaseUrl');
-      console.log('[IMAGE UPLOAD] Original:', originalApiBaseUrl);
-      console.log('[IMAGE UPLOAD] Cleaned:', apiBaseUrl);
+      console.log('[IMAGE UPLOAD] Before:', beforeVersion);
+      console.log('[IMAGE UPLOAD] After:', apiBaseUrl);
     }
     
     // Also handle case where version is in the middle (e.g., /api/v11/something)
@@ -3258,6 +3328,12 @@ const uploadTrackingImage = async (imageBuffer, imageType, projectId, taskId, wo
     }
     
     console.log('[IMAGE UPLOAD] 📋 API Base URL (final):', apiBaseUrl);
+    console.log('[IMAGE UPLOAD] 📋 Environment check:', {
+      isDev: isDev,
+      BASE_URL: BASE_URL,
+      originalApiBaseUrl: originalApiBaseUrl,
+      finalApiBaseUrl: apiBaseUrl
+    });
 
     // Create FormData equivalent for Node.js
     const FormData = (await import('form-data')).default;
@@ -3325,6 +3401,26 @@ const uploadTrackingImage = async (imageBuffer, imageType, projectId, taskId, wo
       taskId,
       workspaceId: workspaceId || 'not provided',
       hasAuthToken: !!authToken
+    });
+    
+    // Validate token format before making request
+    if (!authToken || typeof authToken !== 'string' || authToken.trim().length === 0) {
+      throw new Error('Invalid authentication token - token is empty or invalid');
+    }
+    
+    // Check if token looks like a JWT (starts with 'eyJ')
+    if (!authToken.startsWith('eyJ')) {
+      console.warn('[IMAGE UPLOAD] ⚠️ Token does not appear to be a valid JWT (should start with "eyJ")');
+      console.warn('[IMAGE UPLOAD] Token preview:', authToken.substring(0, 20) + '...');
+    }
+    
+    console.log('[IMAGE UPLOAD] 🔐 Token validation:', {
+      hasToken: !!authToken,
+      tokenLength: authToken.length,
+      tokenPreview: authToken.substring(0, 30) + '...',
+      isJWT: authToken.startsWith('eyJ'),
+      uploadUrl: uploadUrl,
+      isProduction: !isDev
     });
     
     const response = await axios.post(uploadUrl, formData, {
@@ -3454,7 +3550,15 @@ const uploadTrackingImage = async (imageBuffer, imageType, projectId, taskId, wo
 // Screenshot capture handler (no screen share needed)
 ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
   try {
-    console.log('Starting screenshot capture...');
+    console.log('[TASK-SCREENSHOT] ========================================');
+    console.log('[TASK-SCREENSHOT] 📸 Starting screenshot capture...');
+    console.log('[TASK-SCREENSHOT] 📋 Task context check:', {
+      currentTaskId: currentTaskId || 'NOT SET',
+      currentProjectId: currentProjectId || 'NOT SET',
+      hasTaskContext: !!(currentTaskId && currentProjectId),
+      isBlurred: isBlurred
+    });
+    console.log('[TASK-SCREENSHOT] ========================================');
     
     // Request screen sources with proper permissions
     const sources = await desktopCapturer.getSources({
@@ -3462,7 +3566,7 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
       thumbnailSize: { width: 1920, height: 1080 }
     });
 
-    console.log('Screenshot sources found:', sources.length, sources.map(s => s.name));
+    console.log('[TASK-SCREENSHOT] Screenshot sources found:', sources.length, sources.map(s => s.name));
 
     if (sources.length > 0) {
       // Try to find the main screen
@@ -3494,10 +3598,17 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
           // Upload image to server with retry and deduplication - REQUIRED before saving to JSON
           let fileUrl = null;
           if (currentTaskId && currentProjectId) {
+            console.log('[TASK-SCREENSHOT] ✅ Task context available, proceeding with upload...');
             try {
               // Get workspace ID if available
               const store = await initStore();
               const workspaceId = store.get('workspaceId');
+              console.log('[TASK-SCREENSHOT] 📋 Upload parameters:', {
+                projectId: currentProjectId,
+                taskId: currentTaskId,
+                workspaceId: workspaceId || 'not set',
+                imageSize: `${(pngBuffer.length / 1024).toFixed(2)} KB`
+              });
               
               // Create upload key for deduplication
               const uploadKey = getUploadKey(pngBuffer, 'screenshot', currentProjectId, currentTaskId);
@@ -3506,6 +3617,7 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
               if (activeUploads.has(uploadKey)) {
                 console.log('[TASK-SCREENSHOT] ⚠️ Duplicate upload detected, reusing existing upload...');
                 fileUrl = await activeUploads.get(uploadKey);
+                console.log('[TASK-SCREENSHOT] ✅ Reused upload result, fileUrl:', fileUrl ? fileUrl.substring(0, 80) + '...' : 'null');
               } else {
                 console.log('[TASK-SCREENSHOT] 🚀 Starting new upload (with retry and deduplication)...');
                 
@@ -3527,7 +3639,7 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
                   fileUrl = await uploadPromise;
                   
                   if (fileUrl) {
-                    console.log('[TASK-SCREENSHOT] ✅ Image uploaded successfully! URL:', fileUrl);
+                    console.log('[TASK-SCREENSHOT] ✅ Image uploaded successfully! URL:', fileUrl.substring(0, 100) + '...');
                   } else {
                     throw new Error('Upload returned null - no file URL received');
                   }
@@ -3539,19 +3651,43 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
             } catch (uploadError) {
               // Upload failed after all retries - log error and skip saving
               console.error('[TASK-SCREENSHOT] ❌ Upload failed after retries:', uploadError.message);
+              console.error('[TASK-SCREENSHOT] 📋 Error details:', {
+                message: uploadError.message,
+                response: uploadError.response?.data || 'no response',
+                status: uploadError.response?.status || 'no status',
+                config: uploadError.config ? {
+                  url: uploadError.config.url,
+                  method: uploadError.config.method
+                } : 'no config'
+              });
               console.error('[TASK-SCREENSHOT] ⚠️ Screenshot will NOT be saved to JSON (upload required)');
               console.error('[TASK-SCREENSHOT] 💡 Fix: Enable API, configure API base URL, and ensure authentication token is available');
               // Don't save screenshot if upload fails - user needs to fix API configuration
               fileUrl = null;
             }
           } else {
-            console.warn('[TASK-SCREENSHOT] ⚠️ No task context (taskId or projectId missing), cannot upload');
+            console.error('[TASK-SCREENSHOT] ❌ CRITICAL: No task context (taskId or projectId missing), cannot upload');
+            console.error('[TASK-SCREENSHOT] 📋 Debug info:', {
+              currentTaskId: currentTaskId || 'NULL',
+              currentProjectId: currentProjectId || 'NULL',
+              hasTaskId: !!currentTaskId,
+              hasProjectId: !!currentProjectId
+            });
+            console.error('[TASK-SCREENSHOT] 💡 Fix: Ensure a task is selected/started before capturing screenshots');
             fileUrl = null;
           }
           
           // Save screenshot to task - ONLY if upload succeeded (fileUrl exists)
           // Save IMMEDIATELY after upload success (not debounced)
+          console.log('[TASK-SCREENSHOT] 📋 Pre-save check:', {
+            hasFileUrl: !!fileUrl,
+            hasTaskId: !!currentTaskId,
+            hasProjectId: !!currentProjectId,
+            canSave: !!(fileUrl && currentTaskId && currentProjectId)
+          });
+          
           if (fileUrl && currentTaskId && currentProjectId) {
+            console.log('[TASK-SCREENSHOT] ✅ All conditions met, saving screenshot to task data...');
             const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
             if (taskData) {
               // Ensure screenshots array exists
@@ -3580,12 +3716,18 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
               
               console.log(`[TASK-SCREENSHOT] ✅ Screenshot saved to JSON with fileUrl: ${fileUrl.substring(0, 80)}...`);
               console.log(`[TASK-SCREENSHOT] 💾 Save called, fileUrl length: ${fileUrl.length}`);
+              console.log(`[TASK-SCREENSHOT] 📊 Task data now has ${taskData.screenshots.length} screenshot(s) in memory`);
               
               if (isDev) {
                 console.log(`[TASK-SCREENSHOT] Tagged screenshot with task ${currentTaskId}, saved immediately`);
               }
             } else {
               console.error('[TASK-SCREENSHOT] ❌ CRITICAL: taskData is null after getTaskTrackingData!');
+              console.error('[TASK-SCREENSHOT] 📋 Debug:', {
+                projectId: currentProjectId,
+                taskId: currentTaskId,
+                taskKey: getTaskKey(currentProjectId, currentTaskId)
+              });
             }
           } else if (!fileUrl) {
             console.error('[TASK-SCREENSHOT] ❌ Cannot save screenshot - upload failed. Fix API configuration.');
@@ -3595,7 +3737,11 @@ ipcMain.handle('capture-screenshot', async (event, isBlurred = false) => {
             console.warn(`[TASK-SCREENSHOT] Debug: fileUrl=${fileUrl}, currentTaskId=${currentTaskId}, currentProjectId=${currentProjectId}`);
           }
           
-          return dataUrl; // Still return dataUrl for UI display
+          // Return both dataUrl (for UI display) and fileUrl (for storage)
+          return {
+            dataUrl: dataUrl, // For UI preview
+            fileUrl: fileUrl // For storage in activity log (null if upload failed)
+          };
         } else {
           console.warn('Thumbnail has invalid dimensions');
           return null;
@@ -5545,7 +5691,9 @@ app.whenReady().then(async () => {
   if (isDev) {
     console.log('[APP] Running migration to new folder structure with workspace ID:', currentWorkspaceId);
   }
-  migrateTrackingDataStructure(currentWorkspaceId);
+  migrateTrackingDataStructure(currentWorkspaceId).catch(err => {
+    console.error('[APP] Migration error:', err);
+  });
   
   createWindow();
   createTray();
@@ -5658,13 +5806,37 @@ const dataUrlToBuffer = (dataUrl) => {
 
 // Add webcam photo to current task
 ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
+  console.log('[TASK-WEBCAM] ========================================');
+  console.log('[TASK-WEBCAM] 📷 Starting webcam photo processing...');
+  console.log('[TASK-WEBCAM] 📋 Task context check:', {
+    currentTaskId: currentTaskId || 'NOT SET',
+    currentProjectId: currentProjectId || 'NOT SET',
+    hasTaskContext: !!(currentTaskId && currentProjectId),
+    dataUrlLength: photoDataUrl ? photoDataUrl.length : 0
+  });
+  console.log('[TASK-WEBCAM] ========================================');
+  
   if (!currentTaskId || !currentProjectId) {
-    return false;
+    console.error('[TASK-WEBCAM] ❌ CRITICAL: No task context (taskId or projectId missing)');
+    console.error('[TASK-WEBCAM] 📋 Debug info:', {
+      currentTaskId: currentTaskId || 'NULL',
+      currentProjectId: currentProjectId || 'NULL',
+      hasTaskId: !!currentTaskId,
+      hasProjectId: !!currentProjectId
+    });
+    console.error('[TASK-WEBCAM] 💡 Fix: Ensure a task is selected/started before capturing webcam photos');
+    return null;
   }
   
   const taskData = getTaskTrackingData(currentProjectId, currentTaskId);
   if (!taskData) {
-    return false;
+    console.error('[TASK-WEBCAM] ❌ CRITICAL: taskData is null after getTaskTrackingData!');
+    console.error('[TASK-WEBCAM] 📋 Debug:', {
+      projectId: currentProjectId,
+      taskId: currentTaskId,
+      taskKey: getTaskKey(currentProjectId, currentTaskId)
+    });
+    return null;
   }
   
   // Upload image to server with retry and deduplication - REQUIRED before saving to JSON
@@ -5676,9 +5848,18 @@ ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
       throw new Error('Failed to convert dataUrl to buffer');
     }
     
+    console.log('[TASK-WEBCAM] ✅ DataUrl converted to buffer, size:', `${(imageBuffer.length / 1024).toFixed(2)} KB`);
+    
     // Get workspace ID if available
     const store = await initStore();
     const workspaceId = store.get('workspaceId');
+    
+    console.log('[TASK-WEBCAM] 📋 Upload parameters:', {
+      projectId: currentProjectId,
+      taskId: currentTaskId,
+      workspaceId: workspaceId || 'not set',
+      imageSize: `${(imageBuffer.length / 1024).toFixed(2)} KB`
+    });
     
     // Create upload key for deduplication
     const uploadKey = getUploadKey(imageBuffer, 'webcam_photo', currentProjectId, currentTaskId);
@@ -5687,6 +5868,7 @@ ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
     if (activeUploads.has(uploadKey)) {
       console.log('[TASK-WEBCAM] ⚠️ Duplicate upload detected, reusing existing upload...');
       fileUrl = await activeUploads.get(uploadKey);
+      console.log('[TASK-WEBCAM] ✅ Reused upload result, fileUrl:', fileUrl ? fileUrl.substring(0, 80) + '...' : 'null');
     } else {
       console.log('[TASK-WEBCAM] 🚀 Starting new upload (with retry and deduplication)...');
       
@@ -5708,7 +5890,7 @@ ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
         fileUrl = await uploadPromise;
         
         if (fileUrl) {
-          console.log('[TASK-WEBCAM] ✅ Image uploaded successfully! URL:', fileUrl);
+          console.log('[TASK-WEBCAM] ✅ Image uploaded successfully! URL:', fileUrl.substring(0, 100) + '...');
         } else {
           throw new Error('Upload returned null - no file URL received');
         }
@@ -5720,6 +5902,15 @@ ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
   } catch (uploadError) {
     // Upload failed after all retries - log error and skip saving
     console.error('[TASK-WEBCAM] ❌ Upload failed after retries:', uploadError.message);
+    console.error('[TASK-WEBCAM] 📋 Error details:', {
+      message: uploadError.message,
+      response: uploadError.response?.data || 'no response',
+      status: uploadError.response?.status || 'no status',
+      config: uploadError.config ? {
+        url: uploadError.config.url,
+        method: uploadError.config.method
+      } : 'no config'
+    });
     console.error('[TASK-WEBCAM] ⚠️ Webcam photo will NOT be saved to JSON (upload required)');
     console.error('[TASK-WEBCAM] 💡 Fix: Enable API, configure API base URL, and ensure authentication token is available');
     // Don't save webcam photo if upload fails - user needs to fix API configuration
@@ -5728,7 +5919,15 @@ ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
   
   // Save webcam photo to task - ONLY if upload succeeded (fileUrl exists)
   // Save IMMEDIATELY after upload success (not debounced)
+  console.log('[TASK-WEBCAM] 📋 Pre-save check:', {
+    hasFileUrl: !!fileUrl,
+    hasTaskId: !!currentTaskId,
+    hasProjectId: !!currentProjectId,
+    canSave: !!fileUrl
+  });
+  
   if (fileUrl) {
+    console.log('[TASK-WEBCAM] ✅ All conditions met, saving webcam photo to task data...');
     // Ensure webcamPhotos array exists
     if (!taskData.webcamPhotos) {
       taskData.webcamPhotos = [];
@@ -5754,23 +5953,20 @@ ipcMain.handle('add-webcam-photo-to-task', async (event, photoDataUrl) => {
     
     console.log(`[TASK-WEBCAM] ✅ Webcam photo saved to JSON with fileUrl: ${fileUrl.substring(0, 80)}...`);
     console.log(`[TASK-WEBCAM] 💾 Save called, fileUrl length: ${fileUrl.length}`);
+    console.log(`[TASK-WEBCAM] 📊 Task data now has ${taskData.webcamPhotos.length} webcam photo(s) in memory`);
     
     if (isDev) {
       console.log(`[TASK-WEBCAM] Tagged webcam photo with task ${currentTaskId}, saved immediately`);
     }
     
-    return true;
+    // Return fileUrl for storage in activity log
+    return fileUrl;
   } else {
     console.error('[TASK-WEBCAM] ❌ Cannot save webcam photo - upload failed. Fix API configuration.');
     console.error(`[TASK-WEBCAM] Debug: fileUrl=${fileUrl}, currentTaskId=${currentTaskId}, currentProjectId=${currentProjectId}`);
-    return false;
+    // Return null if upload failed
+    return null;
   }
-  
-  if (isDev) {
-    console.log(`[TASK-WEBCAM] Tagged webcam photo with task ${currentTaskId}, scheduled save`);
-  }
-  
-  return true;
 });
 
 // Delete tracking image by ID
@@ -6289,10 +6485,59 @@ ipcMain.handle('get-today-tasks', async (event, workspaceId = null) => {
             return photoTime >= todayStart && photoTime <= todayEnd;
           });
           
+          // Debug logging for screenshots and webcam photos
+          if (screenshots.length > 0 || webcamPhotos.length > 0) {
+            console.log(`[GET-TODAY-TASKS] 📊 Task ${taskFile.taskId} media counts:`, {
+              totalScreenshots: screenshots.length,
+              todayScreenshots: todayScreenshots.length,
+              totalWebcamPhotos: webcamPhotos.length,
+              todayWebcamPhotos: todayWebcamPhotos.length,
+              todayStart: new Date(todayStart).toISOString(),
+              todayEnd: new Date(todayEnd).toISOString()
+            });
+            
+            // Log sample screenshot timestamps if any exist
+            if (screenshots.length > 0) {
+              const sampleScreenshot = screenshots[0];
+              const sampleTime = sampleScreenshot.timestamp ? new Date(sampleScreenshot.timestamp).getTime() :
+                               (sampleScreenshot.createdAt ? new Date(sampleScreenshot.createdAt).getTime() : 0);
+              console.log(`[GET-TODAY-TASKS] 📸 Sample screenshot:`, {
+                timestamp: sampleScreenshot.timestamp,
+                createdAt: sampleScreenshot.createdAt,
+                sampleTime: new Date(sampleTime).toISOString(),
+                isToday: sampleTime >= todayStart && sampleTime <= todayEnd,
+                hasFileUrl: !!sampleScreenshot.fileUrl
+              });
+            }
+            
+            // Log sample webcam photo timestamps if any exist
+            if (webcamPhotos.length > 0) {
+              const samplePhoto = webcamPhotos[0];
+              const sampleTime = samplePhoto.timestamp ? new Date(samplePhoto.timestamp).getTime() :
+                               (samplePhoto.createdAt ? new Date(samplePhoto.createdAt).getTime() : 0);
+              console.log(`[GET-TODAY-TASKS] 📷 Sample webcam photo:`, {
+                timestamp: samplePhoto.timestamp,
+                createdAt: samplePhoto.createdAt,
+                sampleTime: new Date(sampleTime).toISOString(),
+                isToday: sampleTime >= todayStart && sampleTime <= todayEnd,
+                hasFileUrl: !!samplePhoto.fileUrl
+              });
+            }
+          } else {
+            console.log(`[GET-TODAY-TASKS] ⚠️ Task ${taskFile.taskId} has NO screenshots or webcam photos in trackingData`);
+            console.log(`[GET-TODAY-TASKS] 📋 Debug:`, {
+              hasTrackingData: !!data.trackingData,
+              hasScreenshotsArray: !!data.trackingData?.screenshots,
+              screenshotsArrayLength: data.trackingData?.screenshots?.length || 0,
+              hasWebcamPhotosArray: !!data.trackingData?.webcamPhotos,
+              webcamPhotosArrayLength: data.trackingData?.webcamPhotos?.length || 0
+            });
+          }
+          
           // Only include task if it has today's activity
           if (totalTime > 0 || todayLogs.length > 0 || todayScreenshots.length > 0 || todayWebcamPhotos.length > 0) {
             if (isDev) {
-              console.log(`[GET-TODAY-TASKS] Task ${taskFile.taskId}: totalTime=${totalTime}s (${Math.floor(totalTime/60)}m), logs=${todayLogs.length}, windows=${todayWindows.length}`);
+              console.log(`[GET-TODAY-TASKS] Task ${taskFile.taskId}: totalTime=${totalTime}s (${Math.floor(totalTime/60)}m), logs=${todayLogs.length}, screenshots=${todayScreenshots.length}, webcamPhotos=${todayWebcamPhotos.length}, windows=${todayWindows.length}`);
             }
             todayTasks.push({
               projectId: taskFile.projectId,

@@ -135,6 +135,14 @@ const App: React.FC = () => {
             console.log('[PROJECTS] Fetching projects with params:', params);
             const response = await apiService.getProjects(params);
 
+            console.log('[PROJECTS] API Response:', {
+                success: response.success,
+                hasData: !!response.data,
+                dataLength: response.data?.length || 0,
+                error: response.error,
+                rawData: response.data
+            });
+
             if (response.success && response.data) {
                 // Transform API response to Project format
                 const transformedProjects: Project[] = response.data.map((p: any) => ({
@@ -147,10 +155,11 @@ const App: React.FC = () => {
                     progress: p.progress,
                 }));
 
+                console.log('[PROJECTS] ✅ Loaded', transformedProjects.length, 'projects:', transformedProjects.map(p => ({ id: p.id, name: p.name })));
                 setProjects(transformedProjects);
-                console.log('[PROJECTS] ✅ Loaded', transformedProjects.length, 'projects');
             } else {
                 console.error('[PROJECTS] Failed to fetch:', response.error);
+                console.error('[PROJECTS] Response details:', response);
                 // Fallback to empty array
                 setProjects([]);
             }
@@ -196,6 +205,14 @@ const App: React.FC = () => {
             console.log('[TASKS] Fetching tasks with params:', params);
             const response = await apiService.getTasks(params);
 
+            console.log('[TASKS] API Response:', {
+                success: response.success,
+                hasData: !!response.data,
+                dataLength: response.data?.length || 0,
+                error: response.error,
+                rawData: response.data
+            });
+
             if (response.success && response.data) {
                 // Transform API response to Task format
                 const transformedTasks: Task[] = response.data.map((t: any) => ({
@@ -206,10 +223,11 @@ const App: React.FC = () => {
                     description: t.description,
                 }));
 
+                console.log('[TASKS] ✅ Loaded', transformedTasks.length, 'tasks:', transformedTasks.map(t => ({ id: t.id, name: t.name, projectId: t.projectId })));
                 setTasks(transformedTasks);
-                console.log('[TASKS] ✅ Loaded', transformedTasks.length, 'tasks');
             } else {
                 console.error('[TASKS] Failed to fetch:', response.error);
+                console.error('[TASKS] Response details:', response);
                 // Fallback to empty array
                 setTasks([]);
             }
@@ -228,17 +246,77 @@ const App: React.FC = () => {
         return colors[id % colors.length];
     };
 
-    // Update projects with their tasks when tasks are loaded
+    // Track project IDs to detect when projects change (without causing infinite loops)
+    const projectIdsString = projects.map(p => p.id).sort().join(',');
+    
+    // Update projects with their tasks when tasks or projects are loaded
     useEffect(() => {
-        if (tasks.length > 0 && projects.length > 0) {
+        console.log('[PROJECT-TASKS] Updating projects with tasks:', {
+            tasksCount: tasks.length,
+            projectsCount: projects.length,
+            tasks: tasks.map(t => ({ id: t.id, projectId: t.projectId, name: t.name })),
+            projectIds: projects.map(p => ({ id: p.id, name: p.name }))
+        });
+        
+        if (projects.length > 0) {
+            setProjects(prevProjects => {
+                // Check if projects actually changed (by comparing IDs)
+                const prevProjectIds = prevProjects.map(p => p.id).sort().join(',');
+                const currentProjectIds = projects.map(p => p.id).sort().join(',');
+                
+                // Only update if project structure changed or tasks changed
+                const updatedProjects = prevProjects.map(project => {
+                    // Convert both to strings for comparison to handle type mismatches
+                    const projectIdStr = project.id.toString();
+                    const projectTasks = tasks.filter(task => {
+                        const taskProjectIdStr = task.projectId.toString();
+                        const matches = taskProjectIdStr === projectIdStr;
+                        if (matches) {
+                            console.log('[PROJECT-TASKS] ✅ Matched task to project:', {
+                                taskId: task.id,
+                                taskName: task.name,
+                                taskProjectId: task.projectId,
+                                projectId: project.id,
+                                projectName: project.name
+                            });
+                        }
+                        return matches;
+                    });
+                    
+                    // Only update if tasks actually changed for this project
+                    const currentTasks = project.tasks || [];
+                    const tasksChanged = currentTasks.length !== projectTasks.length || 
+                        currentTasks.some((t, i) => t.id !== projectTasks[i]?.id);
+                    
+                    if (tasksChanged) {
+                        console.log('[PROJECT-TASKS] Project', project.name, '(', project.id, ') has', projectTasks.length, 'tasks (was', currentTasks.length, ')');
+                    }
+                    
+                    return {
+                        ...project,
+                        tasks: projectTasks
+                    };
+                });
+                
+                // Log summary
+                const totalTasksAssigned = updatedProjects.reduce((sum, p) => sum + (p.tasks?.length || 0), 0);
+                console.log('[PROJECT-TASKS] 📊 Summary: Assigned', totalTasksAssigned, 'tasks across', updatedProjects.length, 'projects');
+                
+                return updatedProjects;
+            });
+        } else if (tasks.length > 0) {
+            console.warn('[PROJECT-TASKS] ⚠️ Tasks loaded but no projects available yet. Tasks will be assigned when projects are loaded.');
+        } else if (projects.length > 0 && tasks.length === 0) {
+            // Clear tasks from projects if tasks array is empty
             setProjects(prevProjects => 
                 prevProjects.map(project => ({
                     ...project,
-                    tasks: tasks.filter(task => task.projectId === project.id)
+                    tasks: []
                 }))
             );
+            console.log('[PROJECT-TASKS] Cleared tasks from all projects (tasks array is empty)');
         }
-    }, [tasks]);
+    }, [tasks, projectIdsString]); // Run when tasks change or when project IDs change
 
     // Fetch projects and tasks when authenticated and workspace is available
     useEffect(() => {
@@ -897,8 +975,12 @@ const App: React.FC = () => {
             console.log('[AUTO-SYNC] ⚠️ Interval will check auth before each sync');
         }
         
+        // Get auto-sync interval from settings, default to 2 minutes
+        const autoSyncIntervalMinutes = settings?.autoSyncInterval || 2;
+        const autoSyncIntervalMs = autoSyncIntervalMinutes * 60 * 1000; // Convert to milliseconds
+        
         console.log('[AUTO-SYNC] ⏱️ Initial sync: 30 seconds (if authenticated)');
-        console.log('[AUTO-SYNC] ⏱️ Periodic sync: Every 120 seconds (2 minutes)');
+        console.log(`[AUTO-SYNC] ⏱️ Periodic sync: Every ${autoSyncIntervalMinutes} minutes (${autoSyncIntervalMs}ms)`);
 
         let initialTimeout: NodeJS.Timeout | null = null;
         let interval: NodeJS.Timeout | null = null;
@@ -922,10 +1004,10 @@ const App: React.FC = () => {
             console.log('[AUTO-SYNC] ⏸️ Skipping initial timeout - not authenticated');
         }
 
-        // Then upload every 2 minutes - ALWAYS set this up, even if not authenticated
+        // Then upload at configured interval - ALWAYS set this up, even if not authenticated
         interval = setInterval(() => {
             console.log('[AUTO-SYNC] ========================================');
-            console.log('[AUTO-SYNC] 🔄 Periodic sync triggered (every 2 minutes)');
+            console.log(`[AUTO-SYNC] 🔄 Periodic sync triggered (every ${autoSyncIntervalMinutes} minutes)`);
             console.log('[AUTO-SYNC] ⏰ Current time:', new Date().toISOString());
             console.log('[AUTO-SYNC] 📞 Calling uploadAllTrackingFiles(false)...');
             
@@ -961,7 +1043,7 @@ const App: React.FC = () => {
                     stack: err?.stack,
                 });
             });
-        }, 120000); // 2 minutes
+        }, autoSyncIntervalMs); // Use configured interval
         autoSyncIntervalRef.current = interval;
         console.log('[AUTO-SYNC] ✅ Periodic interval set:', interval);
         console.log('[AUTO-SYNC] ✅ Interval ID:', interval);
@@ -972,7 +1054,7 @@ const App: React.FC = () => {
             hasInitialTimeout: !!initialTimeout,
             hasInterval: !!interval,
             intervalType: typeof interval,
-            nextSyncIn: '120 seconds (2 minutes)'
+            nextSyncIn: `${autoSyncIntervalMinutes} minutes (${autoSyncIntervalMs}ms)`
         });
 
         return () => {
@@ -988,28 +1070,76 @@ const App: React.FC = () => {
                 autoSyncIntervalRef.current = null;
             }
         };
-    }, [authStateData?.isAuthenticated, currentWorkspace?.workspace_id, user?.isCheckedIn]); // Effect runs on mount and when these change
+    }, [authStateData?.isAuthenticated, currentWorkspace?.workspace_id, user?.isCheckedIn, settings?.autoSyncInterval]); // Effect runs on mount and when these change
 
     // Fetch current status on mount and when authenticated
     useEffect(() => {
         if (authStateData.isAuthenticated) {
             const loadCurrentStatus = async () => {
+                // Ensure login token is available before making API call
+                let loginToken = localStorage.getItem('login_token');
+                if (!loginToken && window.electronAPI) {
+                    try {
+                        const tokenResult = await window.electronAPI.oauthGetLoginToken();
+                        if (tokenResult.token) {
+                            loginToken = tokenResult.token;
+                            localStorage.setItem('login_token', loginToken);
+                            console.log('[STATUS] ✅ Restored login_token from keytar to localStorage');
+                        }
+                    } catch (error) {
+                        console.warn('[STATUS] Could not get token from keytar:', error);
+                    }
+                }
+                
+                if (!loginToken) {
+                    console.warn('[STATUS] No login token available, skipping status check');
+                    return;
+                }
+                
                 try {
                     const response = await apiService.getCurrentStatus();
                     if (response.success && response.data) {
                         const status = response.data.status;
+                        const data = response.data;
+                        
+                        // Check if user is checked in
+                        // The API might return status as 'checked_in' or have an attendance record
+                        const isCheckedIn = status === 'checked_in' || 
+                                         data?.attendance?.check_in !== null || 
+                                         data?.is_checked_in === true ||
+                                         (data?.attendance && data.attendance.check_in && !data.attendance.check_out);
+                        
+                        if (isCheckedIn) {
+                            console.log('[STATUS] User is already checked in, redirecting to dashboard');
+                            setUser(prev => prev ? { ...prev, isCheckedIn: true } : null);
+                            if (view === AppView.CHECK_IN_OUT || view === AppView.LOGIN) {
+                                setView(AppView.DASHBOARD);
+                                // Fetch projects and tasks
+                                const workspaceId = currentWorkspace?.workspace_id?.toString();
+                                if (workspaceId) {
+                                    fetchProjects(workspaceId);
+                                    fetchTasks(undefined, workspaceId);
+                                }
+                            }
+                        }
+                        
                         if (status && ['idle', 'working', 'break', 'meeting', 'away'].includes(status)) {
                             setUserStatus(status as UserStatus);
                             console.log('[STATUS] Loaded current status:', status);
                         }
                     }
-                } catch (error) {
+                } catch (error: any) {
                     console.error('[STATUS] Error loading current status:', error);
+                    // If authentication error, redirect to login
+                    if (error.message?.includes('token') || error.message?.includes('auth') || error.message?.includes('Unauthorized')) {
+                        console.log('[STATUS] Authentication error, redirecting to login');
+                        setView(AppView.LOGIN);
+                    }
                 }
             };
             loadCurrentStatus();
         }
-    }, [authStateData.isAuthenticated]);
+    }, [authStateData.isAuthenticated, view, currentWorkspace?.workspace_id]);
 
     // Update status on API when user status changes
     useEffect(() => {
@@ -1088,7 +1218,11 @@ const App: React.FC = () => {
         currentProjectId: selectedProjectId,
         currentTaskId: selectedTaskId || undefined,
         currentTaskName: currentTaskName,
-        currentProjectName: currentProjectName
+        currentProjectName: currentProjectName,
+        settings: settings ? {
+            screenshotCaptureInterval: settings.screenshotCaptureInterval,
+            cameraPhotoInterval: settings.cameraPhotoInterval
+        } : null
     });
 
     const timerIntervalRef = useRef<number | null>(null);
@@ -1129,7 +1263,7 @@ const App: React.FC = () => {
             setWorkspacesLoading(true);
             
             // FIRST: Check localStorage for authentication data (fastest check)
-            const loginToken = localStorage.getItem('login_token');
+            let loginToken = localStorage.getItem('login_token');
             const authFullResponse = localStorage.getItem('auth_full_response');
             
             if (loginToken || authFullResponse) {
@@ -1247,6 +1381,12 @@ const App: React.FC = () => {
                             fullResponseParsed // Include full response
                         );
                         
+                        // Save workspace ID to localStorage for main process access
+                        if (currentWorkspace?.workspace_id) {
+                            localStorage.setItem('current_workspace_id', String(currentWorkspace.workspace_id));
+                            console.log('[APP] ✅ Saved workspace ID to localStorage:', currentWorkspace.workspace_id);
+                        }
+                        
                         // Update user state immediately
                         setAuthenticatedUser(authenticatedUser);
                         setWorkspaces(workspaces as Workspace[]);
@@ -1266,14 +1406,6 @@ const App: React.FC = () => {
                         } else {
                             console.warn('[APP] ⚠️ No workspace available after restoring from localStorage');
                         }
-                        
-                        // Set user data
-                        setUser({
-                            id: authenticatedUser.id.toString(),
-                            name: authenticatedUser.name,
-                            avatar: authenticatedUser.avatar || 'https://picsum.photos/100/100',
-                            isCheckedIn: false,
-                        });
                         
                         // Verify workspace domain is available
                         let workspaceDomain = authState.getWorkspaceDomain();
@@ -1311,9 +1443,75 @@ const App: React.FC = () => {
                             console.log('[APP] ✅ Workspace domain available:', workspaceDomain);
                         }
                         
-                        // Redirect to check-in page IMMEDIATELY - don't show login page
-                        console.log('[APP] Redirecting to check-in page (restored from localStorage)');
-                        setView(AppView.CHECK_IN_OUT);
+                        // Ensure login token is available (check keytar if missing from localStorage)
+                        if (!loginToken && window.electronAPI) {
+                            try {
+                                const tokenResult = await window.electronAPI.oauthGetLoginToken();
+                                if (tokenResult.token) {
+                                    loginToken = tokenResult.token;
+                                    localStorage.setItem('login_token', loginToken);
+                                    console.log('[APP] ✅ Restored login_token from keytar to localStorage');
+                                }
+                            } catch (error) {
+                                console.warn('[APP] Could not get token from keytar:', error);
+                            }
+                        }
+                        
+                        // Check if user is already checked in before redirecting
+                        let isCheckedIn = false;
+                        if (loginToken) {
+                            try {
+                                const statusResponse = await apiService.getCurrentStatus();
+                                if (statusResponse.success && statusResponse.data) {
+                                    const currentStatus = statusResponse.data.status;
+                                    isCheckedIn = currentStatus === 'checked_in' || 
+                                                 (statusResponse.data.attendance && 
+                                                  statusResponse.data.attendance.check_in && 
+                                                  !statusResponse.data.attendance.check_out);
+                                    if (isCheckedIn) {
+                                        console.log('[APP] User is already checked in (from localStorage), redirecting to dashboard');
+                                    }
+                                }
+                            } catch (error: any) {
+                                console.warn('[APP] Could not check attendance status:', error.message || error);
+                                // If authentication error, redirect to login
+                                if (error.message?.includes('token') || error.message?.includes('auth') || error.message?.includes('Unauthorized')) {
+                                    console.log('[APP] Authentication error, redirecting to login');
+                                    setView(AppView.LOGIN);
+                                    setWorkspacesLoading(false);
+                                    return;
+                                }
+                            }
+                        } else {
+                            console.warn('[APP] ⚠️ No login token available, cannot check attendance status');
+                            // Without token, show login page
+                            setView(AppView.LOGIN);
+                            setWorkspacesLoading(false);
+                            return;
+                        }
+                        
+                        // Set user data with check-in status
+                        setUser({
+                            id: authenticatedUser.id.toString(),
+                            name: authenticatedUser.name,
+                            avatar: authenticatedUser.avatar || 'https://picsum.photos/100/100',
+                            isCheckedIn: isCheckedIn,
+                        });
+                        
+                        // Redirect based on check-in status
+                        if (isCheckedIn) {
+                            console.log('[APP] Redirecting to dashboard (restored from localStorage, user already checked in)');
+                            setView(AppView.DASHBOARD);
+                            // Fetch projects and tasks
+                            const workspaceId = currentWorkspace?.workspace_id?.toString();
+                            if (workspaceId) {
+                                fetchProjects(workspaceId);
+                                fetchTasks(undefined, workspaceId);
+                            }
+                        } else {
+                            console.log('[APP] Redirecting to check-in page (restored from localStorage)');
+                            setView(AppView.CHECK_IN_OUT);
+                        }
                         setWorkspacesLoading(false);
                         return; // Don't continue with other checks
                     }
@@ -1329,12 +1527,31 @@ const App: React.FC = () => {
                     const status = await window.electronAPI.oauthCheckStatus();
                     if (status.authenticated && status.user) {
                         console.log('[APP] ✅ User is already authenticated on app load (from keytar)');
+                        
+                        // IMPORTANT: Get login token from keytar and store in localStorage
+                        // This is needed for API calls like checkFace and getCurrentStatus
+                        let loginToken = localStorage.getItem('login_token');
+                        if (!loginToken) {
+                            try {
+                                const tokenResult = await window.electronAPI.oauthGetLoginToken();
+                                if (tokenResult.token) {
+                                    loginToken = tokenResult.token;
+                                    localStorage.setItem('login_token', loginToken);
+                                    console.log('[APP] ✅ Restored login_token from keytar to localStorage');
+                                } else {
+                                    console.warn('[APP] ⚠️ No login token found in keytar');
+                                }
+                            } catch (tokenError) {
+                                console.error('[APP] Error getting login token from keytar:', tokenError);
+                            }
+                        }
+                        
                         // Update auth state immediately
                         if (status.user && status.workspaces) {
                             authState.setAuthData(
                                 status.user as AuthenticatedUser,
                                 status.workspaces as Workspace[],
-                                '', // Token is stored in main process
+                                loginToken || '', // Use token from localStorage or keytar
                                 status.expires_at || Date.now() + 604800000,
                                 status.currentWorkspace?.workspace_id
                             );
@@ -1345,6 +1562,46 @@ const App: React.FC = () => {
                         setWorkspaces(status.workspaces as Workspace[] || []);
                         if (status.currentWorkspace) {
                             setCurrentWorkspace(status.currentWorkspace as Workspace);
+                            // Save workspace ID to localStorage for main process access
+                            localStorage.setItem('current_workspace_id', String(status.currentWorkspace.workspace_id));
+                            console.log('[APP] ✅ Saved workspace ID to localStorage (from keytar):', status.currentWorkspace.workspace_id);
+                        }
+                        
+                        // Check if user is already checked in before redirecting
+                        // Only check if we have a token
+                        let isCheckedIn = false;
+                        if (loginToken) {
+                            try {
+                                const statusResponse = await apiService.getCurrentStatus();
+                                if (statusResponse.success && statusResponse.data) {
+                                    const currentStatus = statusResponse.data.status;
+                                    // Check if status is 'checked_in' or if there's an active attendance
+                                    isCheckedIn = currentStatus === 'checked_in' || 
+                                                 (statusResponse.data.attendance && 
+                                                  statusResponse.data.attendance.check_in && 
+                                                  !statusResponse.data.attendance.check_out);
+                                    if (isCheckedIn) {
+                                        console.log('[APP] User is already checked in, redirecting to dashboard');
+                                    } else {
+                                        console.log('[APP] User is not checked in, redirecting to check-in page');
+                                    }
+                                }
+                            } catch (error: any) {
+                                console.warn('[APP] Could not check attendance status:', error.message || error);
+                                // If error is about authentication, user needs to log in again
+                                if (error.message?.includes('token') || error.message?.includes('auth') || error.message?.includes('Unauthorized')) {
+                                    console.log('[APP] Authentication error, redirecting to login');
+                                    setView(AppView.LOGIN);
+                                    setWorkspacesLoading(false);
+                                    return;
+                                }
+                            }
+                        } else {
+                            console.warn('[APP] ⚠️ No login token available, cannot check attendance status');
+                            // Without token, show login page
+                            setView(AppView.LOGIN);
+                            setWorkspacesLoading(false);
+                            return;
                         }
                         
                         // Set user data
@@ -1352,19 +1609,32 @@ const App: React.FC = () => {
                             id: status.user.id.toString(),
                             name: status.user.name,
                             avatar: status.user.avatar || 'https://picsum.photos/100/100',
-                            isCheckedIn: false,
+                            isCheckedIn: isCheckedIn,
                         });
                         
-                        // Redirect to check-in page IMMEDIATELY - don't show login page
-                        console.log('[APP] Redirecting to check-in page (already authenticated)');
-                        setView(AppView.CHECK_IN_OUT);
+                        // Redirect based on check-in status
+                        if (isCheckedIn) {
+                            console.log('[APP] Redirecting to dashboard (user already checked in)');
+                            setView(AppView.DASHBOARD);
+                            // Fetch projects and tasks
+                            const workspaceId = status.currentWorkspace?.workspace_id?.toString();
+                            if (workspaceId) {
+                                fetchProjects(workspaceId);
+                                fetchTasks(undefined, workspaceId);
+                            }
+                        } else {
+                            console.log('[APP] Redirecting to check-in page (user not checked in)');
+                            setView(AppView.CHECK_IN_OUT);
+                        }
                         setWorkspacesLoading(false);
                         return; // Don't continue with authState.initialize() if already authenticated
                     } else {
                         console.log('[APP] User is not authenticated, showing login page');
+                        setView(AppView.LOGIN);
                     }
                 } catch (error) {
                     console.error('[APP] Error checking auth status on init:', error);
+                    setView(AppView.LOGIN);
                 }
             }
             
@@ -1384,6 +1654,11 @@ const App: React.FC = () => {
                 setAuthenticatedUser(state.user);
                 setWorkspaces(state.workspaces);
                 setCurrentWorkspace(state.currentWorkspace);
+                // Save workspace ID to localStorage for main process access
+                if (state.currentWorkspace?.workspace_id) {
+                    localStorage.setItem('current_workspace_id', String(state.currentWorkspace.workspace_id));
+                    console.log('[APP] ✅ Saved workspace ID to localStorage (from auth state):', state.currentWorkspace.workspace_id);
+                }
                 setWorkspacesLoading(false);
                 
                 // Log workspace details for debugging
@@ -1399,18 +1674,94 @@ const App: React.FC = () => {
                 
                 // If authenticated and user data available, update local user state and navigate
                 if (state.isAuthenticated && state.user) {
-                    setUser({
-                        id: state.user.id.toString(),
-                        name: state.user.name,
-                        avatar: state.user.avatar || 'https://picsum.photos/100/100',
-                        isCheckedIn: false,
-                    });
+                    // Check if user is already checked in
+                    const checkAttendanceStatus = async () => {
+                        // Ensure login token is available
+                        let loginToken = localStorage.getItem('login_token');
+                        if (!loginToken && window.electronAPI) {
+                            try {
+                                const tokenResult = await window.electronAPI.oauthGetLoginToken();
+                                if (tokenResult.token) {
+                                    loginToken = tokenResult.token;
+                                    localStorage.setItem('login_token', loginToken);
+                                    console.log('[APP] ✅ Restored login_token from keytar to localStorage');
+                                }
+                            } catch (error) {
+                                console.warn('[APP] Could not get token from keytar:', error);
+                            }
+                        }
+                        
+                        if (!loginToken) {
+                            console.warn('[APP] ⚠️ No login token available, cannot check attendance status');
+                            setUser({
+                                id: state.user.id.toString(),
+                                name: state.user.name,
+                                avatar: state.user.avatar || 'https://picsum.photos/100/100',
+                                isCheckedIn: false,
+                            });
+                            if (view === AppView.LOGIN) {
+                                console.log('[APP] No token, staying on login page');
+                                // Don't redirect - stay on login if no token
+                            }
+                            return;
+                        }
+                        
+                        try {
+                            const statusResponse = await apiService.getCurrentStatus();
+                            let isCheckedIn = false;
+                            if (statusResponse.success && statusResponse.data) {
+                                const currentStatus = statusResponse.data.status;
+                                isCheckedIn = currentStatus === 'checked_in' || 
+                                             (statusResponse.data.attendance && 
+                                              statusResponse.data.attendance.check_in && 
+                                              !statusResponse.data.attendance.check_out);
+                            }
+                            
+                            setUser({
+                                id: state.user.id.toString(),
+                                name: state.user.name,
+                                avatar: state.user.avatar || 'https://picsum.photos/100/100',
+                                isCheckedIn: isCheckedIn,
+                            });
+                            
+                            // If on login view and authenticated, redirect based on check-in status
+                            if (view === AppView.LOGIN) {
+                                if (isCheckedIn) {
+                                    console.log('[APP] Redirecting from login to dashboard (user already checked in)');
+                                    setView(AppView.DASHBOARD);
+                                    // Fetch projects and tasks
+                                    const workspaceId = state.currentWorkspace?.workspace_id?.toString();
+                                    if (workspaceId) {
+                                        fetchProjects(workspaceId);
+                                        fetchTasks(undefined, workspaceId);
+                                    }
+                                } else {
+                                    console.log('[APP] Redirecting from login to check-in (authenticated)');
+                                    setView(AppView.CHECK_IN_OUT);
+                                }
+                            }
+                        } catch (error: any) {
+                            console.warn('[APP] Could not check attendance status:', error.message || error);
+                            // If authentication error, redirect to login
+                            if (error.message?.includes('token') || error.message?.includes('auth') || error.message?.includes('Unauthorized')) {
+                                console.log('[APP] Authentication error, redirecting to login');
+                                setView(AppView.LOGIN);
+                                return;
+                            }
+                            setUser({
+                                id: state.user.id.toString(),
+                                name: state.user.name,
+                                avatar: state.user.avatar || 'https://picsum.photos/100/100',
+                                isCheckedIn: false,
+                            });
+                            if (view === AppView.LOGIN) {
+                                console.log('[APP] Redirecting from login to check-in (authenticated)');
+                                setView(AppView.CHECK_IN_OUT);
+                            }
+                        }
+                    };
                     
-                    // If on login view and authenticated, go to check-in view IMMEDIATELY
-                    if (view === AppView.LOGIN) {
-                        console.log('[APP] Redirecting from login to check-in (authenticated)');
-                        setView(AppView.CHECK_IN_OUT);
-                    }
+                    checkAttendanceStatus();
                 }
             });
             
@@ -1945,16 +2296,16 @@ const App: React.FC = () => {
     
     // Background Capture Logic (Sync with Activity Log creation)
     // We observe the activity logs array. When a new log is added (by useSurveillance),
-    // we capture 1-3 screenshots and webcam photo per 10-minute interval (or 2 minutes in dev mode).
+    // we capture 1-3 screenshots and webcam photo per 2-minute interval.
     const lastProcessedLogIdRef = useRef<string | null>(null);
     const devCaptureIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     
     const immediateCaptureRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     
-    // Dev mode: Periodic capture every 2 minutes (120 seconds)
+    // Periodic capture every 2 minutes (120 seconds) - enabled for both dev and production
     useEffect(() => {
-        if (isDevMode && isTimerRunning && userStatus === 'working') {
-            console.log('Dev mode: Starting periodic capture every 2 minutes');
+        if (isTimerRunning && userStatus === 'working') {
+            console.log('📸 Starting periodic capture every 2 minutes');
             
             // Create initial log if none exists (for immediate capture)
             if (activityLogs.length === 0) {
@@ -1970,7 +2321,7 @@ const App: React.FC = () => {
                 };
                 setActivityLogs([initialLog]);
                 lastProcessedLogIdRef.current = null; // Reset to allow immediate capture
-                console.log('Dev mode: Created initial log for testing');
+                console.log('📸 Created initial log for testing');
             }
             
             // Immediate first capture after 2 seconds
@@ -1985,7 +2336,7 @@ const App: React.FC = () => {
                             webcamUrl: undefined
                         };
                         lastProcessedLogIdRef.current = null;
-                        console.log('Dev mode: Triggering immediate capture');
+                        console.log('📸 Triggering immediate capture');
                         return newLogs;
                     }
                     return prev;
@@ -1993,7 +2344,7 @@ const App: React.FC = () => {
             }, 2000);
             
             devCaptureIntervalRef.current = setInterval(() => {
-                console.log('Dev mode: 2-minute interval triggered - forcing capture');
+                console.log('📸 2-minute interval triggered - forcing capture');
                 // Ensure we have a log to work with
                 setActivityLogs(prev => {
                     if (prev.length === 0) {
@@ -2008,7 +2359,7 @@ const App: React.FC = () => {
                             productivityScore: 50,
                             activeWindow: 'Dev Mode Test'
                         };
-                        console.log('Dev mode: Created new log for capture');
+                        console.log('📸 Created new log for capture');
                         lastProcessedLogIdRef.current = null;
                         return [newLog];
                     } else {
@@ -2022,7 +2373,7 @@ const App: React.FC = () => {
                                 webcamUrl: undefined
                             };
                             lastProcessedLogIdRef.current = null;
-                            console.log('Dev mode: Cleared media URLs, forcing capture for log:', newLogs[0].id);
+                            console.log('📸 Cleared media URLs, forcing capture for log:', newLogs[0].id);
                         }
                         return newLogs;
                     }
@@ -2055,6 +2406,15 @@ const App: React.FC = () => {
     const captureInProgressRef = useRef<boolean>(false);
     
     useEffect(() => {
+        console.log('[CAPTURE-TRIGGER] Capture useEffect triggered:', {
+            activityLogsCount: activityLogs.length,
+            isTimerRunning,
+            selectedTaskId,
+            selectedProjectId,
+            userStatus,
+            shouldRun: activityLogs.length > 0 && isTimerRunning && selectedTaskId && userStatus === 'working'
+        });
+        
         if (activityLogs.length > 0 && isTimerRunning && selectedTaskId && userStatus === 'working') {
             // Find the latest log that belongs to the CURRENT task
             // This ensures media is only attached to logs for the active task
@@ -2064,9 +2424,23 @@ const App: React.FC = () => {
                 log.projectId === selectedProjectId
             );
             
+            console.log('[CAPTURE-TRIGGER] Looking for log matching current task:', {
+                selectedTaskId,
+                selectedProjectId,
+                foundLog: !!latestLogForCurrentTask,
+                logId: latestLogForCurrentTask?.id,
+                allLogs: activityLogs.map(l => ({ 
+                    id: l.id, 
+                    taskId: l.taskId, 
+                    projectId: l.projectId,
+                    hasScreenshot: !!l.screenshotUrl,
+                    hasWebcam: !!l.webcamUrl
+                }))
+            });
+            
             // If no log found for current task, skip (might be a new task just started)
             if (!latestLogForCurrentTask) {
-                console.log('No log found for current task, skipping capture:', {
+                console.warn('[CAPTURE-TRIGGER] ⚠️ No log found for current task, skipping capture:', {
                     selectedTaskId,
                     selectedProjectId,
                     availableLogs: activityLogs.map(l => ({ id: l.id, taskId: l.taskId, projectId: l.projectId }))
@@ -2078,12 +2452,13 @@ const App: React.FC = () => {
             
             // Skip if we already processed this log
             if (latestLog.id === lastProcessedLogIdRef.current) {
+                console.log('[CAPTURE-TRIGGER] Log already processed, skipping:', latestLog.id);
                 return;
             }
             
             // Skip if capture is already in progress for this log
             if (captureInProgressRef.current) {
-                console.log('Capture already in progress, skipping duplicate...');
+                console.log('[CAPTURE-TRIGGER] Capture already in progress, skipping duplicate...');
                 return;
             }
             
@@ -2103,18 +2478,27 @@ const App: React.FC = () => {
             
             // Capture screenshots and webcam if enabled
             // Always capture if log doesn't have media (allows re-capture in dev mode)
-            const needsScreenshot = settings?.enableScreenshots !== false && !latestLog.screenshotUrl;
-            const needsWebcam = !latestLog.webcamUrl;
+            // Check both screenshotUrl and screenshotUrls array
+            const hasScreenshot = !!(latestLog.screenshotUrl || (latestLog.screenshotUrls && latestLog.screenshotUrls.length > 0));
+            const hasWebcam = !!latestLog.webcamUrl;
             
-            console.log('Capture check:', {
+            const needsScreenshot = settings?.enableScreenshots !== false && !hasScreenshot;
+            const needsWebcam = !hasWebcam;
+            
+            console.log('[CAPTURE-TRIGGER] Capture check:', {
                 logId: latestLog.id,
                 logTaskId: latestLog.taskId,
+                logProjectId: latestLog.projectId,
                 currentTaskId: selectedTaskId,
+                currentProjectId: selectedProjectId,
                 isFresh,
                 needsScreenshot,
                 needsWebcam,
-                hasScreenshot: !!latestLog.screenshotUrl,
-                hasWebcam: !!latestLog.webcamUrl,
+                hasScreenshot: hasScreenshot,
+                hasWebcam: hasWebcam,
+                screenshotUrl: latestLog.screenshotUrl || 'none',
+                screenshotUrlsCount: latestLog.screenshotUrls?.length || 0,
+                webcamUrl: latestLog.webcamUrl || 'none',
                 hasCameraStream: !!cameraStream,
                 enableScreenshots: settings?.enableScreenshots,
                 isDevMode,
@@ -2380,52 +2764,63 @@ const App: React.FC = () => {
                         });
                     }
                     
-                    // CRITICAL: If webcam is needed but not ready, skip ALL captures (including screenshots)
-                    if (needsWebcam && !cameraReady) {
-                        console.error('Webcam is required but not ready - skipping ALL captures (screenshot and photo)');
-                        captureInProgressRef.current = false;
-                        return; // Exit early - don't capture anything
-                    }
+                    // Screenshots and webcam photos work INDEPENDENTLY
+                    // Screenshots don't require webcam to be ready
+                    // Webcam photos only require webcam to be ready
                     
-                    // Capture Screenshots and Webcam Photo SIMULTANEOUSLY
+                    // Capture Screenshots and Webcam Photo SIMULTANEOUSLY (but independently)
                     const screenshotCount = isDevMode ? 1 : (1 + Math.floor(Math.random() * 3)); // 1 in dev, 1-3 in prod
-                    console.log(`Capturing ${screenshotCount} screenshot(s) and webcam photo simultaneously for log ${latestLog.id}...`);
+                    console.log(`📸 Capturing ${screenshotCount} screenshot(s) and webcam photo simultaneously for log ${latestLog.id}...`);
+                    console.log(`📸 Capture status:`, {
+                        needsScreenshot,
+                        needsWebcam,
+                        cameraReady,
+                        willCaptureScreenshots: needsScreenshot && !!window.electronAPI?.captureScreenshot,
+                        willCaptureWebcam: needsWebcam && cameraReady
+                    });
                     
                     // Prepare all capture promises
                     const capturePromises: Promise<void>[] = [];
                     
-                    // Screenshot captures (only if webcam is also ready or not needed)
-                    if (needsScreenshot && window.electronAPI?.captureScreenshot && (!needsWebcam || cameraReady)) {
+                    // Screenshot captures - ALWAYS capture if needed, INDEPENDENT of webcam status
+                    if (needsScreenshot && window.electronAPI?.captureScreenshot) {
+                        console.log(`📸 Starting ${screenshotCount} screenshot capture(s) (independent of webcam)...`);
                         for (let i = 0; i < screenshotCount; i++) {
                             capturePromises.push(
                                 (async () => {
                                     try {
-                                        console.log(`Attempting to capture screenshot ${i + 1}/${screenshotCount}...`);
+                                        console.log(`📸 Attempting to capture screenshot ${i + 1}/${screenshotCount}...`);
                                         const shouldBlur = settings?.enableScreenshotBlur || false;
-                                        let rawScreenshot = await window.electronAPI.captureScreenshot(shouldBlur);
+                                        const screenshotResult = await window.electronAPI.captureScreenshot(shouldBlur);
+                                        console.log(`📸 Screenshot ${i + 1} IPC call completed, result type:`, typeof screenshotResult);
                                         
-                                        if (rawScreenshot && rawScreenshot.length > 100) {
-                                            // Screenshot is already tagged with task in main process
-                                            // Apply additional blur if needed (screenshot may already be blurred)
-                                            let screenUrl = rawScreenshot;
-                                            if (settings?.enableScreenshotBlur && !shouldBlur) {
-                                                try {
-                                                    screenUrl = await applyBlurWithIntensity(rawScreenshot, 'medium');
-                                                    console.log(`Screenshot ${i + 1} blurred successfully`);
-                                                } catch (blurError) {
-                                                    console.error('Blur failed, using original:', blurError);
-                                                    screenUrl = rawScreenshot; // Fallback to original
-                                                }
+                                        // Handle null, old format (string), and new format (object with dataUrl and fileUrl)
+                                        if (!screenshotResult) {
+                                            console.warn(`Screenshot ${i + 1} capture returned null`);
+                                        } else {
+                                            let fileUrl: string | null = null;
+                                            let dataUrl: string | null = null;
+                                            
+                                            if (typeof screenshotResult === 'string') {
+                                                // Old format: just dataUrl string
+                                                dataUrl = screenshotResult;
+                                            } else if (typeof screenshotResult === 'object') {
+                                                // New format: object with dataUrl and fileUrl
+                                                dataUrl = screenshotResult.dataUrl || null;
+                                                fileUrl = screenshotResult.fileUrl || null;
                                             }
                                             
-                                            if (screenUrl) {
-                                                screenshots.push(screenUrl);
-                                                console.log(`Screenshot ${i + 1} captured successfully, size: ${screenUrl.length} bytes`);
+                                            if (fileUrl) {
+                                                // Use fileUrl from server (preferred)
+                                                screenshots.push(fileUrl);
+                                                console.log(`Screenshot ${i + 1} captured and uploaded successfully, fileUrl: ${fileUrl.substring(0, 80)}...`);
+                                            } else if (dataUrl && dataUrl.length > 100) {
+                                                // Fallback: use dataUrl if upload failed (will be filtered out later)
+                                                console.warn(`Screenshot ${i + 1} upload failed, will be filtered out (only file URLs are stored)`);
+                                                // Don't push dataUrl - it will be filtered out when saving to log
                                             } else {
-                                                console.warn(`Screenshot ${i + 1} is empty`);
+                                                console.warn(`Screenshot ${i + 1} capture returned invalid data`);
                                             }
-                                        } else {
-                                            console.warn(`Screenshot ${i + 1} capture returned invalid data (length: ${rawScreenshot?.length || 0})`);
                                         }
                                     } catch (error) {
                                         console.error(`Screenshot ${i + 1} capture failed:`, error);
@@ -2436,7 +2831,9 @@ const App: React.FC = () => {
                     }
                     
                     // Webcam capture (simultaneous with screenshots) - ONLY if camera is ready
+                    // This is independent of screenshot capture - screenshots can still work even if webcam fails
                     if (needsWebcam && hiddenCamVideoRef.current && hiddenCanvasRef.current && activeCameraStream && cameraReady) {
+                        console.log('📷 Webcam is ready - will capture webcam photo');
                         capturePromises.push(
                             (async () => {
                                 try {
@@ -2462,23 +2859,38 @@ const App: React.FC = () => {
                                             canvas.height = video.videoHeight;
                                             context.drawImage(video, 0, 0);
                                             
-                                            webcamPhoto = canvas.toDataURL('image/jpeg', 0.8);
-                                            console.log(`Webcam photo captured successfully: ${video.videoWidth}x${video.videoHeight}, size: ${webcamPhoto.length} bytes`);
+                                            const photoDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                                            console.log(`Webcam photo captured successfully: ${video.videoWidth}x${video.videoHeight}, size: ${photoDataUrl.length} bytes`);
                                             
-                                            // Tag webcam photo with current task
+                                            // Upload webcam photo and get fileUrl
                                             if (selectedTaskId && selectedProjectId && window.electronAPI && window.electronAPI.addWebcamPhotoToTask) {
-                                                window.electronAPI.addWebcamPhotoToTask(webcamPhoto).then(() => {
-                                                    console.log('Webcam photo tagged with task');
-                                                }).catch(err => {
-                                                    console.error('Failed to tag webcam photo with task:', err);
-                                                });
+                                                try {
+                                                    const fileUrl = await window.electronAPI.addWebcamPhotoToTask(photoDataUrl);
+                                                    if (fileUrl) {
+                                                        // Use fileUrl from server (preferred)
+                                                        webcamPhoto = fileUrl;
+                                                        console.log('📷 Webcam photo uploaded successfully, fileUrl:', fileUrl.substring(0, 80) + '...');
+                                                    } else {
+                                                        // Upload failed - don't store base64 (user requirement)
+                                                        console.error('📷 Webcam photo upload failed - NOT storing base64 (user requirement)');
+                                                        webcamPhoto = null; // Don't store base64
+                                                    }
+                                                } catch (err) {
+                                                    console.error('📷 Failed to upload webcam photo:', err);
+                                                    // Don't store base64 if upload fails
+                                                    webcamPhoto = null;
+                                                }
+                                            } else {
+                                                // No task context - can't upload, don't store base64
+                                                console.warn('📷 No task context for webcam photo - cannot upload, not storing base64');
+                                                webcamPhoto = null;
                                             }
                                         } else {
                                             console.warn('Canvas context not available for webcam capture');
                                         }
                                     } else {
-                                        console.warn(`Video dimensions are invalid after ${maxAttempts} attempts: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
-                                        console.warn('Video element state:', {
+                                        console.warn(`📷 Video dimensions are invalid after ${maxAttempts} attempts: ${video.videoWidth}x${video.videoHeight}, readyState: ${video.readyState}`);
+                                        console.warn('📷 Video element state:', {
                                             srcObject: !!video.srcObject,
                                             paused: video.paused,
                                             currentTime: video.currentTime,
@@ -2592,8 +3004,19 @@ const App: React.FC = () => {
                                     // APPEND new screenshots to existing ones (don't replace)
                                     const existingScreenshots = existingLog.screenshotUrls || (existingLog.screenshotUrl ? [existingLog.screenshotUrl] : []);
                                     
-                                    // IMPORTANT: Only append if this screenshot is not already in the array (prevent duplicates)
-                                    const newScreenshots = screenshots.filter(newScreenshot => {
+                                    // Filter out base64 data URLs - only keep file URLs (http/https)
+                                    const fileUrlScreenshots = screenshots.filter(url => {
+                                        // Only accept file URLs (http/https), reject base64 data URLs
+                                        return url && (url.startsWith('http://') || url.startsWith('https://'));
+                                    });
+                                    
+                                    if (fileUrlScreenshots.length < screenshots.length) {
+                                        const base64Count = screenshots.length - fileUrlScreenshots.length;
+                                        console.warn(`Filtered out ${base64Count} base64 screenshot(s) - only file URLs are stored`);
+                                    }
+                                    
+                                    // IMPORTANT: Only append if this screenshot URL is not already in the array (prevent duplicates)
+                                    const newScreenshots = fileUrlScreenshots.filter(newScreenshot => {
                                         // Check if this screenshot URL already exists
                                         return !existingScreenshots.some(existing => existing === newScreenshot);
                                     });
@@ -2606,18 +3029,24 @@ const App: React.FC = () => {
                                         updates.screenshotUrl = allScreenshots[0]; // Keep first for backward compatibility
                                         console.log(`Appending ${newScreenshots.length} new screenshot(s) to existing ${existingScreenshots.length}. Total: ${allScreenshots.length} (${screenshots.length - newScreenshots.length} duplicates skipped)`);
                                     } else {
-                                        console.log(`All ${screenshots.length} screenshot(s) already exist in log, skipping append`);
+                                        console.log(`All ${fileUrlScreenshots.length} screenshot(s) already exist in log, skipping append`);
                                     }
                                 }
                                 
                                 // Webcam photo replaces the old one (only one webcam photo per log)
                                 // IMPORTANT: Only update if it's actually different (prevent duplicates)
+                                // Only store file URLs (http/https), not base64 data URLs
                                 if (webcamPhoto) {
-                                    if (existingLog.webcamUrl !== webcamPhoto) {
-                                        updates.webcamUrl = webcamPhoto;
-                                        console.log('Storing new webcam photo in log');
+                                    // Only accept file URLs (http/https), reject base64 data URLs
+                                    if (webcamPhoto.startsWith('http://') || webcamPhoto.startsWith('https://')) {
+                                        if (existingLog.webcamUrl !== webcamPhoto) {
+                                            updates.webcamUrl = webcamPhoto;
+                                            console.log('Storing new webcam photo fileUrl in log:', webcamPhoto.substring(0, 80) + '...');
+                                        } else {
+                                            console.log('Webcam photo already exists in log, skipping update');
+                                        }
                                     } else {
-                                        console.log('Webcam photo already exists in log, skipping update');
+                                        console.warn('Webcam photo is base64 data URL, not storing (upload may have failed)');
                                     }
                                 }
                                 
@@ -2676,18 +3105,29 @@ const App: React.FC = () => {
                     captureMedia();
                 }, 1000); // Increased delay to ensure everything is ready
             } else {
-                console.log('Media capture skipped:', {
+                console.log('[CAPTURE-TRIGGER] Media capture skipped:', {
                     isFresh,
                     needsScreenshot,
                     needsWebcam,
-                    hasScreenshot: !!latestLog.screenshotUrl,
-                    hasWebcam: !!latestLog.webcamUrl
+                    hasScreenshot: hasScreenshot,
+                    hasWebcam: hasWebcam,
+                    hasCameraStream: !!cameraStream,
+                    shouldCapture: shouldCapture
                 });
                 // Mark as processed even if skipped to avoid retrying
                 if (!isFresh || (!needsScreenshot && !needsWebcam)) {
                     lastProcessedLogIdRef.current = latestLog.id;
                 }
             }
+        } else {
+            console.log('[CAPTURE-TRIGGER] ⚠️ Capture conditions not met:', {
+                activityLogsCount: activityLogs.length,
+                isTimerRunning,
+                selectedTaskId,
+                selectedProjectId,
+                userStatus,
+                allConditionsMet: activityLogs.length > 0 && isTimerRunning && selectedTaskId && userStatus === 'working'
+            });
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activityLogs, isTimerRunning, userStatus, selectedTaskId, selectedProjectId, settings?.enableScreenshotBlur, settings?.enableScreenshots, cameraStream]); // Use activityLogs directly to detect new logs

@@ -13,6 +13,10 @@ export interface Settings {
     enableUrlTracking: boolean;
     enableScreenshotBlur: boolean;
     idleTimeThreshold: number; // minutes
+    // Capture Intervals (in minutes)
+    screenshotCaptureInterval?: number; // minutes - interval for taking screenshots
+    cameraPhotoInterval?: number; // minutes - interval for taking camera photos
+    autoSyncInterval?: number; // minutes - interval for auto-syncing data
     // API Configuration
     apiEnabled?: boolean;
     apiBaseUrl?: string;

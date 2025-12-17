@@ -18,7 +18,10 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
         enableScreenshots: true,
         enableUrlTracking: true,
         enableScreenshotBlur: false,
-        idleTimeThreshold: 5
+        idleTimeThreshold: 5,
+        screenshotCaptureInterval: 2, // Default 2 minutes
+        cameraPhotoInterval: 2, // Default 2 minutes
+        autoSyncInterval: 2 // Default 2 minutes
     });
     const [loading, setLoading] = useState(true);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -42,7 +45,13 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
                     
                     // Merge settings: env vars take precedence, then saved settings, then defaults
                     const mergedSettings: SettingsType = {
-                        ...savedSettings,
+                        enableScreenshots: savedSettings?.enableScreenshots ?? true,
+                        enableUrlTracking: savedSettings?.enableUrlTracking ?? true,
+                        enableScreenshotBlur: savedSettings?.enableScreenshotBlur ?? false,
+                        idleTimeThreshold: savedSettings?.idleTimeThreshold ?? 5,
+                        screenshotCaptureInterval: savedSettings?.screenshotCaptureInterval ?? 2,
+                        cameraPhotoInterval: savedSettings?.cameraPhotoInterval ?? 2,
+                        autoSyncInterval: savedSettings?.autoSyncInterval ?? 2,
                         // Use env vars if available, otherwise use saved settings
                         apiBaseUrl: envApiBaseUrl || savedSettings?.apiBaseUrl || '',
                         apiKey: envApiKey || savedSettings?.apiKey || '',
@@ -336,6 +345,93 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
                         </div>
                     </section>
 
+                    {/* Tracking Settings */}
+                    <section className="bg-gray-800 rounded-lg p-4">
+                        <h3 className="text-white font-semibold text-sm mb-4">Tracking Settings</h3>
+                        <div className="space-y-4">
+                            {/* Enable Screenshots */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-300 font-medium">
+                                        Enable Screenshots
+                                    </label>
+                                    <p className="text-xs text-gray-400 mt-1">
+                                        Capture screenshots periodically for activity tracking
+                                    </p>
+                                </div>
+                                <label className="relative inline-flex items-center cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={settings.enableScreenshots}
+                                        onChange={(e) => handleSettingChange('enableScreenshots', e.target.checked)}
+                                        className="sr-only peer"
+                                    />
+                                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                </label>
+                            </div>
+
+                            {/* Enable URL Tracking */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-300 font-medium">
+                                        Enable URL Tracking
+                                    </label>
+                                    <p className="text-xs text-gray-400 mt-1">
+                                        Track website URLs when browsing
+                                    </p>
+                                </div>
+                                <label className="relative inline-flex items-center cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={settings.enableUrlTracking}
+                                        onChange={(e) => handleSettingChange('enableUrlTracking', e.target.checked)}
+                                        className="sr-only peer"
+                                    />
+                                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                </label>
+                            </div>
+
+                            {/* Enable Screenshot Blur */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-300 font-medium">
+                                        Blur Screenshots
+                                    </label>
+                                    <p className="text-xs text-gray-400 mt-1">
+                                        Apply blur effect to screenshots for privacy
+                                    </p>
+                                </div>
+                                <label className="relative inline-flex items-center cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={settings.enableScreenshotBlur}
+                                        onChange={(e) => handleSettingChange('enableScreenshotBlur', e.target.checked)}
+                                        className="sr-only peer"
+                                    />
+                                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                </label>
+                            </div>
+
+                            {/* Idle Time Threshold */}
+                            <div>
+                                <label className="block text-xs text-gray-300 mb-2 font-medium">
+                                    Idle Time Threshold (minutes)
+                                </label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="60"
+                                    value={settings.idleTimeThreshold || 5}
+                                    onChange={(e) => handleSettingChange('idleTimeThreshold', parseInt(e.target.value) || 5)}
+                                    className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                                />
+                                <p className="text-xs text-gray-400 mt-1">
+                                    Time without activity before being marked as idle (default: 5 minutes)
+                                </p>
+                            </div>
+                        </div>
+                    </section>
+
                     {/* What We Collect */}
                     <section className="bg-gray-800 rounded-lg p-4">
                         <h3 className="text-white font-semibold text-sm mb-3">What We Collect</h3>
@@ -365,6 +461,66 @@ export const Settings: React.FC<SettingsProps> = ({ activityLogs, timeEntries, o
                             <i className="fas fa-info-circle mr-1"></i>
                             All data is stored locally on your device. No data is sent to external servers.
                         </p>
+                    </section>
+
+                    {/* Capture & Sync Settings */}
+                    <section className="bg-gray-800 rounded-lg p-4">
+                        <h3 className="text-white font-semibold text-sm mb-4">Capture & Sync Intervals</h3>
+                        <div className="space-y-4">
+                            {/* Screenshot Capture Interval */}
+                            <div>
+                                <label className="block text-xs text-gray-300 mb-2">
+                                    Screenshot Capture Interval (minutes)
+                                </label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="60"
+                                    value={settings.screenshotCaptureInterval || 2}
+                                    onChange={(e) => handleSettingChange('screenshotCaptureInterval', parseInt(e.target.value) || 2)}
+                                    className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                                />
+                                <p className="text-xs text-gray-400 mt-1">
+                                    How often screenshots are captured (default: 2 minutes)
+                                </p>
+                            </div>
+
+                            {/* Camera Photo Interval */}
+                            <div>
+                                <label className="block text-xs text-gray-300 mb-2">
+                                    Camera Photo Interval (minutes)
+                                </label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="60"
+                                    value={settings.cameraPhotoInterval || 2}
+                                    onChange={(e) => handleSettingChange('cameraPhotoInterval', parseInt(e.target.value) || 2)}
+                                    className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                                />
+                                <p className="text-xs text-gray-400 mt-1">
+                                    How often camera photos are captured (default: 2 minutes)
+                                </p>
+                            </div>
+
+                            {/* Auto Sync Interval */}
+                            <div>
+                                <label className="block text-xs text-gray-300 mb-2">
+                                    Auto Sync Interval (minutes)
+                                </label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="60"
+                                    value={settings.autoSyncInterval || 2}
+                                    onChange={(e) => handleSettingChange('autoSyncInterval', parseInt(e.target.value) || 2)}
+                                    className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                                />
+                                <p className="text-xs text-gray-400 mt-1">
+                                    How often data is automatically synced to server (default: 2 minutes)
+                                </p>
+                            </div>
+                        </div>
                     </section>
 
                     {/* App Version */}

@@ -87,6 +87,10 @@ interface UseSurveillanceProps {
     currentTaskId?: string; // Optional: current task ID
     currentTaskName?: string; // Optional: current task name
     currentProjectName?: string; // Optional: current project name
+    settings?: { // Optional: settings for intervals
+        screenshotCaptureInterval?: number; // minutes
+        cameraPhotoInterval?: number; // minutes
+    } | null;
 }
 
 interface UseSurveillanceReturn {
@@ -99,7 +103,7 @@ interface UseSurveillanceReturn {
     onIdleDecision: (remove: boolean) => void;
 }
 
-export const useSurveillance = ({ isTimerRunning, currentProjectId, currentTaskId, currentTaskName, currentProjectName }: UseSurveillanceProps): UseSurveillanceReturn => {
+export const useSurveillance = ({ isTimerRunning, currentProjectId, currentTaskId, currentTaskName, currentProjectName, settings: externalSettings }: UseSurveillanceProps): UseSurveillanceReturn => {
     const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
     const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
     const [idleInfo, setIdleInfo] = useState<{ isIdle: boolean; duration: number } | null>(null);
@@ -281,25 +285,26 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId, currentTaskI
 
 
     // The Interval Logic - Fixed 10-minute intervals (Industry Standard)
-    // In dev mode: 1-minute intervals for faster testing
+    // Capture interval: 2 minutes for both dev and production
     useEffect(() => {
         if (isTimerRunning) {
-            // Check if we're in dev mode
+            // Check if we're in dev mode (for logging only)
             const isDevMode = window.location.hostname === 'localhost' || 
                               window.location.hostname === '127.0.0.1' ||
                               window.location.port === '3000' ||
                               (window as any).__DEV__ === true;
             
-            // Use 2 minutes in dev mode, 10 minutes in production
-            const INTERVAL_DURATION = isDevMode ? 2 * 60 * 1000 : 10 * 60 * 1000; // 2 min (dev) or 10 min (prod)
-            const INTERVAL_MINUTES = isDevMode ? 2 : 10;
+            // Get interval from settings, default to 2 minutes
+            const screenshotInterval = externalSettings?.screenshotCaptureInterval || 2;
+            const cameraInterval = externalSettings?.cameraPhotoInterval || 2;
+            // Use the shorter interval for the main interval (both screenshots and camera use same base interval)
+            const INTERVAL_MINUTES = Math.min(screenshotInterval, cameraInterval);
+            const INTERVAL_DURATION = INTERVAL_MINUTES * 60 * 1000; // Convert minutes to milliseconds
 
             let isActive = true; // Track if effect is still active
             let intervalStartTime = Date.now(); // Track when current interval started
 
-            if (isDevMode) {
-                console.log('🔧 DEV MODE: Using 2-minute intervals for TyroDesk metrics');
-            }
+            console.log(`📸 Using ${INTERVAL_MINUTES}-minute intervals for screenshots and webcam photos (screenshot: ${screenshotInterval}min, camera: ${cameraInterval}min)`);
 
             // Calculate time until next interval boundary
             const getTimeToNextInterval = () => {
@@ -607,8 +612,13 @@ export const useSurveillance = ({ isTimerRunning, currentProjectId, currentTaskI
     const onIdleDecision = (remove: boolean) => {
         if (pendingIdleLogRef.current) {
             if (!remove) {
-                // Keep in log - add it
-                setActivityLogs(prev => [pendingIdleLogRef.current!, ...prev]);
+                // Keep in log - add it (ensure log is not null)
+                const logToAdd = pendingIdleLogRef.current;
+                if (logToAdd) {
+                    setActivityLogs(prev => [logToAdd, ...prev]);
+                } else {
+                    console.warn('[IDLE] Attempted to add null idle log, skipping');
+                }
             }
             // If remove is true, just discard the log
             pendingIdleLogRef.current = null;
