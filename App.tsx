@@ -14,6 +14,8 @@ import { applyBlurWithIntensity } from './utils/imageBlur';
 import { authState } from './services/authState';
 import { UserAvatar } from './components/UserAvatar';
 import { apiService } from './services/apiService';
+import { getApiConfig } from './config/apiConfig';
+import { devLog, devWarn, isDevMode } from './utils/devMode';
 
 // Electron API types are defined in types/electron.d.ts
 
@@ -251,11 +253,9 @@ const App: React.FC = () => {
     
     // Update projects with their tasks when tasks or projects are loaded
     useEffect(() => {
-        console.log('[PROJECT-TASKS] Updating projects with tasks:', {
+        devLog('[PROJECT-TASKS] Updating projects with tasks:', {
             tasksCount: tasks.length,
             projectsCount: projects.length,
-            tasks: tasks.map(t => ({ id: t.id, projectId: t.projectId, name: t.name })),
-            projectIds: projects.map(p => ({ id: p.id, name: p.name }))
         });
         
         if (projects.length > 0) {
@@ -271,15 +271,11 @@ const App: React.FC = () => {
                     const projectTasks = tasks.filter(task => {
                         const taskProjectIdStr = task.projectId.toString();
                         const matches = taskProjectIdStr === projectIdStr;
-                        if (matches) {
-                            console.log('[PROJECT-TASKS] ✅ Matched task to project:', {
-                                taskId: task.id,
-                                taskName: task.name,
-                                taskProjectId: task.projectId,
-                                projectId: project.id,
-                                projectName: project.name
-                            });
-                        }
+                        devLog('[PROJECT-TASKS] Matched task to project:', {
+                            taskId: task.id,
+                            taskName: task.name,
+                            projectId: project.id,
+                        });
                         return matches;
                     });
                     
@@ -288,9 +284,7 @@ const App: React.FC = () => {
                     const tasksChanged = currentTasks.length !== projectTasks.length || 
                         currentTasks.some((t, i) => t.id !== projectTasks[i]?.id);
                     
-                    if (tasksChanged) {
-                        console.log('[PROJECT-TASKS] Project', project.name, '(', project.id, ') has', projectTasks.length, 'tasks (was', currentTasks.length, ')');
-                    }
+                    devLog('[PROJECT-TASKS] Project', project.name, 'has', projectTasks.length, 'tasks');
                     
                     return {
                         ...project,
@@ -300,12 +294,12 @@ const App: React.FC = () => {
                 
                 // Log summary
                 const totalTasksAssigned = updatedProjects.reduce((sum, p) => sum + (p.tasks?.length || 0), 0);
-                console.log('[PROJECT-TASKS] 📊 Summary: Assigned', totalTasksAssigned, 'tasks across', updatedProjects.length, 'projects');
+                devLog('[PROJECT-TASKS] Summary: Assigned', totalTasksAssigned, 'tasks across', updatedProjects.length, 'projects');
                 
                 return updatedProjects;
             });
         } else if (tasks.length > 0) {
-            console.warn('[PROJECT-TASKS] ⚠️ Tasks loaded but no projects available yet. Tasks will be assigned when projects are loaded.');
+            devWarn('[PROJECT-TASKS] Tasks loaded but no projects available yet. Tasks will be assigned when projects are loaded.');
         } else if (projects.length > 0 && tasks.length === 0) {
             // Clear tasks from projects if tasks array is empty
             setProjects(prevProjects => 
@@ -314,7 +308,7 @@ const App: React.FC = () => {
                     tasks: []
                 }))
             );
-            console.log('[PROJECT-TASKS] Cleared tasks from all projects (tasks array is empty)');
+            devLog('[PROJECT-TASKS] Cleared tasks from all projects (tasks array is empty)');
         }
     }, [tasks, projectIdsString]); // Run when tasks change or when project IDs change
 
@@ -322,7 +316,7 @@ const App: React.FC = () => {
     useEffect(() => {
         if (authStateData.isAuthenticated && currentWorkspace) {
             const workspaceId = currentWorkspace.workspace_id.toString();
-            console.log('[APP] Fetching projects and tasks for workspace:', workspaceId);
+            devLog('[APP] Fetching projects and tasks for workspace:', workspaceId);
             fetchProjects(workspaceId);
             fetchTasks(undefined, workspaceId);
         } else if (!authStateData.isAuthenticated) {
@@ -906,10 +900,10 @@ const App: React.FC = () => {
     const autoSyncIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const autoSyncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-    // Debug: Log when component mounts/updates to verify auto-sync useEffect is registered
+    // Debug: Log when component mounts/updates to verify auto-sync useEffect is registered (dev only)
     useEffect(() => {
-        console.log('[AUTO-SYNC-DEBUG] Component mounted/updated - auto-sync useEffect should be registered');
-        console.log('[AUTO-SYNC-DEBUG] Current state:', {
+        devLog('[AUTO-SYNC-DEBUG] Component mounted/updated - auto-sync useEffect should be registered');
+        devLog('[AUTO-SYNC-DEBUG] Current state:', {
             hasUploadFunction: typeof uploadAllTrackingFiles === 'function',
             hasUploadRef: typeof uploadAllTrackingFilesRef.current === 'function',
             authStateData: !!authStateData,
@@ -925,22 +919,8 @@ const App: React.FC = () => {
     // IMPORTANT: This effect MUST run - it sets up the auto-sync interval
     // Run on mount AND when dependencies change
     useEffect(() => {
-        // ALWAYS log this first - to verify useEffect is running
-        console.log('[AUTO-SYNC] ========================================');
-        console.log('[AUTO-SYNC] 🔍 useEffect triggered - checking conditions...');
-        console.log('[AUTO-SYNC] 🚨 THIS MESSAGE MUST APPEAR - IF NOT, useEffect IS NOT RUNNING!');
-        console.log('[AUTO-SYNC] 🚨 Effect is DEFINITELY running now!');
-        console.log('[AUTO-SYNC] 🚨 First run:', !autoSyncInitializedRef.current);
+        devLog('[AUTO-SYNC] useEffect triggered - setting up auto-sync interval');
         autoSyncInitializedRef.current = true;
-        console.log('[AUTO-SYNC] 📋 useEffect dependencies:', {
-            'authStateData.isAuthenticated': authStateData?.isAuthenticated,
-            'currentWorkspace?.workspace_id': currentWorkspace?.workspace_id,
-            'user?.isCheckedIn': user?.isCheckedIn,
-            'authStateData exists': !!authStateData,
-            'currentWorkspace exists': !!currentWorkspace,
-            'user exists': !!user,
-            timestamp: new Date().toISOString(),
-        });
         
         // Check authentication using multiple methods
         const isAuthFromState = authStateData?.isAuthenticated || false;
@@ -948,39 +928,28 @@ const App: React.FC = () => {
         const isUserCheckedIn = user?.isCheckedIn || false;
         const isAuthenticated = isAuthFromState || hasLoginToken || isUserCheckedIn;
         
-        console.log('[AUTO-SYNC] 📋 Auth state:', {
-            isAuthFromState,
-            hasLoginToken,
-            isUserCheckedIn,
+        devLog('[AUTO-SYNC] Auth state:', {
             isAuthenticated,
             workspaceId: currentWorkspace?.workspace_id || 'none',
-            hasUploadFunction: typeof uploadAllTrackingFilesRef.current === 'function',
-            uploadFunctionType: typeof uploadAllTrackingFilesRef.current,
-            timestamp: new Date().toISOString()
         });
 
         if (typeof uploadAllTrackingFilesRef.current !== 'function') {
-            console.error('[AUTO-SYNC] ❌ Auto-sync disabled: uploadAllTrackingFiles function not available');
-            console.error('[AUTO-SYNC] ❌ Function type:', typeof uploadAllTrackingFilesRef.current);
-            console.error('[AUTO-SYNC] ❌ uploadAllTrackingFiles type:', typeof uploadAllTrackingFiles);
+            console.error('[AUTO-SYNC] Auto-sync disabled: uploadAllTrackingFiles function not available');
             return;
         }
         
         // Set up intervals regardless of auth - interval will check auth before each sync
         // This ensures interval is ready when user authenticates
-        if (isAuthenticated) {
-            console.log('[AUTO-SYNC] ✅ Auto-sync ENABLED - user is authenticated, setting up intervals');
-        } else {
-            console.log('[AUTO-SYNC] ⚠️ Auto-sync SETUP - user not authenticated yet, but setting up interval');
-            console.log('[AUTO-SYNC] ⚠️ Interval will check auth before each sync');
-        }
+        devLog(isAuthenticated 
+            ? '[AUTO-SYNC] Auto-sync ENABLED - user is authenticated'
+            : '[AUTO-SYNC] Auto-sync SETUP - user not authenticated yet, interval will check auth before each sync'
+        );
         
         // Get auto-sync interval from settings, default to 2 minutes
         const autoSyncIntervalMinutes = settings?.autoSyncInterval || 2;
         const autoSyncIntervalMs = autoSyncIntervalMinutes * 60 * 1000; // Convert to milliseconds
         
-        console.log('[AUTO-SYNC] ⏱️ Initial sync: 30 seconds (if authenticated)');
-        console.log(`[AUTO-SYNC] ⏱️ Periodic sync: Every ${autoSyncIntervalMinutes} minutes (${autoSyncIntervalMs}ms)`);
+        devLog(`[AUTO-SYNC] Initial sync: 30 seconds (if authenticated), Periodic sync: Every ${autoSyncIntervalMinutes} minutes`);
 
         let initialTimeout: NodeJS.Timeout | null = null;
         let interval: NodeJS.Timeout | null = null;
@@ -988,28 +957,24 @@ const App: React.FC = () => {
         // Initial upload after 30 seconds (to allow some data to accumulate) - only if authenticated
         if (isAuthenticated) {
             initialTimeout = setTimeout(() => {
-                console.log('[AUTO-SYNC] 🚀 Initial sync triggered (30 seconds after setup)');
-                console.log('[AUTO-SYNC] 📞 Calling uploadAllTrackingFiles(false)...');
+                devLog('[AUTO-SYNC] Initial sync triggered (30 seconds after setup)');
                 if (typeof uploadAllTrackingFilesRef.current === 'function') {
                     uploadAllTrackingFilesRef.current(false).catch(err => {
-                        console.error('[AUTO-SYNC] ❌ Initial sync failed:', err);
+                        console.error('[AUTO-SYNC] Initial sync failed:', isDevMode ? err : err?.message);
                     });
                 } else {
-                    console.error('[AUTO-SYNC] ❌ uploadAllTrackingFiles function not available');
+                    console.error('[AUTO-SYNC] uploadAllTrackingFiles function not available');
                 }
             }, 30000); // 30 seconds
             autoSyncTimeoutRef.current = initialTimeout;
-            console.log('[AUTO-SYNC] ✅ Initial timeout set:', initialTimeout);
+            devLog('[AUTO-SYNC] Initial timeout set');
         } else {
-            console.log('[AUTO-SYNC] ⏸️ Skipping initial timeout - not authenticated');
+            devLog('[AUTO-SYNC] Skipping initial timeout - not authenticated');
         }
 
         // Then upload at configured interval - ALWAYS set this up, even if not authenticated
         interval = setInterval(() => {
-            console.log('[AUTO-SYNC] ========================================');
-            console.log(`[AUTO-SYNC] 🔄 Periodic sync triggered (every ${autoSyncIntervalMinutes} minutes)`);
-            console.log('[AUTO-SYNC] ⏰ Current time:', new Date().toISOString());
-            console.log('[AUTO-SYNC] 📞 Calling uploadAllTrackingFiles(false)...');
+            devLog(`[AUTO-SYNC] Periodic sync triggered (every ${autoSyncIntervalMinutes} minutes)`);
             
             // Double-check authentication before each sync
             const stillAuthFromState = authStateData.isAuthenticated;
@@ -1017,50 +982,28 @@ const App: React.FC = () => {
             const stillCheckedIn = user?.isCheckedIn || false;
             const stillAuth = stillAuthFromState || stillHasLoginToken || stillCheckedIn;
             
-            console.log('[AUTO-SYNC] 🔐 Re-checking auth before sync:', {
-                stillAuthFromState,
-                stillHasLoginToken,
-                stillCheckedIn,
-                stillAuth,
-            });
+            devLog('[AUTO-SYNC] Re-checking auth before sync:', { stillAuth });
             
             if (!stillAuth) {
-                console.log('[AUTO-SYNC] ⏸️ Skipping sync: User no longer authenticated');
+                devLog('[AUTO-SYNC] Skipping sync: User no longer authenticated');
                 return;
             }
             
             if (typeof uploadAllTrackingFilesRef.current !== 'function') {
-                console.error('[AUTO-SYNC] ❌ uploadAllTrackingFiles function not available in interval');
-                console.error('[AUTO-SYNC] Function type:', typeof uploadAllTrackingFilesRef.current);
+                console.error('[AUTO-SYNC] uploadAllTrackingFiles function not available in interval');
                 return;
             }
             
-            console.log('[AUTO-SYNC] ✅ Calling uploadAllTrackingFiles...');
+            devLog('[AUTO-SYNC] Calling uploadAllTrackingFiles...');
             uploadAllTrackingFilesRef.current(false).catch(err => {
-                console.error('[AUTO-SYNC] ❌ Periodic sync failed:', err);
-                console.error('[AUTO-SYNC] Error details:', {
-                    message: err?.message,
-                    stack: err?.stack,
-                });
+                console.error('[AUTO-SYNC] Periodic sync failed:', isDevMode ? err : err?.message);
             });
         }, autoSyncIntervalMs); // Use configured interval
         autoSyncIntervalRef.current = interval;
-        console.log('[AUTO-SYNC] ✅ Periodic interval set:', interval);
-        console.log('[AUTO-SYNC] ✅ Interval ID:', interval);
-        console.log('[AUTO-SYNC] ✅ Interval stored in ref:', autoSyncIntervalRef.current);
-
-        // Verify interval is actually set
-        console.log('[AUTO-SYNC] 🔍 Verification:', {
-            hasInitialTimeout: !!initialTimeout,
-            hasInterval: !!interval,
-            intervalType: typeof interval,
-            nextSyncIn: `${autoSyncIntervalMinutes} minutes (${autoSyncIntervalMs}ms)`
-        });
+        devLog('[AUTO-SYNC] Periodic interval set');
 
         return () => {
-            console.log('[AUTO-SYNC] 🛑 Auto-sync stopped (cleanup)');
-            console.log('[AUTO-SYNC] 🛑 Clearing timeout:', autoSyncTimeoutRef.current);
-            console.log('[AUTO-SYNC] 🛑 Clearing interval:', autoSyncIntervalRef.current);
+            devLog('[AUTO-SYNC] Auto-sync stopped (cleanup)');
             if (autoSyncTimeoutRef.current) {
                 clearTimeout(autoSyncTimeoutRef.current);
                 autoSyncTimeoutRef.current = null;
@@ -1084,7 +1027,7 @@ const App: React.FC = () => {
                         if (tokenResult.token) {
                             loginToken = tokenResult.token;
                             localStorage.setItem('login_token', loginToken);
-                            console.log('[STATUS] ✅ Restored login_token from keytar to localStorage');
+                            devLog('[STATUS] Restored login_token from keytar to localStorage');
                         }
                     } catch (error) {
                         console.warn('[STATUS] Could not get token from keytar:', error);
@@ -1110,7 +1053,7 @@ const App: React.FC = () => {
                                          (data?.attendance && data.attendance.check_in && !data.attendance.check_out);
                         
                         if (isCheckedIn) {
-                            console.log('[STATUS] User is already checked in, redirecting to dashboard');
+                            devLog('[STATUS] User is already checked in, redirecting to dashboard');
                             setUser(prev => prev ? { ...prev, isCheckedIn: true } : null);
                             if (view === AppView.CHECK_IN_OUT || view === AppView.LOGIN) {
                                 setView(AppView.DASHBOARD);
@@ -1125,14 +1068,14 @@ const App: React.FC = () => {
                         
                         if (status && ['idle', 'working', 'break', 'meeting', 'away'].includes(status)) {
                             setUserStatus(status as UserStatus);
-                            console.log('[STATUS] Loaded current status:', status);
+                            devLog('[STATUS] Loaded current status:', status);
                         }
                     }
                 } catch (error: any) {
-                    console.error('[STATUS] Error loading current status:', error);
+                    console.error('[STATUS] Error loading current status:', isDevMode ? error : error?.message);
                     // If authentication error, redirect to login
                     if (error.message?.includes('token') || error.message?.includes('auth') || error.message?.includes('Unauthorized')) {
-                        console.log('[STATUS] Authentication error, redirecting to login');
+                        devLog('[STATUS] Authentication error, redirecting to login');
                         setView(AppView.LOGIN);
                     }
                 }
@@ -1154,25 +1097,16 @@ const App: React.FC = () => {
         const isAuthenticated = isAuthFromState || hasLoginToken || isUserCheckedIn;
         
         if (!isAuthenticated) {
-            console.log('[STATUS] ⏸️ Status update skipped:', {
-                isAuthFromState,
-                hasLoginToken,
-                isUserCheckedIn,
-                isAuthenticated: false,
-                userStatus: userStatus,
-            });
+            devLog('[STATUS] Status update skipped - not authenticated');
             return;
         }
         
         const updateStatus = async () => {
             try {
                 const workspaceId = currentWorkspace?.workspace_id?.toString();
-                console.log('[STATUS] 🔄 Updating status to server:', {
+                devLog('[STATUS] Updating status to server:', {
                     status: userStatus,
                     workspace_id: workspaceId,
-                    task_id: selectedTaskId,
-                    project_id: selectedProjectId,
-                    authMethod: isAuthFromState ? 'authState' : hasLoginToken ? 'loginToken' : 'checkedIn',
                 });
                 
                 const response = await apiService.updateStatus({
@@ -1185,12 +1119,12 @@ const App: React.FC = () => {
                 });
                 
                 if (response.success) {
-                    console.log('[STATUS] ✅ Status updated successfully to:', userStatus, response.message || '');
+                    devLog('[STATUS] Status updated successfully to:', userStatus);
                 } else {
-                    console.error('[STATUS] ❌ Status update failed:', response.error);
+                    console.error('[STATUS] Status update failed:', response.error);
                 }
             } catch (error: any) {
-                console.error('[STATUS] ❌ Error updating status:', error);
+                console.error('[STATUS] Error updating status:', isDevMode ? error : error?.message);
                 console.error('[STATUS] Error details:', {
                     message: error.message,
                     response: error.response?.data,
@@ -1267,7 +1201,7 @@ const App: React.FC = () => {
             const authFullResponse = localStorage.getItem('auth_full_response');
             
             if (loginToken || authFullResponse) {
-                console.log('[APP] Found authentication data in localStorage');
+                devLog('[APP] Found authentication data in localStorage');
                 
                 try {
                     let userData = null;
@@ -1301,7 +1235,7 @@ const App: React.FC = () => {
                                     w.workspace_is_general === true || w.workspace_is_general === 1
                                 ) || workspaces[0];
                                 
-                                console.log('[APP] Found workspace from localStorage:', {
+                                devLog('[APP] Found workspace from localStorage:', {
                                     workspaceName: currentWorkspace.workspace_name,
                                     domain: currentWorkspace.domain,
                                     isGeneral: currentWorkspace.workspace_is_general
@@ -1317,7 +1251,7 @@ const App: React.FC = () => {
                     
                     // If we have user data from localStorage, restore state immediately
                     if (userData && userData.id) {
-                        console.log('[APP] ✅ Restoring authentication from localStorage');
+                        devLog('[APP] Restoring authentication from localStorage');
                         
                         const authenticatedUser: AuthenticatedUser = {
                             id: userData.id,
@@ -1339,7 +1273,7 @@ const App: React.FC = () => {
                             currentWorkspace = workspaces.find((w: any) => 
                                 w.workspace_is_general === true || w.workspace_is_general === 1
                             ) || workspaces[0];
-                            console.log('[APP] Selected workspace from localStorage:', {
+                            devLog('[APP] Selected workspace from localStorage:', {
                                 name: currentWorkspace?.workspace_name,
                                 domain: currentWorkspace?.domain,
                                 id: currentWorkspace?.workspace_id
@@ -1356,7 +1290,7 @@ const App: React.FC = () => {
                                 );
                                 if (detailedWorkspace && detailedWorkspace.domain) {
                                     currentWorkspace.domain = detailedWorkspace.domain;
-                                    console.log('[APP] ✅ Extracted domain from workspaces_detailed:', detailedWorkspace.domain);
+                                    devLog('[APP] Extracted domain from workspaces_detailed:', detailedWorkspace.domain);
                                 }
                             }
                         }
@@ -1384,7 +1318,7 @@ const App: React.FC = () => {
                         // Save workspace ID to localStorage for main process access
                         if (currentWorkspace?.workspace_id) {
                             localStorage.setItem('current_workspace_id', String(currentWorkspace.workspace_id));
-                            console.log('[APP] ✅ Saved workspace ID to localStorage:', currentWorkspace.workspace_id);
+                            devLog('[APP] Saved workspace ID to localStorage:', currentWorkspace.workspace_id);
                         }
                         
                         // Update user state immediately
@@ -1392,7 +1326,7 @@ const App: React.FC = () => {
                         setWorkspaces(workspaces as Workspace[]);
                         if (currentWorkspace) {
                             setCurrentWorkspace(currentWorkspace as Workspace);
-                            console.log('[APP] ✅ Current workspace set:', {
+                            devLog('[APP] Current workspace set:', {
                                 name: currentWorkspace.workspace_name,
                                 domain: currentWorkspace.domain,
                                 id: currentWorkspace.workspace_id
@@ -1415,7 +1349,7 @@ const App: React.FC = () => {
                             // Try to get domain directly from currentWorkspace
                             if (currentWorkspace && currentWorkspace.domain) {
                                 workspaceDomain = currentWorkspace.domain;
-                                console.log('[APP] ✅ Got workspace domain directly from currentWorkspace:', workspaceDomain);
+                                devLog('[APP] Got workspace domain directly from currentWorkspace:', workspaceDomain);
                                 
                                 // Force update authState with workspace domain
                                 if (authState.getState().isAuthenticated) {
@@ -1428,7 +1362,7 @@ const App: React.FC = () => {
                                             currentWorkspace.workspace_id,
                                             fullResponseParsed
                                         );
-                                        console.log('[APP] ✅ Re-set authState with workspace domain');
+                                        devLog('[APP] Re-set authState with workspace domain');
                                     } catch (error) {
                                         console.error('[APP] Error re-setting authState:', error);
                                     }
@@ -1440,7 +1374,7 @@ const App: React.FC = () => {
                                 console.error('[APP] Full response structure:', fullResponseParsed);
                             }
                         } else {
-                            console.log('[APP] ✅ Workspace domain available:', workspaceDomain);
+                            devLog('[APP] Workspace domain available:', workspaceDomain);
                         }
                         
                         // Ensure login token is available (check keytar if missing from localStorage)
@@ -1450,7 +1384,7 @@ const App: React.FC = () => {
                                 if (tokenResult.token) {
                                     loginToken = tokenResult.token;
                                     localStorage.setItem('login_token', loginToken);
-                                    console.log('[APP] ✅ Restored login_token from keytar to localStorage');
+                                    devLog('[APP] Restored login_token from keytar to localStorage');
                                 }
                             } catch (error) {
                                 console.warn('[APP] Could not get token from keytar:', error);
@@ -1469,14 +1403,14 @@ const App: React.FC = () => {
                                                   statusResponse.data.attendance.check_in && 
                                                   !statusResponse.data.attendance.check_out);
                                     if (isCheckedIn) {
-                                        console.log('[APP] User is already checked in (from localStorage), redirecting to dashboard');
+                                        devLog('[APP] User is already checked in (from localStorage), redirecting to dashboard');
                                     }
                                 }
                             } catch (error: any) {
                                 console.warn('[APP] Could not check attendance status:', error.message || error);
                                 // If authentication error, redirect to login
                                 if (error.message?.includes('token') || error.message?.includes('auth') || error.message?.includes('Unauthorized')) {
-                                    console.log('[APP] Authentication error, redirecting to login');
+                                    devLog('[APP] Authentication error, redirecting to login');
                                     setView(AppView.LOGIN);
                                     setWorkspacesLoading(false);
                                     return;
@@ -1500,7 +1434,7 @@ const App: React.FC = () => {
                         
                         // Redirect based on check-in status
                         if (isCheckedIn) {
-                            console.log('[APP] Redirecting to dashboard (restored from localStorage, user already checked in)');
+                            devLog('[APP] Redirecting to dashboard (restored from localStorage, user already checked in)');
                             setView(AppView.DASHBOARD);
                             // Fetch projects and tasks
                             const workspaceId = currentWorkspace?.workspace_id?.toString();
@@ -1509,7 +1443,7 @@ const App: React.FC = () => {
                                 fetchTasks(undefined, workspaceId);
                             }
                         } else {
-                            console.log('[APP] Redirecting to check-in page (restored from localStorage)');
+                            devLog('[APP] Redirecting to check-in page (restored from localStorage)');
                             setView(AppView.CHECK_IN_OUT);
                         }
                         setWorkspacesLoading(false);
@@ -1526,7 +1460,7 @@ const App: React.FC = () => {
                 try {
                     const status = await window.electronAPI.oauthCheckStatus();
                     if (status.authenticated && status.user) {
-                        console.log('[APP] ✅ User is already authenticated on app load (from keytar)');
+                        devLog('[APP] User is already authenticated on app load (from keytar)');
                         
                         // IMPORTANT: Get login token from keytar and store in localStorage
                         // This is needed for API calls like checkFace and getCurrentStatus
@@ -1537,7 +1471,7 @@ const App: React.FC = () => {
                                 if (tokenResult.token) {
                                     loginToken = tokenResult.token;
                                     localStorage.setItem('login_token', loginToken);
-                                    console.log('[APP] ✅ Restored login_token from keytar to localStorage');
+                                    devLog('[APP] Restored login_token from keytar to localStorage');
                                 } else {
                                     console.warn('[APP] ⚠️ No login token found in keytar');
                                 }
@@ -1564,7 +1498,7 @@ const App: React.FC = () => {
                             setCurrentWorkspace(status.currentWorkspace as Workspace);
                             // Save workspace ID to localStorage for main process access
                             localStorage.setItem('current_workspace_id', String(status.currentWorkspace.workspace_id));
-                            console.log('[APP] ✅ Saved workspace ID to localStorage (from keytar):', status.currentWorkspace.workspace_id);
+                            devLog('[APP] Saved workspace ID to localStorage (from keytar):', status.currentWorkspace.workspace_id);
                         }
                         
                         // Check if user is already checked in before redirecting
@@ -1590,7 +1524,7 @@ const App: React.FC = () => {
                                 console.warn('[APP] Could not check attendance status:', error.message || error);
                                 // If error is about authentication, user needs to log in again
                                 if (error.message?.includes('token') || error.message?.includes('auth') || error.message?.includes('Unauthorized')) {
-                                    console.log('[APP] Authentication error, redirecting to login');
+                                    devLog('[APP] Authentication error, redirecting to login');
                                     setView(AppView.LOGIN);
                                     setWorkspacesLoading(false);
                                     return;
@@ -1629,7 +1563,7 @@ const App: React.FC = () => {
                         setWorkspacesLoading(false);
                         return; // Don't continue with authState.initialize() if already authenticated
                     } else {
-                        console.log('[APP] User is not authenticated, showing login page');
+                        devLog('[APP] User is not authenticated, showing login page');
                         setView(AppView.LOGIN);
                     }
                 } catch (error) {
@@ -1684,7 +1618,7 @@ const App: React.FC = () => {
                                 if (tokenResult.token) {
                                     loginToken = tokenResult.token;
                                     localStorage.setItem('login_token', loginToken);
-                                    console.log('[APP] ✅ Restored login_token from keytar to localStorage');
+                                    devLog('[APP] Restored login_token from keytar to localStorage');
                                 }
                             } catch (error) {
                                 console.warn('[APP] Could not get token from keytar:', error);
@@ -1744,7 +1678,7 @@ const App: React.FC = () => {
                             console.warn('[APP] Could not check attendance status:', error.message || error);
                             // If authentication error, redirect to login
                             if (error.message?.includes('token') || error.message?.includes('auth') || error.message?.includes('Unauthorized')) {
-                                console.log('[APP] Authentication error, redirecting to login');
+                                devLog('[APP] Authentication error, redirecting to login');
                                 setView(AppView.LOGIN);
                                 return;
                             }
@@ -1832,7 +1766,7 @@ const App: React.FC = () => {
                 if (window.electronAPI?.getTodayTasks) {
                     const tasks = await window.electronAPI.getTodayTasks();
                     setTodayTasks(tasks);
-                    console.log('[RESTORE] Fetched', tasks.length, 'tasks from today');
+                    devLog('[RESTORE] Fetched', tasks.length, 'tasks from today');
                     
                     // Update accumulated time for all today's tasks
                     const accumulated: Record<string, number> = {};
@@ -1849,7 +1783,7 @@ const App: React.FC = () => {
                     const lastState = await window.electronAPI.getLastActiveTaskState();
                     
                     if (lastState && lastState.projectId && lastState.taskId) {
-                        console.log('[RESTORE] Restoring last active task:', lastState.taskId, 'in project:', lastState.projectId);
+                        devLog('[RESTORE] Restoring last active task:', lastState.taskId, 'in project:', lastState.projectId);
                         
                         // Restore project and task selection
                         setSelectedProjectId(lastState.projectId);
@@ -1867,11 +1801,11 @@ const App: React.FC = () => {
                                 setElapsedSeconds(elapsedSeconds);
                             }
                             
-                            console.log('[RESTORE] Task selection restored with', elapsedSeconds, 'seconds of accumulated time');
+                            devLog('[RESTORE] Task selection restored with', elapsedSeconds, 'seconds of accumulated time');
                         }
                     } else {
                         // No saved state, but we have today's tasks - user can select one to continue
-                        console.log('[RESTORE] No saved state found, but', todayTasks.length, 'tasks available from today');
+                        devLog('[RESTORE] No saved state found, but', todayTasks.length, 'tasks available from today');
                     }
                 }
             } catch (error) {
@@ -2406,13 +2340,11 @@ const App: React.FC = () => {
     const captureInProgressRef = useRef<boolean>(false);
     
     useEffect(() => {
-        console.log('[CAPTURE-TRIGGER] Capture useEffect triggered:', {
+        devLog('[CAPTURE-TRIGGER] Capture useEffect triggered:', {
             activityLogsCount: activityLogs.length,
             isTimerRunning,
             selectedTaskId,
-            selectedProjectId,
             userStatus,
-            shouldRun: activityLogs.length > 0 && isTimerRunning && selectedTaskId && userStatus === 'working'
         });
         
         if (activityLogs.length > 0 && isTimerRunning && selectedTaskId && userStatus === 'working') {
@@ -2424,27 +2356,15 @@ const App: React.FC = () => {
                 log.projectId === selectedProjectId
             );
             
-            console.log('[CAPTURE-TRIGGER] Looking for log matching current task:', {
+            devLog('[CAPTURE-TRIGGER] Looking for log matching current task:', {
                 selectedTaskId,
-                selectedProjectId,
                 foundLog: !!latestLogForCurrentTask,
                 logId: latestLogForCurrentTask?.id,
-                allLogs: activityLogs.map(l => ({ 
-                    id: l.id, 
-                    taskId: l.taskId, 
-                    projectId: l.projectId,
-                    hasScreenshot: !!l.screenshotUrl,
-                    hasWebcam: !!l.webcamUrl
-                }))
             });
             
             // If no log found for current task, skip (might be a new task just started)
             if (!latestLogForCurrentTask) {
-                console.warn('[CAPTURE-TRIGGER] ⚠️ No log found for current task, skipping capture:', {
-                    selectedTaskId,
-                    selectedProjectId,
-                    availableLogs: activityLogs.map(l => ({ id: l.id, taskId: l.taskId, projectId: l.projectId }))
-                });
+                devWarn('[CAPTURE-TRIGGER] No log found for current task, skipping capture');
                 return;
             }
             
@@ -2452,24 +2372,19 @@ const App: React.FC = () => {
             
             // Skip if we already processed this log
             if (latestLog.id === lastProcessedLogIdRef.current) {
-                console.log('[CAPTURE-TRIGGER] Log already processed, skipping:', latestLog.id);
+                devLog('[CAPTURE-TRIGGER] Log already processed, skipping:', latestLog.id);
                 return;
             }
             
             // Skip if capture is already in progress for this log
             if (captureInProgressRef.current) {
-                console.log('[CAPTURE-TRIGGER] Capture already in progress, skipping duplicate...');
+                devLog('[CAPTURE-TRIGGER] Capture already in progress, skipping duplicate...');
                 return;
             }
             
             // Verify this log belongs to the current task
             if (latestLog.taskId !== selectedTaskId || latestLog.projectId !== selectedProjectId) {
-                console.warn('Log does not belong to current task, skipping capture:', {
-                    logTaskId: latestLog.taskId,
-                    currentTaskId: selectedTaskId,
-                    logProjectId: latestLog.projectId,
-                    currentProjectId: selectedProjectId
-                });
+                devWarn('Log does not belong to current task, skipping capture');
                 return;
             }
             
@@ -2485,25 +2400,11 @@ const App: React.FC = () => {
             const needsScreenshot = settings?.enableScreenshots !== false && !hasScreenshot;
             const needsWebcam = !hasWebcam;
             
-            console.log('[CAPTURE-TRIGGER] Capture check:', {
+            devLog('[CAPTURE-TRIGGER] Capture check:', {
                 logId: latestLog.id,
-                logTaskId: latestLog.taskId,
-                logProjectId: latestLog.projectId,
-                currentTaskId: selectedTaskId,
-                currentProjectId: selectedProjectId,
                 isFresh,
                 needsScreenshot,
                 needsWebcam,
-                hasScreenshot: hasScreenshot,
-                hasWebcam: hasWebcam,
-                screenshotUrl: latestLog.screenshotUrl || 'none',
-                screenshotUrlsCount: latestLog.screenshotUrls?.length || 0,
-                webcamUrl: latestLog.webcamUrl || 'none',
-                hasCameraStream: !!cameraStream,
-                enableScreenshots: settings?.enableScreenshots,
-                isDevMode,
-                timestamp: latestLog.timestamp.toISOString(),
-                timeSinceLog: (new Date().getTime() - latestLog.timestamp.getTime()) / 1000 + ' seconds'
             });
             
             // Always capture if needed (dev mode allows re-capture, production only captures fresh logs)
@@ -2769,7 +2670,7 @@ const App: React.FC = () => {
                     // Webcam photos only require webcam to be ready
                     
                     // Capture Screenshots and Webcam Photo SIMULTANEOUSLY (but independently)
-                    const screenshotCount = isDevMode ? 1 : (1 + Math.floor(Math.random() * 3)); // 1 in dev, 1-3 in prod
+                    const screenshotCount = 1; // Always capture 1 screenshot (both dev and prod)
                     console.log(`📸 Capturing ${screenshotCount} screenshot(s) and webcam photo simultaneously for log ${latestLog.id}...`);
                     console.log(`📸 Capture status:`, {
                         needsScreenshot,
@@ -2804,10 +2705,11 @@ const App: React.FC = () => {
                                             if (typeof screenshotResult === 'string') {
                                                 // Old format: just dataUrl string
                                                 dataUrl = screenshotResult;
-                                            } else if (typeof screenshotResult === 'object') {
+                                            } else if (screenshotResult && typeof screenshotResult === 'object') {
                                                 // New format: object with dataUrl and fileUrl
-                                                dataUrl = screenshotResult.dataUrl || null;
-                                                fileUrl = screenshotResult.fileUrl || null;
+                                                const resultObj = screenshotResult as { dataUrl?: string; fileUrl?: string };
+                                                dataUrl = resultObj.dataUrl || null;
+                                                fileUrl = resultObj.fileUrl || null;
                                             }
                                             
                                             if (fileUrl) {
@@ -3105,7 +3007,7 @@ const App: React.FC = () => {
                     captureMedia();
                 }, 1000); // Increased delay to ensure everything is ready
             } else {
-                console.log('[CAPTURE-TRIGGER] Media capture skipped:', {
+                devLog('[CAPTURE-TRIGGER] Media capture skipped:', {
                     isFresh,
                     needsScreenshot,
                     needsWebcam,
@@ -3120,11 +3022,10 @@ const App: React.FC = () => {
                 }
             }
         } else {
-            console.log('[CAPTURE-TRIGGER] ⚠️ Capture conditions not met:', {
+            devLog('[CAPTURE-TRIGGER] Capture conditions not met:', {
                 activityLogsCount: activityLogs.length,
                 isTimerRunning,
                 selectedTaskId,
-                selectedProjectId,
                 userStatus,
                 allConditionsMet: activityLogs.length > 0 && isTimerRunning && selectedTaskId && userStatus === 'working'
             });
@@ -3421,14 +3322,24 @@ const App: React.FC = () => {
             return;
         }
 
-        // Check for API URL from environment variables first, then settings
+        // Check for API URL from environment variables first, then settings, then default config
         const envApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
         const settings = await window.electronAPI.getSettings();
-        const apiBaseUrl = envApiBaseUrl || settings?.apiBaseUrl;
+        const defaultApiConfig = getApiConfig();
+        const apiBaseUrl = envApiBaseUrl || settings?.apiBaseUrl || defaultApiConfig.baseUrl;
         
         if (!apiBaseUrl) {
             setLoginOAuthStatus('Please configure API Base URL in Settings or .env.local file');
             return;
+        }
+        
+        // If no API URL was configured, use the default and save it to settings
+        if (!envApiBaseUrl && !settings?.apiBaseUrl) {
+            await window.electronAPI.setSettings({
+                ...settings,
+                apiBaseUrl: defaultApiConfig.baseUrl,
+                apiEnabled: import.meta.env.VITE_API_ENABLED === 'true' || settings?.apiEnabled || defaultApiConfig.enabled,
+            });
         }
         
         // If we have env var but not in settings, update settings

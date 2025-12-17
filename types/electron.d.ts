@@ -11,7 +11,7 @@ declare global {
             windowIsMaximized: () => Promise<boolean>;
             
             // Screenshot & capture
-            captureScreenshot: (isBlurred?: boolean) => Promise<string | null>;
+            captureScreenshot: (isBlurred?: boolean) => Promise<string | { dataUrl?: string; fileUrl?: string } | null>;
             
             // Activity monitoring
             getActiveWindow: () => Promise<{ title: string; owner: string; url: string | null; app: string }>;
@@ -22,7 +22,7 @@ declare global {
             // Task tracking data management
             getCurrentTaskTracking: () => Promise<any | null>;
             addActivityLogToTask: (activityLog: any) => Promise<boolean>;
-            addWebcamPhotoToTask: (photoDataUrl: string) => Promise<boolean>;
+            addWebcamPhotoToTask: (photoDataUrl: string) => Promise<string | null>;
             deleteTrackingImage: (imageId: number) => Promise<{ success: boolean; error?: string; message?: string }>;
             saveTaskTrackingData: (projectId?: string, taskId?: string, taskName?: string, projectName?: string) => Promise<boolean>;
             loadTaskTrackingData: (projectId: string, taskId: string, dateFilter?: 'today' | 'all') => Promise<any | null>;
