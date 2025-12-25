@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, nativeImage, globalShortcut, Tray, Menu, dialog } = require('electron');
 const { autoUpdater } = require('electron-updater');
+const log = require('electron-log');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -5652,6 +5653,10 @@ function createTray() {
     }
   }, 100);
 }
+
+// Configure auto-updater logging
+autoUpdater.logger = log;
+autoUpdater.logger.transports.file.level = 'info';
 
 // Auto-updater event listeners
 autoUpdater.on('checking-for-update', () => {
