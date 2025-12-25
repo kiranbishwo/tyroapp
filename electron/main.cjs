@@ -5660,10 +5660,13 @@ autoUpdater.logger.transports.file.level = 'info';
 
 // Auto-updater event listeners
 autoUpdater.on('checking-for-update', () => {
+  log.info('Checking for update...');
   console.log('Checking for update...');
 });
 
-autoUpdater.on('update-available', () => {
+autoUpdater.on('update-available', (info) => {
+  log.info('Update available:', info);
+  console.log('Update available:', info);
   dialog.showMessageBox({
     type: 'info',
     title: 'Update available',
@@ -5671,7 +5674,14 @@ autoUpdater.on('update-available', () => {
   });
 });
 
-autoUpdater.on('update-downloaded', () => {
+autoUpdater.on('update-not-available', (info) => {
+  log.info('Update not available:', info);
+  console.log('Update not available:', info);
+});
+
+autoUpdater.on('update-downloaded', (info) => {
+  log.info('Update downloaded:', info);
+  console.log('Update downloaded:', info);
   dialog.showMessageBox({
     title: 'Update Ready',
     message: 'Update downloaded. App will restart now.',
@@ -5681,7 +5691,17 @@ autoUpdater.on('update-downloaded', () => {
 });
 
 autoUpdater.on('error', (err) => {
+  log.error('Update error:', err);
   console.error('Update error:', err);
+  // Log detailed error information
+  if (err.message) {
+    log.error('Error message:', err.message);
+    console.error('Error message:', err.message);
+  }
+  if (err.stack) {
+    log.error('Error stack:', err.stack);
+    console.error('Error stack:', err.stack);
+  }
 });
 
 // This method will be called when Electron has finished initialization
@@ -5707,6 +5727,10 @@ app.whenReady().then(async () => {
 
   // Check for updates (only in production)
   if (!isDev) {
+    log.info('Starting auto-updater check...');
+    log.info('Update URL:', autoUpdater.getFeedURL());
+    console.log('Starting auto-updater check...');
+    console.log('Update URL:', autoUpdater.getFeedURL());
     autoUpdater.checkForUpdatesAndNotify();
   }
 
